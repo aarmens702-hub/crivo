@@ -1,4 +1,4 @@
-<svg width="1200" height="300" viewBox="0 0 1200 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="crivo. Finds what is wrong with your data, and proves every fix. No API key, 22 checks, every fix verified.">
+<svg width="1200" height="300" viewBox="0 0 1200 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="crivo. Finds what is wrong with your data, and proves every fix. No API key, 26 checks, every fix verified.">
   <style>
     .mark { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-weight: 800; letter-spacing: -0.03em; }
     .tag  { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-weight: 400; }
@@ -37,5 +37,5 @@
   <text x="216" y="192" class="tag" font-size="20" fill="#a9d6d6">the AI analyst that proves every fix and every answer.</text>
 
   <line x1="216" y1="216" x2="742" y2="216" stroke="#2c6b72" stroke-width="1.4"/>
-  <text x="216" y="246" class="meta" font-size="15"><tspan fill="#6fb9bf">no api key</tspan><tspan fill="#345d62">   ·   </tspan><tspan fill="#6fb9bf">22 checks</tspan><tspan fill="#345d62">   ·   </tspan><tspan fill="#6fb9bf">every fix verified</tspan></text>
+  <text x="216" y="246" class="meta" font-size="15"><tspan fill="#6fb9bf">no api key</tspan><tspan fill="#345d62">   ·   </tspan><tspan fill="#6fb9bf">26 checks</tspan><tspan fill="#345d62">   ·   </tspan><tspan fill="#6fb9bf">every fix verified</tspan></text>
 </svg>

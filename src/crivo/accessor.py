@@ -37,7 +37,7 @@ class AnalystAccessor:
             )
 
     def diagnose(self, name: str | None = None):
-        """Diagnose the frame against the 22-check engine — see api.diagnose."""
+        """Diagnose the frame against the 26-check engine — see api.diagnose."""
         from crivo.api import diagnose  # lazy: keep import side-effect-free
 
         return diagnose(self._obj, name=name)

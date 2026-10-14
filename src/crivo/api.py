@@ -299,7 +299,7 @@ def export_notebook(source, path) -> Path:
 
 
 def diagnose(data, name: str | None = None) -> Report:
-    """Diagnose a DataFrame or a file path against the 22-check engine.
+    """Diagnose a DataFrame or a file path against the 26-check engine.
 
     Pure and keyless: no model, no kernel. A path is read with `read` (format
     sniffed, sentinels preserved); a DataFrame is used as-is.

@@ -6,182 +6,163 @@
 
 **An AI analyst for messy data. It diagnoses, cleans, and answers questions over your tables, and every fix and answer is re-checked before it counts.**
 
-[![ci](https://github.com/aarmens702-hub/analyst-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/aarmens702-hub/analyst-agent/actions/workflows/ci.yml)
+[![ci](https://github.com/aarmens702-hub/crivo/actions/workflows/ci.yml/badge.svg)](https://github.com/aarmens702-hub/crivo/actions/workflows/ci.yml)
 ![python](https://img.shields.io/badge/python-3.12-0e7a84)
-&nbsp;
-![verified fixes](https://img.shields.io/badge/verified_fixes-0b2b30)
-![sandboxed](https://img.shields.io/badge/sandboxed-0b2b30)
-![keyless mode](https://img.shields.io/badge/keyless_mode-0b2b30)
+[![license](https://img.shields.io/badge/license-MIT-0b2b30)](LICENSE)
 
-[What it does](#what-it-does) · [How it works](#how-it-works) · [The analyst](#the-analyst) · [MCP server](#mcp-server)
+[Quickstart](#quickstart) · [How it works](#how-it-works) · [The 26 checks](#the-26-checks) · [Benchmarks](#benchmarks) · [MCP server](#mcp-server) · [CI](#in-ci)
 
 </div>
 
-Most tools will chat with your dataframe. None of them check whether what came
+Most tools will chat with your dataframe. Few of them check whether what came
 back was right. crivo does. It reads a messy table, tells you what is broken,
 fixes what is safe to fix, answers your questions, and re-runs the check on
-every step before it keeps it. When all you need is the diagnosis, that half is
-plain Python and runs without a key.
+every step before it keeps it. A fix that does not pass its re-check is
+reverted, not kept.
 
-## Start here
+It has two halves. The **library** (`diagnose`, `clean`, `read`) is plain
+Python: no API key, no kernel, nothing to trust yet. The **analyst** is a model
+driving a sandboxed IPython kernel: it writes the pandas that answers your
+question or lands the harder fix, and every answer comes back with the code it
+ran, the checks that passed, and where the numbers came from.
 
-Not on PyPI yet, so install it from the repo:
+## Quickstart
+
+Not on PyPI yet, so install from the repo:
 
 ```bash
-pip install git+https://github.com/aarmens702-hub/analyst-agent
+pip install git+https://github.com/aarmens702-hub/crivo
 ```
 
-Set a model key and you have an analyst in your terminal:
-
-```bash
-echo 'DEEPSEEK_API_KEY=sk-...' > .env       # or ANTHROPIC_API_KEY
-python -m crivo
-```
-
-```
-/load data/messy.csv sales      load a file as a variable
-which region grew the most?     ask in plain english; the code is gated, then runs
-/clean sales                    diagnose, then fix one at a time
-/why                            where an answer came from, and whether it holds
-/skills                         the fixes it has learned and kept
-```
-
-No key handy? The library half works without one, straight from Python:
+### Diagnose and clean, no key needed
 
 ```python
 import crivo as cv
 
-df = cv.read("transactions.csv")        # any format, sentinel-safe
-report = cv.diagnose(df)                # runs the checks, no key, no kernel
-report                                  # prints the list, or a card in a notebook
-report.suggest()                        # starter questions for this dataset
-
-cleaned, summary = cv.clean(df)         # applies the safe fixes, re-checks each one
-summary.cells()                         # the receipts: exactly what changed, per fix
-summary.needs_review                    # the ambiguous ones it will not guess on
-cv.write(cleaned, "clean.parquet")      # your data back out, any format
+df = cv.load_example()          # a small messy sales table; or cv.read("your.csv")
+report = cv.diagnose(df)
+report
 ```
 
-`crivo.read` handles the formats you actually get data in: csv, tsv, parquet, xlsx,
-json, jsonl, feather, orc, compressed files (`.gz`, `.zip`, `.bz2`), parquet
-folders, a database connection, or a JSON API.
+```
+dataframe — 60 rows × 5 columns
+
+  5 fixable · 0 flagged · 20 signals clear
+
+  d01  numbers-as-strings  [revenue]
+        2 number formats in one column (bare 90%, symbol 7%)
+        safe to fix automatically · confidence 0.95
+
+  d04  sentinel-missing  [units]
+        3/60 values are missing-data tokens ('N/A') masquerading as data
+        safe to fix automatically · confidence 0.91
+
+  d06  whitespace-damage  [note]
+        4/60 values carry stray whitespace; samples: '  follow up  ', 'double  space', ' padded'
+        safe to fix automatically · confidence 0.99
+
+  d07  case-spelling-variants  [region]
+        9 distinct values collapse to 4 once case and whitespace are normalised; samples: 'north', 'south', 'NORTH'
+        safe to fix automatically · confidence 0.95
+
+  d09  duplicate-rows  [whole table]
+        2 of 60 rows are byte-identical repeats of an earlier row
+        safe to fix automatically · confidence 1.00
+
+  checked and clean: 2-3, 5, 8, 10-19, 21-26
+```
+
+```python
+cleaned, summary = cv.clean(df)   # applies the safe fixes, re-checks each one
+summary.samples()                 # the receipts: old value, new value, row, per fix
+summary.needs_review              # what it would not decide for you (here: dropping rows)
+cv.write(cleaned, "clean.parquet")
+```
+
+In a notebook, `report` and `summary` render as cards. `report.plot()` draws a
+chart of what is wrong per column, and `df.crivo.diagnose()` works as an
+accessor once crivo is imported.
+
+### The analyst, with a model key
+
+```bash
+echo 'DEEPSEEK_API_KEY=sk-...' > .env       # or CRIVO_PROVIDER=claude + ANTHROPIC_API_KEY
+python -m crivo
+```
+
+```
+/load data/sales.csv sales      load a file as a variable
+which region grew the most?     ask in plain English; you approve the code, then it runs
+/clean sales                    diagnose, then fix
+/why                            where an answer came from, and whether it holds
+/skills                         the fixes it has learned and kept
+```
+
+Or one question from Python: `cv.ask(df, "which region grew the most?")`
+returns an `Answer` with the text, the code, the checks, and the lineage.
 
 ## What it does
 
-- Answers plain-english questions over your data and ships every answer with
-  the code it ran, the checks that passed, and where the numbers came from.
-- Runs 22 checks on any table and grades each finding: safe to fix, fix with a
-  check, or needs a person.
-- Fixes the safe ones and re-checks every fix. If the check still fires, it
-  throws the fix out and reports it instead of keeping a bad one.
-- Saves a fix that worked as a reusable skill, but only after it passes its own
-  test and you say yes.
-- Reads from files, compressed files, folders, databases, and JSON APIs, all
-  through one `crivo.read`.
-- Shows up as a card in a notebook, and a data-quality chart with `.plot()`.
-- Runs as an MCP server, so Claude Desktop, Cursor, or Claude Code can call it.
-- Has a headless mode for CI, where only the safe fixes run and the rest are
-  reported.
+- **Diagnoses** any table against [26 named checks](#the-26-checks) and grades
+  each finding: safe to fix, fix and confirm, or needs a person.
+- **Cleans** the safe ones and re-checks every fix. If the check still fires,
+  the fix is reverted and reported instead of kept.
+- **Answers questions** in plain English and ships each answer with its code,
+  the assertions that passed, and its lineage back to the raw file.
+- **Learns.** A fix that worked becomes a reusable skill, but only after it
+  passes its own test and a person says yes. Skills that stop working retire.
+- **Reads** csv, tsv, parquet, xlsx, json, jsonl, feather, orc, Stata, SAS,
+  compressed files, parquet folders, SQL databases, and JSON APIs through one
+  `cv.read`, and writes most of them back with `cv.write`.
+- **Goes further than one table:** PII detection (`report.pii()`), a
+  shareable HTML report (`report.to_html()`), a before/after comparison
+  (`cv.compare`), a keyed row diff (`cv.reconcile`), "why did this metric
+  change" (`cv.drivers`), messy-Excel layout detection (`cv.analyze_excel`),
+  and a reproducible notebook export (`cv.export_notebook`).
+- **Plugs in** as an MCP server for Claude Desktop, Claude Code, or Cursor,
+  and as a GitHub Action that fails a build on bad data.
 
 ## How it works
 
-**Two halves.** The analyst half is the model: it writes and runs the code that
-answers your questions and lands the harder fixes, but it never sees your raw
-rows, only the schema and a few samples, and every step waits for your OK. The
-library half (`diagnose`, `clean`, `read`) is plain Python: no key, no kernel,
-nothing to trust yet.
+**One rule.** A fix counts only when the check that found the problem stops
+firing, the row count is what it should be, and every column the fix did not
+touch is byte-identical to before. If any of that fails, the frame is restored
+from a backup and the failure is reported. Nothing is trusted because a rule
+ran. It is trusted because the signal went quiet.
 
-**One rule for both.** A fix counts only when the check that found the problem
-stops firing, and the rows and untouched columns still line up. If it does not
-clear, the fix is reverted and sent back to you. Nothing is trusted because a
-rule ran. It is trusted because the signal went quiet.
-
-**A trail on every answer.** An answer is trusted only if you can trace it back
-to the raw bytes through checks that passed at each step. `/why` prints that path,
-and says how it broke when it breaks.
-
-Every finding gets one of three grades:
+**Three grades.** Every finding gets one:
 
 | grade | means | what happens |
 | --- | --- | --- |
-| safe | mechanical, no judgement | fixed and re-checked |
-| check | one plausible fix, worth confirming | fixed, then flagged |
-| person | a real judgement call | reported, never decided for you |
+| `AUTO` | mechanical, no judgement | fixed and re-checked |
+| `GATE` | one plausible fix, worth confirming | proposed, re-checked, waits for a yes |
+| `HUMAN` | a real judgement call | reported, never decided for you |
 
-## The analyst
+**Who decides.** By default, the mechanical fixes crivo has a built-in fixer
+for apply on their own, each one re-checked and reverted if it fails. Anything
+the model wrote, and every judgement call, stops at a gate where you run it,
+send a note back, or skip it. `--autonomy careful` asks before every fix;
+`--autonomy report-only` changes nothing. No level lets the model admit a
+skill or decide a `HUMAN` finding.
 
-The analyst is the main event: it turns a question into pandas, runs it, and
-hands back an answer card with the code, the checks that passed, and the lineage
-behind every number. It earns that with a strict contract. Every line of
-model-written code stops at a gate: you run it, send a note back, or skip it.
-The kernel is a subprocess by default, or a `--network=none` container in
-sandbox mode.
-
-## Models
-
-DeepSeek is the default; the same seam speaks to Anthropic and to any
-OpenAI-compatible endpoint, local models included:
-
-```bash
-DEEPSEEK_API_KEY=sk-...                       # default provider
-CRIVO_PROVIDER=claude ANTHROPIC_API_KEY=...   # Anthropic
-CRIVO_PROVIDER=openai \
-  CRIVO_BASE_URL=http://localhost:11434/v1 \
-  CRIVO_MODEL=qwen3:32b python -m crivo       # Ollama, vLLM, OpenRouter, ...
-```
-
-`CRIVO_MODEL` overrides the model on any provider; local servers need no
-key (`CRIVO_API_KEY` if yours does). Slow local endpoints can raise the
-stream budgets with `CRIVO_STALL_S` / `CRIVO_MAX_CALL_S`.
-
-## MCP server
-
-Any MCP client can drive crivo as tools. The gates follow the same rule
-as headless mode: the safe fixes run, the judgement calls come back for a person,
-and the calling agent never decides them.
-
-| tool | what it does |
-| --- | --- |
-| `diagnose_file` | the 22-check report on a file. free, keyless, read-only |
-| `clean_file` | headless clean; judgement calls are reported, not decided |
-| `open_data` | load a file into a session and get a profile |
-| `ask` | answer a question over a session, with checks and lineage |
-| `why` | the trail behind a session's answers |
-| `close_session` | shut the session down |
-
-## In one sentence
-
-It is the plain-english analysis of pandas-ai and the one-line report of
-ydata-profiling, but every fix and answer comes with a receipt, and the checks
-still run when there is no key at all.
-
-<details>
-<summary><b>The 22 checks</b></summary>
-
-<br>
-
-Numbers stored as text, mixed date formats, fake missing values (`N/A`, `-`, `null`
-typed into a cell), whitespace and encoding damage, spelling and case variants of
-the same category, duplicate rows, near-duplicate rows, constant columns, columns
-that are almost entirely empty, values that contradict each other, outliers,
-schema drift across a set of files, and more. Each one is a named detector that
-either fires with evidence or reports the column clean. Absence is a checked
-claim, not a silence.
-
-</details>
+**A trail on every answer.** Provenance is a graph from the raw bytes to the
+answer. An answer is trusted only if it is reachable from a raw file through
+steps whose checks passed. `/why` prints that path, and says how it broke when
+it breaks: "nothing grounds this" and "a step on the path failed" are
+different answers.
 
 <details>
 <summary><b>How the analyst runs code safely</b></summary>
 
 <br>
 
-The model runs on the host. It drives an IPython kernel that lives inside a
-container (a subprocess in dev, `--network=none` in sandbox mode) over a small
-stdio protocol. Your datasets are variables in that kernel. The model sees the
+The model runs on the host. It drives an IPython kernel over a small stdio
+protocol: a subprocess by default, or a `--network=none` Docker container with
+`--docker`. Your datasets are variables in that kernel. The model sees the
 schema, some statistics, and truncated samples, never the raw rows. It writes
-short pandas cells; each one stops at a gate; a traceback comes back as the next
-thing it reads and works from. A cleaned dataset is always a copy with its lineage
-recorded. Recursion is capped at one level.
+short pandas cells; a traceback comes back as the next thing it reads. A
+cleaned dataset is always a copy with its lineage recorded, and verified fixes
+survive a kernel crash through namespace snapshots.
 
 </details>
 
@@ -191,31 +172,58 @@ recorded. Recursion is capped at one level.
 <br>
 
 After a clean run, each fix the model wrote is rewritten as a general
-`fix(df, columns)` and has to earn its place. It has to trip the detector on the
-original frozen case, clear it, and leave the never-broken rows alone. Its own
-shipped test has to pass. Then a person says yes. New skills start on probation
-(retrieved and applied, but always gated). Three wins across two different
-datasets promote a skill; two failures in a row retire it. No model decides
-admission; the sandbox and a person do.
+`fix(df, columns)` and has to earn its place. On the original frozen case it
+has to trip the detector, clear it, and leave the rows that were never broken
+alone. That last part matters: a "fix" that blanks the whole column also
+clears the detector. Its own shipped test has to pass in the sandbox. Then a
+person says yes.
+
+New skills start on probation: retrieved and applied, but always gated. Three
+wins across two different datasets promote a skill; two failures in a row
+retire it to `skills/retired/`, kept as evidence. No model decides admission.
+The longer version is in [docs/what-this-is.md](docs/what-this-is.md).
 
 </details>
 
-## In CI — a linter for data
+## The 26 checks
 
-`crivo diagnose` exits like a linter: `0` clean, `1` findings at or above
-`--fail-on` (default `GATE`, "anything needing a person"), `2` broken input.
-As a GitHub Action:
+Each check is a named detector that either fires with evidence or reports the
+column clean. Absence is a checked claim, not a silence.
 
-```yaml
-- uses: aarmens702-hub/crivo@main
-  with:
-    path: data/latest-export.csv
-    fail-on: GATE
-```
-
-Or anywhere else: `crivo diagnose file.csv --fail-on AUTO --json`.
+| | check | catches |
+| --- | --- | --- |
+| d01 | numbers-as-strings | `$1,200` and `12%` in a column that should be numeric |
+| d02 | dates-as-strings | dates stored as text |
+| d03 | mixed-date-formats | `03/04/2024` next to `2024-04-03` |
+| d04 | sentinel-missing | `N/A`, `-`, `null`, `-999` typed in where a value is missing |
+| d05 | suppression-codes | tokens like `<5` mixed into a numeric column |
+| d06 | whitespace-damage | leading, trailing, doubled, and non-breaking spaces |
+| d07 | case-spelling-variants | `North`, `north`, `NORTH ` as three categories |
+| d08 | encoding-mojibake | `cafÃ©` where `café` was meant |
+| d09 | duplicate-rows | exact repeats |
+| d10 | near-duplicate-rows | the same record with a small drift |
+| d11 | key-violations | an ID column that should be unique and is not |
+| d12 | field-contradictions | one zip code, two cities |
+| d13 | out-of-domain-values | negative quantities, dates in 2099 |
+| d14 | broken-coordinates | swapped or out-of-range latitude and longitude |
+| d15 | statistical-outliers | values far outside the column's spread |
+| d16 | unit-heterogeneity | kg and lb in the same column |
+| d17 | packed-fields | several values crammed into one cell |
+| d18 | header-damage | blank, duplicated, or padded column names |
+| d19 | empty-constant-columns | columns that are empty or hold one value |
+| d20 | schema-drift | columns that change across a set of files |
+| d21 | aggregate-rows | a `TOTAL` row sitting in the data |
+| d22 | id-numeric-corruption | IDs that lost leading zeros or became floats |
+| d23 | boolean-chaos | `yes`, `Y`, `TRUE`, `1` in one column |
+| d24 | stray-structural-rows | repeated headers and footer junk from stacked exports |
+| d25 | duplicated-columns | the same column twice under different names |
+| d26 | truncated-values | values cut off at a length limit or with `...` |
 
 ## Benchmarks
+
+Measured with no model and no labels: synthetic datasets with planted damage
+plus four public dirty datasets (Raha's hospital, flights, beers, and rayyan),
+scored cell by cell against the known truth.
 
 <!-- bench:start -->
 **Deterministic mode baseline** (2026-09-07, 1450 synthetic + 4 external datasets, cell-level scoring, 0 labels):
@@ -229,19 +237,86 @@ Or anywhere else: `crivo diagnose file.csv --fail-on AUTO --json`.
 Full tables: `bench/RESULTS.md`.
 <!-- bench:end -->
 
-## Where it's at
+Survived-verification is the share of attempted fixes that passed their
+re-check. The other third were reverted rather than kept, which is the system
+working: a fixer that cannot prove its fix refuses it. Reproduce with
+`uv run python -m bench.run --full` (the CI smoke run is the default); method and caveats are in
+[bench/RESULTS.md](bench/RESULTS.md).
 
-409 tests pass. The analyst half needs a model key and a kernel. The library
-half does no network, subprocess, or Docker work when you import it, so it is
-safe to use in any notebook cell. MIT licensed. Not on PyPI yet; publishing is
-the next step.
+## Models
+
+DeepSeek is the default. The same seam speaks to Anthropic and to any
+OpenAI-compatible endpoint, local models included:
+
+```bash
+DEEPSEEK_API_KEY=sk-...                       # default provider
+CRIVO_PROVIDER=claude ANTHROPIC_API_KEY=...   # Anthropic
+CRIVO_PROVIDER=openai \
+  CRIVO_BASE_URL=http://localhost:11434/v1 \
+  CRIVO_MODEL=qwen3:32b python -m crivo       # Ollama, vLLM, OpenRouter, ...
+```
+
+`CRIVO_MODEL` overrides the model on any provider, and `CRIVO_API_KEY` is used
+if your endpoint needs one. Slow local endpoints can raise the stream budgets
+with `CRIVO_STALL_S` and `CRIVO_MAX_CALL_S`.
+
+## MCP server
+
+`crivo-mcp` exposes crivo as tools to any MCP client. The gates follow the same
+rule as everywhere else: safe fixes run, judgement calls come back to a person,
+and the calling agent never decides them.
+
+| tool | what it does |
+| --- | --- |
+| `diagnose_file` | the 26-check report on a file. Keyless and read-only |
+| `clean_file` | a headless clean; judgement calls are reported, not decided |
+| `open_data` | load a file into a session and get a profile |
+| `ask` | answer a question over a session, with checks and lineage |
+| `why` | the trail behind a session's answers |
+| `close_session` | shut the session down |
+
+## In CI
+
+`crivo diagnose` exits like a linter: `0` clean, `1` findings at or above
+`--fail-on` (default `GATE`, meaning anything that needs a person), `2` for a
+file it could not read. As a GitHub Action:
+
+```yaml
+- uses: actions/checkout@v4
+- uses: aarmens702-hub/crivo@main
+  with:
+    path: data/latest-export.csv
+    fail-on: GATE
+```
+
+Or anywhere else: `crivo diagnose file.csv --fail-on AUTO --json`.
+
+## Status
+
+Over 1,000 tests pass on Linux and macOS in CI. The library half does no
+network, subprocess, or Docker work on import, so it is safe in any notebook
+cell. Not on PyPI yet. The current plan and what is next live in
+[specs/2026-09-06-master-plan.md](specs/2026-09-06-master-plan.md).
+
+## Repo map
+
+| path | what is there |
+| --- | --- |
+| `src/crivo/` | the library, the analyst loop, the kernel supervisor, the MCP server |
+| `bench/` | the benchmark: corruption injectors, truth manifests, scorer, results |
+| `skills/` | skills the analyst has learned and a person admitted |
+| `specs/` | a design spec for every phase, newest last |
+| `docs/` | the longer explanation, a first-run walkthrough, review findings |
 
 ## Development
 
 ```bash
-uv run pytest                    # the full suite
-uv run pytest -m docker          # the container tests, opt in
+uv sync
+uv run pytest                      # the suite
+uv run pytest -m docker            # the container tests, opt in
 uv run ruff check --fix . && uv run ruff format .
 ```
 
-Specs live in `specs/`. The design notes for each phase are there, newest last.
+## License
+
+MIT. See [LICENSE](LICENSE).

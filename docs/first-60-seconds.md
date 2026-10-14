@@ -1,57 +1,55 @@
 # First 60 seconds
 
-Not just install — this is the shortest path to a cleaned file and an honest
-report of what didn't get fixed. Four steps, all copy-pasteable. Nothing
-before step 4 needs a model key, a kernel, or Docker.
+The shortest path to a cleaned file and an honest report of what did not get
+fixed. Four steps, all copy-pasteable. Nothing before step 4 needs a model
+key, a kernel, or Docker.
 
 ## 1. Install
 
 ```bash
-# from source today; `pip install crivo` once published — see the
-# README's Publishing status: publish-ready, not published
-uv add git+https://github.com/aarmens702-hub/analyst-agent
+# from source until crivo is on PyPI
+uv add git+https://github.com/aarmens702-hub/crivo
 ```
 
-## 2. Diagnose — the 22-check report, as a card
+## 2. Diagnose: the 26-check report, as a card
 
 ```python
 import crivo
 
-df = crivo.read("your_data.csv")   # csv, tsv, parquet, xlsx, json, jsonl — reader picks the format
+df = crivo.read("your_data.csv")   # csv, tsv, parquet, xlsx, json, jsonl, ...
 df.crivo.diagnose()
 ```
 
-In a notebook, that line *is* the output: a styled, severity-coloured card,
-not a wall of text. `import crivo as aa` registers the `.aa` accessor
-on every DataFrame — after that one import, `df.crivo.diagnose()` reads like
-`df.describe()`. Detection is pure Python: no key, no kernel, no Docker.
+In a notebook, that line is the output: a severity-coloured card, not a wall
+of text. Importing crivo registers the `df.crivo` accessor on every
+DataFrame, so `df.crivo.diagnose()` reads like `df.describe()`. Detection is
+pure Python: no key, no kernel, no Docker.
 
-Working in a script instead of a notebook, or you just prefer a function
-call? `crivo.diagnose(df)` (or `crivo.diagnose("your_data.csv")` straight from a
-path) returns the same `Report` — `print()` it for the text version, or run
-`crivo diagnose your_data.csv` from the command line for the same
-report in colour, no Python at all.
+In a script, `crivo.diagnose(df)` (or `crivo.diagnose("your_data.csv")`
+straight from a path) returns the same `Report`; `print()` it for the text
+version. From the command line, `crivo diagnose your_data.csv` prints the same
+report in colour.
 
-## 3. Clean — safe fixes applied, the rest deferred honestly
+## 3. Clean: safe fixes applied, the rest reported
 
 ```python
-cleaned, summary = df.crivo.clean()   # or crivo.clean(df, policy="auto")
-summary                             # renders as a card: before/after per fix
+cleaned, summary = df.crivo.clean()    # or crivo.clean(df)
+summary                                # renders as a card: before/after per fix
 crivo.write(cleaned, "cleaned.xlsx")   # format from the extension
 ```
 
-`clean` only auto-applies a fix it can verify by re-running the detector that
-found the problem in the first place: numbers stored as text, mixed date
-formats, sentinel "missing" values, stray whitespace, case variants,
-constant columns. Still no model. Anything that deletes rows (duplicates,
-near-duplicates) or needs a judgement call — ambiguous money conventions,
-contradictions, outliers — is *reported*, not decided; it shows up in
-`summary.needs_review` instead of getting silently resolved for you.
+`clean` only applies a fix it can verify by re-running the detector that found
+the problem: numbers stored as text, mixed date formats, sentinel "missing"
+values, stray whitespace, case variants, constant columns. Still no model.
+Anything that deletes rows (duplicates, near-duplicates) or needs a judgement
+call (ambiguous money conventions, contradictions, outliers) is reported, not
+decided. It shows up in `summary.needs_review` instead of being silently
+resolved for you.
 
-## 4. The hard fixes — run the agent
+## 4. The hard fixes: run the analyst
 
-The findings `clean` deferred are exactly the ones worth a second pair of
-eyes, human or model. Point the agent at the same file:
+The findings `clean` deferred are the ones worth a second pair of eyes, human
+or model. Point the analyst at the same file:
 
 ```bash
 uv sync
@@ -64,15 +62,15 @@ uv run python -m crivo
 /clean df
 ```
 
-Every fix the agent proposes stops at a gate — `[r]un` executes it,
-`[j]eject` sends a steering note back, `[s]kip` leaves it unfixed — so
-nothing judgement-shaped gets decided without you watching it happen. See
-[the agent](../README.md#the-agent) for the rest of the REPL, or
-[MCP server](../README.md#mcp-server) to drive the same loop from Claude
-Desktop, Claude Code, or Cursor instead of the terminal.
+Every fix the model writes stops at a gate: `[r]un` executes it, `re[j]ect`
+sends a steering note back, `[s]kip` leaves it unfixed. Nothing
+judgement-shaped gets decided without you watching. See
+[the analyst](../README.md#the-analyst-with-a-model-key) for the rest of the
+REPL, or the [MCP server](../README.md#mcp-server) to drive the same loop from
+Claude Desktop, Claude Code, or Cursor instead of the terminal.
 
 ---
 
-That's the whole path: a report you can trust from cell one, a clean pass
-that only claims what it verified, and an agent for the part that genuinely
-needs judgement. No API key until step 4.
+That is the whole path: a report you can trust from the first cell, a clean
+pass that only claims what it verified, and an analyst for the part that needs
+judgement. No API key until step 4.

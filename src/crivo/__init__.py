@@ -3,7 +3,7 @@
 The public library surface is keyless and kernel-free:
 
     import crivo
-    report = crivo.diagnose("data.xlsx")   # 22 checks, no key, no setup
+    report = crivo.diagnose("data.xlsx")   # 26 checks, no key, no setup
     print(report)
     df = crivo.read("data.csv"); crivo.write(df, "clean.parquet")
 
