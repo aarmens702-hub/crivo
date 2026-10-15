@@ -1,0 +1,12 @@
+# Aarmen owns the code and docs. The core files need his review before they
+# land; see AGENTS.md ("The core is reviewed, not delegated").
+*                               @aarmens702-hub
+/src/crivo/loop.py              @aarmens702-hub
+/src/crivo/prompts.py           @aarmens702-hub
+/src/crivo/llm.py               @aarmens702-hub
+/src/crivo/card.py              @aarmens702-hub
+/src/crivo/library.py           @aarmens702-hub
+/src/crivo/skills.py            @aarmens702-hub
+/src/crivo/provenance.py        @aarmens702-hub
+/src/crivo/detect.py            @aarmens702-hub
+/docs/API-CONTRACT.md           @aarmens702-hub

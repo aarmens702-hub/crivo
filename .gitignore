@@ -30,3 +30,7 @@ takehome/
 # macOS noise
 .DS_Store
 bench/results/
+
+# per-task git worktrees (/start-task)
+.worktrees/
+!.env.example

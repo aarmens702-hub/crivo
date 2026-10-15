@@ -1,0 +1,166 @@
+# API contract
+
+Build against this exactly. If you need an interface that is not here, propose it on the issue; never invent it.
+
+Every signature below is copied from the source. Shapes marked "seen" were captured from a real run on `crivo.load_example()`.
+
+## Public Python API (`import crivo`)
+
+| Name | Signature | Returns |
+|---|---|---|
+| `read` | `read(source, **kwargs)` | `DataFrame`. Local path (csv, tsv, txt, parquet file or folder, xlsx, xls, json, jsonl, ndjson, feather, orc, dta, sas7bdat, optionally .gz/.zip/.bz2/.xz), a sqlite file (`query=`), a DBAPI connection or SQLAlchemy URL, or an http(s) URL (`records_path=`). `format="fwf"` for fixed width. Missing tokens such as `"N/A"` stay strings. A skipped CSV preamble is stamped on `frame.attrs["preamble_rows"]`. |
+| `read_sql` | `read_sql(query: str, connection)` | `DataFrame`, via `pandas.read_sql`. |
+| `write` | `write(frame, path, **kwargs)` | `Path`. Extensions: .csv .parquet/.pq .xlsx .json .jsonl/.ndjson .feather .orc; anything else raises `ValueError`. Parents are created. |
+| `load_example` | `load_example()` | `DataFrame`, 60 rows x 5 columns (`customer`, `region`, `revenue`, `units`, `note`), same every call. Planted: d01, d04, d06, d07, d09. |
+| `diagnose` | `diagnose(data, name=None)` | `Report`. `data` is a DataFrame or a path (read with `read`). |
+| `clean` | `clean(df, policy="auto")` | `(DataFrame, CleanSummary)`. Input never mutated. `policy` is accepted and not read. |
+| `compare` | `compare(before, after, name_before="before", name_after="after")` | `str`, one self-contained HTML document. |
+| `reconcile` | `reconcile(a, b, keys)` | `dict` with keys `keys, counts, added, removed, changed, duplicate_keys, null_keys, column_diff, receipt, notes` (seen). `keys` is a column name or list. |
+| `reconcile_report` | `reconcile_report(a, b, keys)` | `str`, HTML. |
+| `drivers` | `drivers(before, after, value_col, by_col)` | `dict` with keys `metric, by, total_before, total_after, delta, contributions, receipt` (seen). |
+| `analyze_excel` | `analyze_excel(path)` | `list[dict]`, one per sheet: `sheet, header_row, preamble_rows, tables, grade, evidence, suggestion, kind` (seen). |
+| `export_notebook` | `export_notebook(source, path)` | `Path` of a runnable .ipynb that re-reads and re-diagnoses `source`. |
+| `ask` | `ask(data, question, *, name=None)` | `Answer`. Needs a model (see Environment). Raises `RuntimeError` naming the missing variable. Gates auto-run. |
+| `main` | `main()` | `int`, the console-script entry. |
+
+The accessor, registered on import: `df.crivo.diagnose(name=None) -> Report` and `df.crivo.clean(policy="auto") -> (DataFrame, CleanSummary)`.
+
+### `Report`
+- `findings: list[dict]`, `clear: list[int]` (disease ids that ran and found nothing), `broken: dict` (ids that could not run, with why).
+- `to_dict()` keys: `name, rows, columns, findings, clear, broken`. `to_json(indent=2)`.
+- `repr()` is the text report; `_repr_html_()` is the notebook card.
+- `plot(ax=None)` returns a matplotlib `Axes` and never calls `show`.
+- `pii() -> list[dict]`, `semantic_types() -> list[dict]`, `cross_column(threshold=0.9) -> list[dict]` (each `columns, violations, strength, grade, confidence, evidence, examples`, graded HUMAN).
+- `to_html(path) -> Path`: one standalone HTML file, PII section first.
+- `suggest(k=5) -> list[str]`: starter questions; column names may appear, cell values never do.
+
+### `CleanSummary`
+- `applied`, `needs_review`: lists of `{disease, slug, columns, grade}`; a review entry may add `reason` (`"fix did not clear verification"`, `"fixer error: ..."`).
+- `to_dict()` keys: `applied, needs_review, rows_before, rows_after, columns_before, columns_after`. `to_json(indent=2)`.
+- `samples(per_fix=3) -> list[dict]`: `{disease, slug, columns, examples: [{column, row, old, new}]}`.
+- `diff(max_rows=200)`: a pandas Styler of changed cells (needs jinja2, not a runtime dependency).
+
+### `Answer`
+- `card` (an `AnswerCard`), `notices: list`.
+- Properties: `text` (the answer), `code` (the last cell that ran ok), `checks`, `lineage`, `images` (chart paths saved on the way).
+- `AnswerCard` fields (`card.py`): `card_id, session, question, answer, cells, checks, lineage, model, flags, intent, created`.
+
+## Findings
+A finding is a plain JSON-safe dict (`detect._finding`):
+
+| Key | Type | Meaning |
+|---|---|---|
+| `disease` | int | taxonomy id, 1 to 26 |
+| `slug` | str | the id's name, from `SLUGS` |
+| `columns` | list[str] | affected columns; `[]` means the whole table |
+| `evidence` | str | one line, no row dumps |
+| `stats` | dict | JSON-safe numbers (floats rounded to 6 places, NaN becomes null) |
+| `grade` | str | `AUTO`, `GATE` or `HUMAN` |
+| `confidence` | float | 3 decimal places |
+| `indicator` | bool | true for 12 and 15: evidenced, never auto-fixed |
+
+Seen: `{"disease": 1, "slug": "numbers-as-strings", "columns": ["revenue"], "evidence": "2 number formats in one column (bare 90%, symbol 7%)", "stats": {...}, "grade": "AUTO", "confidence": 0.95, "indicator": false}`.
+
+**Grade ladder** (judgement required): `AUTO` < `GATE` < `HUMAN`. AUTO is mechanical; GATE is one plausible fix worth confirming; HUMAN is a judgement call, reported and never decided for you.
+
+**Engine:** `detect_all(df, name="df") -> {findings, clear, broken}` runs the 25 single-frame signals. `detect_one(df, disease, columns) -> dict | None` re-runs one signal on one target; `None` means clean, and it is how every fix is verified. `detect_family(dfs: dict) -> list` is disease 20 only. At most 3 sample values ever leave a detector.
+
+| id | slug | id | slug |
+|---|---|---|---|
+| 1 | numbers-as-strings | 14 | broken-coordinates |
+| 2 | dates-as-strings | 15 | statistical-outliers |
+| 3 | mixed-date-formats | 16 | unit-heterogeneity |
+| 4 | sentinel-missing | 17 | packed-fields |
+| 5 | suppression-codes | 18 | header-damage |
+| 6 | whitespace-damage | 19 | empty-constant-columns |
+| 7 | case-spelling-variants | 20 | schema-drift (family only) |
+| 8 | encoding-mojibake | 21 | aggregate-rows |
+| 9 | duplicate-rows | 22 | id-numeric-corruption |
+| 10 | near-duplicate-rows | 23 | boolean-chaos |
+| 11 | key-violations | 24 | stray-structural-rows |
+| 12 | field-contradictions | 25 | duplicated-columns |
+| 13 | out-of-domain-values | 26 | truncated-values |
+
+Fixed sets in `detect.py`: `INDICATORS = {12, 15}`, `FAMILY_ONLY = {20}`, `COLUMN_CHANGING = {17, 18, 19, 25}` (a fix may change the column list), `WHOLE_FRAME = {9, 10, 18, 24}` (the detector reads the whole frame).
+
+## CLI
+Entry points: `crivo` and `python -m crivo` (same `main`), and `crivo-mcp`.
+
+**`crivo diagnose FILE [--json] [--fail-on AUTO|GATE|HUMAN|never]`.** Keyless. `--fail-on` defaults to `GATE`. Exit `0`: no finding at or above the threshold. Exit `1`: at least one. Exit `2`: the file could not be read. `never` always exits `0`. `--json` prints `{file, rows, columns, findings, clear, broken}`.
+
+**`crivo clean FILE [--name NAME] [--autonomy LEVEL] [--policy auto|all] [--json]`.** Needs a model and a kernel. Chatter goes to stderr; stdout is one JSON object with `--json`, else a short text summary. Exit `0` unless the summary carries `error`. `--policy` is still accepted and widens nothing: only AUTO runs unattended. Summary (`repl.run_clean_once`): `{file, variable, needs_human: [str], policy}`, plus `notices` when one fired, and when a report was written `report, fixes: [{disease, slug, grade, status, unattended}], autonomy, outputs, skills_admitted`. On a failed load: `{file, error}`. `status` is `fixed`, `skipped`, `failed` or `aborted` (shown as "not attempted").
+
+**`python -m crivo`** starts the REPL. Shared flags: `--workspace` (default `workspace`), `--data-dir` (default `data`), `--docker`, `--resume SESSION`, `--auto-run` (skips gates, dev only), `--autonomy autonomous|careful|report-only` (default `autonomous`). REPL commands: `/load <path> [name]`, `/clean <var>`, `/clean-family <glob> <name>`, `/skills`, `/why [claim id]`, `/trace`, `/quit`; any other line is a question. The gate prompt is `[r]un / re[j]ect / [s]kip`.
+
+Key check: `clean` and the REPL require `ANTHROPIC_API_KEY` when `CRIVO_PROVIDER=claude` and `DEEPSEEK_API_KEY` for every other provider, including `openai` and `faux` (`__main__.py`). `crivo.ask` checks per provider instead (`query._required_key`).
+
+## MCP tools (`crivo-mcp`, stdio)
+Every tool returns its errors as data (`{"error": ...}` or an error string), never a crash. Client paths must resolve inside `CRIVO_MCP_ROOT`.
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `diagnose_file` | `path: str` | JSON string, the `crivo diagnose --json` shape. Keyless, read-only. |
+| `clean_file` | `path: str, name: str \| None = None, policy: str = "auto"` | dict, the headless clean summary above. Runs at `careful`. Only AUTO runs; with an elicitation-capable client, GATE fixes are asked one by one. |
+| `open_data` | `path: str` | `{session_id, variable, profile}`. Idle sessions close after 30 minutes. |
+| `ask` | `session_id: str, question: str` | the `AnswerCard` as a dict, plus `unresolved_gates` when a person's decision was skipped. On failure, `{error, notices}`. |
+| `why` | `session_id: str` | str, the provenance chain as markdown. |
+| `close_session` | `session_id: str` | bool, true when the session existed. |
+
+The model-backed tools use the same key check as the CLI (`mcp_server._required_key`).
+
+## Session events (`events.py`)
+Drivers consume `SessionLike`: `load(path, name=None)`, `run_turn(question)`, `clean(var)`, `clean_family(pattern, name)`, `close()`. The three runners are generators of `Event`.
+
+| Event | Fields | Driver answers with |
+|---|---|---|
+| `GateRequest` | `code, iteration, title="", preview="", grade=""` | `gen.send(GateDecision(action, note=""))`, action `run`, `reject` or `skip` |
+| `StreamText` | `name, text` | `None` |
+| `ArtifactSaved` | `path` | `None` |
+| `Notice` | `kind, text` | `None` |
+| `CardReady` | `card` (has `to_markdown()`) | terminal for the turn |
+
+`grade` is empty for QUERY cells, `HUMAN` for skill admissions. Notice kinds in use today: `autoclean, autonomy, cap, compaction, error, family, fix, intent, kernel_died, llm_error, nudge, plan, restart_offer, skill, skip`. A driver must render an unknown kind as text.
+
+## Kernel supervisor protocol (`kernel/`, protocol v1)
+One JSON object per line. The host writes requests to the supervisor's stdin; every event on stdout carries the request `id`; stderr is diagnostics only.
+
+- Requests: `{id, op: "hello"}`, `{id, op: "execute", code, timeout_s}`, `{id, op: "interrupt"}`, `{id, op: "restart"}`, `{id, op: "shutdown"}`.
+- `{id, ev: "stream", name, text}`: live output.
+- `{id, ev: "display", mime: "image/png", b64}` or `{id, ev: "display", mime: "text/plain", text}`.
+- `{id, ev: "result", status, value, error, exec_count, elapsed_s, registry, registry_omitted, truncated}`. `status` is `ok`, `error`, `timeout`, `interrupted` or `hung`. `error` is `{ename, evalue, traceback}`.
+- The `hello` result adds `proto` (1), `python`, `ipykernel`. An unknown op or a malformed line gets a result whose error `ename` is `BadRequest`.
+- Caps: a value is cut at 8 KiB, a stream at 64 KiB (head and tail kept, with a marker).
+- The kernel's environment is an allowlist (`KERNEL_ENV_PASSTHROUGH`, plus `DOCKER_ENV_PASSTHROUGH` with `--docker`); provider keys are never passed in.
+
+## Governance file (`governance.py`, `docs/governance.example.json`)
+Top-level keys, and only these (anything else raises): `policies`, `judge`, `routing`, `autonomy`.
+- `policies`: list of `{id, disease_ids, approver, expires, mode}`; `expires` is an ISO date (the last live day), `mode` is `ENFORCE` or `LOG_ONLY`, unknown disease ids raise.
+- `judge`: `{enabled: false, sample_rate: 0.0, rubric: ""}` by default; `sample_rate` must be in [0, 1].
+- `routing`: `{escalate_after_fail: true}` by default.
+- `autonomy`: one of `autonomous, careful, report-only`, default `autonomous`.
+
+`load_governance` validates the file, but no runtime code reads it yet. The live autonomy control is the `--autonomy` flag.
+
+## Environment variables
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CRIVO_PROVIDER` | `deepseek` | `deepseek`, `claude`, `openai` (any /v1 endpoint) or `faux` (canned replies, for tests) |
+| `DEEPSEEK_API_KEY` | none | the deepseek provider's key |
+| `ANTHROPIC_API_KEY` | none | the claude provider's key |
+| `CRIVO_BASE_URL` | none | the openai provider's endpoint (required there) |
+| `CRIVO_MODEL` | `deepseek-v4-pro`, or `claude-opus-5` for claude | overrides the model; required for openai |
+| `CRIVO_API_KEY` | `local-no-key` | key sent to the openai provider |
+| `CRIVO_STALL_S` | 90 | seconds with no stream bytes before a call is dead |
+| `CRIVO_MAX_CALL_S` | 420 | cap on one model call, in seconds |
+| `CRIVO_HTTP_TIMEOUT_S` | 30 | `crivo.read` http timeout |
+| `CRIVO_HTTP_MAX_BYTES` | 536870912 (512 MiB) | http body cap for `crivo.read` |
+| `CRIVO_WORKSPACE` | `workspace` | session workspace for `crivo.ask` and the MCP server |
+| `CRIVO_MCP_ROOT` | the server's launch directory | the one directory MCP client paths may name; `/` and the home directory are refused |
+| `CRIVO_MCP_SANDBOX` | unset | `docker` runs MCP cells in the container; unset runs a host subprocess and warns; any other value is an error |
+| `CRIVO_TELEMETRY` | unset (off) | path of a JSONL telemetry file |
+| `CRIVO_PLAN_FIRST` | `off` | `on` turns on plan-first cleaning (one plan approved as a unit) |
+| `CRIVO_M1` | `on` | `off` restores the pre-M1 clean flow (the bench legacy arm) |
+
+## Changing this file
+A contract change is a `core`-labelled issue and needs Aarmen's yes before any code builds against it. Update this file in the same change as the code, never after.
