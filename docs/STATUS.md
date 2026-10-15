@@ -17,11 +17,11 @@
 | Stage | What | State |
 |---|---|---|
 | A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks in shipped outputs, false receipts, hygiene | **Next** |
-| 0 | The honest foundation: honest scorer (repair F1 is really 0.596), the referee (closes the reproduced verify bypass), detector honesty | After A |
+| 0 | The honest foundation: honest scorer (repair F1 is really 0.596), the red-team loop (autoresearch aimed at the scorer), the referee (closes the reproduced verify bypass), detector honesty | After A |
 | 1 | A backed answer over a file: toolbox, DuckDB, contracts, clarify, abstain, model bake-off | |
-| 2 | Backed SQL and scale: databases, pushdown, SQL checks, relational and temporal checks | |
-| 3 | Labelling at scale: `decide()`, `crivo.label` | |
-| 4 | Learning: skills with counterfactual rent, saved answers, `crivo verify`, the offline loop | |
+| 2 | Learning: skills with counterfactual rent, saved answers, `crivo verify`, the nightly autoresearch skill loop | |
+| 3 | Backed SQL and scale: databases, pushdown, SQL checks, relational and temporal checks | |
+| 4 | Labelling at scale: `decide()`, `crivo.label` | |
 | 5 | The faces and the release: MCP on the new spec, the sandbox story, plugin, PyPI | |
 
 19 owner decisions are listed in the plan with the stage each is needed by.
