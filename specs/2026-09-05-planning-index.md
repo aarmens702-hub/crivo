@@ -1,5 +1,8 @@
 # P7 + autonomy planning index: read-first review guide
 
+> **Superseded as sequencing by `specs/2026-10-14-the-plan.md` (2026-10-14).**
+> Still the design of record for its own items; read it for how, the plan for when.
+
 2026-09-05. **Status: read-first index for owner review. Planning only, no
 code.** This is the front door to the three build-packet specs produced today.
 Read it first, then read the thread specs in the order below. It summarizes each

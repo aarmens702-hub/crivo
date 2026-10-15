@@ -1,5 +1,8 @@
 # Adoption roadmap — model breadth + shareable reports (planning note)
 
+> **Superseded as sequencing by `specs/2026-10-14-the-plan.md` (2026-10-14).**
+> Still the design of record for its own items; read it for how, the plan for when.
+
 2026-09-03, owner-directed. Two gaps vs the popular tools (pandas-ai,
 ydata-profiling, Great Expectations) that we will close after Phase 4 ships.
 This is a plan, not a build; each item gets its own WRAP spec before code.

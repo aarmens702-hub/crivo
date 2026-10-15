@@ -1,5 +1,8 @@
 # The master plan: one roadmap, every wave
 
+> **Superseded as sequencing by `specs/2026-10-14-the-plan.md` (2026-10-14).**
+> Still the design of record for its own items; read it for how, the plan for when.
+
 2026-09-06. **Status: the single authoritative plan.** Everything previously
 scattered across eight specs is consolidated here in build order. Where an
 item has a design elsewhere, this plan points at it rather than restating it.
