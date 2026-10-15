@@ -18,13 +18,13 @@
 |---|---|---|
 | A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases | **Next** |
 | 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | After A |
-| 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
-| 2 | Learning: System 1 as the loop's first filter, skills with counterfactual rent, the glossary, team use, saved answers, `crivo verify`, the nightly skill loop | |
+| 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, charts and descriptive analysis, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
+| 2 | Two tracks in parallel. 2a the analyst toolkit: statistics, drivers, segments and cohorts, forecasting, anomalies, dashboards. 2b learning: System 1 as the loop's first filter, skills, the glossary, saved answers, `crivo verify`, the nightly skill loop | |
 | 3 | Backed SQL and scale: databases, pushdown, SQL checks, relational and temporal checks | |
 | 4 | Labelling at scale, only if stage 1 shows the gap | |
 | 5 | The release: plugin, PyPI with trusted publishing, docs site, platform matrix | |
 
-24 owner decisions are listed in the plan with the stage each is needed by.
+25 owner decisions are listed in the plan with the stage each is needed by.
 
 ## What we've learned
 - **The bench measures variance, not coverage.** Wave 1.5's regressions scored perfectly clean because the smoke corpus contains none of the shapes involved. A change that handles a new shape needs a corpus case, or the bench can't see it.
