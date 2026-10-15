@@ -12,19 +12,19 @@
 - **Bench, deterministic mode** (2026-09-07, 1,450 synthetic + 4 external datasets): detection micro-F1 0.731, repair F1 0.923 (where defined), survived verification 0.673. Full tables in `bench/RESULTS.md`.
 
 ## To do, in order
-**The plan is `specs/2026-10-14-the-plan.md`** (pending Aarmen's approval, decision D1). It supersedes every earlier roadmap and maps every old item and every open defect (54 defects, 7 hardening items) to a stage. The design of record for what gets built is `specs/2026-10-14-crivo-v2-design.md`.
+**The plan is `specs/2026-10-14-the-plan.md`** (pending Aarmen's approval, decision D1). It supersedes every earlier roadmap and maps every old item, every open defect (54 defects, 7 hardening items, defined in `specs/2026-10-14-plan-inventory.md`) and every finding of four completeness audits to a stage. The design of record for what gets built is `specs/2026-10-14-crivo-v2-design.md`.
 
 | Stage | What | State |
 |---|---|---|
-| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks in shipped outputs, false receipts, hygiene | **Next** |
-| 0 | The honest foundation: honest scorer (repair F1 is really 0.596), the referee (closes the reproduced verify bypass), detector honesty | After A |
-| 1 | A backed answer over a file: toolbox, DuckDB, contracts, clarify, abstain, model bake-off | |
-| 2 | Backed SQL and scale: databases, pushdown, SQL checks, relational and temporal checks | |
-| 3 | Labelling at scale: `decide()`, `crivo.label` | |
-| 4 | Learning: skills with counterfactual rent, saved answers, `crivo verify`, the offline loop | |
-| 5 | The faces and the release: MCP on the new spec, the sandbox story, plugin, PyPI | |
+| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases | **Next** |
+| 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | After A |
+| 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
+| 2 | Learning: System 1 as the loop's first filter, skills with counterfactual rent, the glossary, team use, saved answers, `crivo verify`, the nightly skill loop | |
+| 3 | Backed SQL and scale: databases, pushdown, SQL checks, relational and temporal checks | |
+| 4 | Labelling at scale, only if stage 1 shows the gap | |
+| 5 | The release: plugin, PyPI with trusted publishing, docs site, platform matrix | |
 
-19 owner decisions are listed in the plan with the stage each is needed by.
+24 owner decisions are listed in the plan with the stage each is needed by.
 
 ## What we've learned
 - **The bench measures variance, not coverage.** Wave 1.5's regressions scored perfectly clean because the smoke corpus contains none of the shapes involved. A change that handles a new shape needs a corpus case, or the bench can't see it.
