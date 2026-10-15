@@ -12,23 +12,19 @@
 - **Bench, deterministic mode** (2026-09-07, 1,450 synthetic + 4 external datasets): detection micro-F1 0.731, repair F1 0.923 (where defined), survived verification 0.673. Full tables in `bench/RESULTS.md`.
 
 ## To do, in order
-The plan of record is `specs/2026-09-06-master-plan.md`. Waves 1 to 5 make crivo correct and measurable, 6 to 13 make it capable, 14 makes it available.
+**The plan is `specs/2026-10-14-the-plan.md`** (pending Aarmen's approval, decision D1). It supersedes every earlier roadmap and maps every old item and every open defect (54 defects, 7 hardening items) to a stage. The design of record for what gets built is `specs/2026-10-14-crivo-v2-design.md`.
 
-| Wave | What | State |
+| Stage | What | State |
 |---|---|---|
-| 0 | Autonomy mode (autonomous default, careful, report-only) | Done (`4fd76c6`) |
-| 1 | Make the scorer honest | Done (`9f1d996`) |
-| 1.5 | Fix the 32 regressions the remediation packets introduced | Done (`5adec38`) |
-| 2 | Honesty and safety: gate bugs, receipts that can't fail, PII leaking into the HTML report, notebook card and reconcile report (15 items) | **Next** |
-| 3 | The Proving Ground: corpus variety, not volume (29 shapes re-rolled 50 times is why F1 sits at 0.73); per-detector P/R/F1 | The most important wave |
-| 4 | Detector honesty: silent caps, AUTO on ambiguous values (17 items) | After 3 |
-| 5 | Detector accuracy: move F1 by fixing misses the corpus exposes | After 3 and 4 |
-| 6 to 13 | Phase 7 detectors, severity tier, the statistics toolkit (wave 8, the analyst's brain), DuckDB scale, analytics, output polish, contracts and interop, latency | Not started |
-| 14 | Ship: Windows and 3.13 CI, publish 0.1.0 to PyPI | Not started, Aarmen's call |
+| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks in shipped outputs, false receipts, hygiene | **Next** |
+| 0 | The honest foundation: honest scorer (repair F1 is really 0.596), the referee (closes the reproduced verify bypass), detector honesty | After A |
+| 1 | A backed answer over a file: toolbox, DuckDB, contracts, clarify, abstain, model bake-off | |
+| 2 | Backed SQL and scale: databases, pushdown, SQL checks, relational and temporal checks | |
+| 3 | Labelling at scale: `decide()`, `crivo.label` | |
+| 4 | Learning: skills with counterfactual rent, saved answers, `crivo verify`, the offline loop | |
+| 5 | The faces and the release: MCP on the new spec, the sandbox story, plugin, PyPI | |
 
-Open review findings: 36 of 56 were open on 2026-09-06 (`specs/2026-09-06-review-triage-and-fix-plan.md`). Waves 2 and 4 carry them.
-
-Known bug, not yet filed: `python -m crivo` with `CRIVO_PROVIDER=openai` still demands `DEEPSEEK_API_KEY` (`src/crivo/__main__.py:123`), so the README's local-model example fails from the CLI.
+19 owner decisions are listed in the plan with the stage each is needed by.
 
 ## What we've learned
 - **The bench measures variance, not coverage.** Wave 1.5's regressions scored perfectly clean because the smoke corpus contains none of the shapes involved. A change that handles a new shape needs a corpus case, or the bench can't see it.

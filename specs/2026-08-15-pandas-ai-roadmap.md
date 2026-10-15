@@ -1,5 +1,8 @@
 # Roadmap: competing with pandas-ai (strategy C + A)
 
+> **Superseded as sequencing by `specs/2026-10-14-the-plan.md` (2026-10-14).**
+> Still the design of record for its own items; read it for how, the plan for when.
+
 Decided 2026-08-15. pandas-ai (~18k stars) is "ask my dataframe": wrap a frame,
 ask in English, get a number / chart / transformed frame. Fast, broad,
 model-agnostic, connectors — and it trusts generated code blindly with no audit

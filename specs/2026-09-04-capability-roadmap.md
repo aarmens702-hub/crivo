@@ -1,5 +1,8 @@
 # Attack roadmap B: analyst capabilities
 
+> **Superseded as sequencing by `specs/2026-10-14-the-plan.md` (2026-10-14).**
+> Still the design of record for its own items; read it for how, the plan for when.
+
 2026-09-04. What crivo can do: data in, analyses, outputs. Synthesizes the
 prior plan (Phase 7 harder data, HTML report, expectations, model breadth)
 with `docs/research/2026-09-04-capability-gaps.md`. Companion:

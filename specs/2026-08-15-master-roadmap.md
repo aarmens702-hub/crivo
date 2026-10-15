@@ -1,5 +1,8 @@
 # Master roadmap — analyst-agent to a usable, adopted library
 
+> **Superseded as sequencing by `specs/2026-10-14-the-plan.md` (2026-10-14).**
+> Still the design of record for its own items; read it for how, the plan for when.
+
 Consolidates everything discussed 2026-08-15: the pandas-ai competition strategy
 (C+A), the usability levers, the ingestion gap, and the reach/platform bets, into
 one phased plan. Supersedes `2026-08-15-pandas-ai-roadmap.md` (its phases live on

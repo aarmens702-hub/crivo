@@ -1,5 +1,8 @@
 # Attack roadmap A: the agent system
 
+> **Superseded as sequencing by `specs/2026-10-14-the-plan.md` (2026-10-14).**
+> Still the design of record for its own items; read it for how, the plan for when.
+
 2026-09-04. How crivo thinks and acts. Synthesizes the prior plan (plan-first
 execution, subagents, Phase 8 memory, MCP port) with
 `docs/research/2026-09-04-agent-system-gaps.md`. Companion:

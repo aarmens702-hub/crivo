@@ -7,9 +7,9 @@ slice spec or issue is written.**
 Inputs: `docs/research/2026-10-14-repl-rlm-deep-dive.md`,
 `docs/research/2026-10-14-owner-research-synthesis.md` (Aarmen's four reports:
 RLMs, autoresearch, Jev, the Jul to Oct 2026 landscape), and the existing
-plans. **This replaces the build order of `specs/2026-09-06-master-plan.md`
-and keeps its rule: no capability ships ahead of the instrument that measures
-it.** Remaining master-plan waves fold into the slices below (section 6).
+plans. **Sequencing now lives in `specs/2026-10-14-the-plan.md`,** which maps every
+old roadmap item and open defect to a stage. This document stays the design of
+record for what each slice builds.
 
 ## What
 

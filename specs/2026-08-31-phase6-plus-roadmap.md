@@ -1,5 +1,8 @@
 # Roadmap update: launch gate + Phases 6-8 (draft, awaiting sign-off)
 
+> **Superseded as sequencing by `specs/2026-10-14-the-plan.md` (2026-10-14).**
+> Still the design of record for its own items; read it for how, the plan for when.
+
 Status: DRAFT. Supplements `2026-08-15-master-roadmap.md` (Phases 1-5). Folds in
 the 2026-08-31 landscape research (three reports: chat-with-data products,
 data-quality tooling, agent infrastructure) and Aarmen's direction from the
