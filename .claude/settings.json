@@ -1,18 +1,94 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "attribution": {
     "commit": "",
     "pr": ""
   },
+  "permissions": {
+    "allow": [
+      "Bash(uv sync*)",
+      "Bash(uv run pytest*)",
+      "Bash(uv run ruff*)",
+      "Bash(uv run python -m bench.run*)",
+      "Bash(uv run crivo diagnose*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git switch *)",
+      "Bash(git fetch*)",
+      "Bash(git pull*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git worktree *)",
+      "Bash(git rebase origin/dev)",
+      "Bash(git rebase --continue)",
+      "Bash(git push origin HEAD:dev)",
+      "Bash(git fetch origin dev)",
+      "Bash(gh issue *)",
+      "Bash(gh label *)",
+      "Bash(gh pr *)",
+      "Bash(gh run *)",
+      "Bash(gh repo view*)"
+    ],
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.local)",
+      "Read(**/.env.*.local)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push origin main*)",
+      "Bash(git push -u origin main*)"
+    ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "tdd-guard@tdd-guard": false
+  },
+  "enableAllProjectMcpServers": true,
   "hooks": {
-    "PostToolUse": [
+    "SessionStart": [
       {
-        "matcher": "Write|Edit|MultiEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; case \"$f\" in *.py) UV=\"$HOME/.local/bin/uv\"; [ -x \"$UV\" ] || UV=uv; cd \"$CLAUDE_PROJECT_DIR\" && \"$UV\" run ruff check --fix \"$f\" && \"$UV\" run ruff format \"$f\";; esac; } 2>/dev/null || true",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|Grep|Bash|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/protect_secrets.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/format_py.py\"",
             "timeout": 30,
-            "statusMessage": "ruff on changed file"
+            "statusMessage": "ruff format on changed file"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop_tests.py\"",
+            "timeout": 150
           }
         ]
       }
