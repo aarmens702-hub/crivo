@@ -252,6 +252,12 @@ the `/start-task` pipeline. Core files stop for the owner.
 R4.1 and R4.2 (model choice and escalation) run alongside slice 1, since the
 benchmark that picks the default exists from slice 1 on.
 
+**Bugs do not wait for slices.** Known defects go through the normal issue
+flow now: the Claude path (`temperature` rejected, `max_tokens` too low), the
+missing `httpx` dependency that stops the analyst on a fresh install, the
+REPL and MCP demanding a DeepSeek key under `faux` and `openai`, the stop
+sequence at `</execute>`, and the rest of the `docs/QA.md` findings.
+
 **Master plan, folded in:** waves 2, 3 and 4 into slices 0 and 1; wave 9
 (DuckDB) into slices 1 and 2; wave 12 into slices 1 (ODCS contracts, cost-per-task
 columns), 4 (verified-answers memory, scheduled re-checks) and 5 (MCP port);

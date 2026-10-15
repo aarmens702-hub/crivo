@@ -1,7 +1,9 @@
 # Synthesis: Aarmen's four research reports, and what they change
 
-2026-10-14. Read in full: `~/Desktop/rlms-report.md`, `autoresearch-report.md`,
-`jev-model-report.md`, `landscape-sweep-report.md` (all compiled 2026-10-14).
+2026-10-14. Read in full: `2026-10-14-recursive-language-models.md`,
+`2026-10-14-autoresearch.md`, `2026-10-14-jev-model.md` and
+`2026-10-14-landscape-sweep.md` in this folder (their own ranked summary is
+`2026-10-14-four-deep-dives-summary.md`).
 Companion to `2026-10-14-repl-rlm-deep-dive.md`. This is the input to the
 kernel-centric structure design (direction A, approved 2026-10-14).
 
