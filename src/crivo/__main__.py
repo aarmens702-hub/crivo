@@ -21,7 +21,9 @@ def main() -> int:
         "--workspace", default="workspace", help="session workspace directory"
     )
     parser.add_argument(
-        "--data-dir", default="data", help="directory of immutable source datasets"
+        "--data-dir",
+        default="data",
+        help="read-only data mount for the --docker kernel (ignored otherwise)",
     )
     parser.add_argument(
         "--docker",
@@ -143,18 +145,7 @@ def main() -> int:
         print(f"{problem}. Put it in .env or export it.")
         return 1
 
-    try:
-        from crivo.loop import Session
-    except ImportError:
-        print(
-            "the hand-written core (src/crivo/loop.py) isn't implemented yet"
-            " — the plumbing is ready and waiting."
-        )
-        print(
-            "interfaces: specs/2026-08-09-p0-core-design.md §1"
-            " and src/crivo/events.py (SessionLike)"
-        )
-        return 1
+    from crivo.loop import Session
 
     if args.clean:
         # the orchestration surface: chatter to stderr, one JSON object (or a

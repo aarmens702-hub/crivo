@@ -7,6 +7,7 @@ are safe-to-fix housekeeping; GATE and HUMAN need a person. `--fail-on GATE`
 (the default) means "fail me when something needs a human"."""
 
 import json
+import sys
 
 import pandas as pd
 import pytest
@@ -289,3 +290,56 @@ def test_a_bare_file_without_a_subcommand_is_refused(tmp_path, monkeypatch) -> N
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 2
+
+
+# --- the analyst entry point (#34) -------------------------------------------
+
+
+def _main_without_dotenv(monkeypatch, tmp_path):
+    """`python -m crivo` in-process with no dotenv file read: load_dotenv
+    searches upward from __main__.py, past tmp_path, to the owner's key file."""
+    import crivo.__main__ as entry
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    monkeypatch.setattr(entry, "load_dotenv", lambda *a, **k: False)
+    return entry.main
+
+
+def test_a_core_import_error_is_not_called_unimplemented(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Regression for #34. When `from crivo.loop import Session` fails (a
+    missing dependency, a bug), main() lets the real ImportError through
+    instead of returning 1 with a claim that the core "isn't implemented
+    yet", which hid the cause."""
+    main = _main_without_dotenv(monkeypatch, tmp_path)
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "unused")
+    monkeypatch.setitem(sys.modules, "crivo.loop", None)
+    monkeypatch.setattr("sys.argv", ["crivo"])
+
+    with pytest.raises(ImportError) as exc:
+        main()
+    assert "crivo.loop" in str(exc.value)
+    assert "implemented" not in capsys.readouterr().out
+
+
+def test_data_dir_help_says_it_is_the_docker_mount(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """#34: `--data-dir` only reaches the kernel under `--docker` (the
+    read-only mount), so its help says that instead of "directory of
+    immutable source datasets"."""
+    main = _main_without_dotenv(monkeypatch, tmp_path)
+    monkeypatch.setenv("COLUMNS", "200")  # no wrap, so no break at "read-only"
+    monkeypatch.setattr("sys.argv", ["crivo", "--help"])
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+    out = " ".join(capsys.readouterr().out.split())
+    assert exc.value.code == 0
+    assert (
+        "--data-dir DATA_DIR read-only data mount for the --docker kernel "
+        "(ignored otherwise)"
+    ) in out
