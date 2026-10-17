@@ -52,6 +52,51 @@ def test_run_smoke_scores_corpus_and_writes_artifacts(tmp_path):
     }
 
 
+def test_smoke_with_default_paths_leaves_published_results_md_untouched(
+    tmp_path, monkeypatch
+):
+    """Regression for #3. CI, /ship and /promote all run `bench.run --smoke`,
+    and it used to rewrite the tracked `bench/RESULTS.md` (the published full
+    tables) with smoke numbers, one careless `git add` from being committed
+    over them. Smoke's markdown belongs beside smoke.json in the git-ignored
+    `bench/results/`; only --full writes `bench/RESULTS.md`. Run with the
+    DEFAULT paths, since the defaults are what the CLI uses."""
+    from bench.run import run
+
+    monkeypatch.chdir(tmp_path)
+    published = tmp_path / "bench" / "RESULTS.md"
+    published.parent.mkdir(parents=True)
+    sentinel = b"# bench results (full, 2026-09-07)\n\npublished tables, hands off\n"
+    published.write_bytes(sentinel)
+
+    run(mode="smoke", limit=2, external_root=tmp_path / "none")
+
+    assert published.read_bytes() == sentinel, "smoke overwrote bench/RESULTS.md"
+    smoke_md = tmp_path / "bench" / "results" / "smoke.md"
+    assert smoke_md.exists(), "smoke markdown should land in bench/results/"
+    assert "deterministic mode baseline" in smoke_md.read_text()
+
+
+def test_full_with_default_paths_writes_published_results_md(tmp_path, monkeypatch):
+    """Regression for #3. The other half of the new default: moving smoke's
+    markdown out of `bench/RESULTS.md` must not also stop --full from writing
+    the published tables there, or the refresh path silently goes dead. A full
+    run with the DEFAULT paths writes `bench/RESULTS.md` and nothing to
+    `bench/results/smoke.md`."""
+    from bench.run import run
+
+    monkeypatch.chdir(tmp_path)
+
+    run(mode="full", limit=2, external_root=tmp_path / "none")
+
+    published = tmp_path / "bench" / "RESULTS.md"
+    assert published.exists(), "a full run should write bench/RESULTS.md"
+    assert published.read_text().startswith("# Proving Ground results (full,")
+    assert not (tmp_path / "bench" / "results" / "smoke.md").exists(), (
+        "a full run wrote the smoke markdown"
+    )
+
+
 def test_sweep_hunts_exceptions_and_reports_a_ledger(monkeypatch):
     """Arc W3/H2: the corpus doubles as a fuzzer — sweep() runs detect+clean
     over expanded entries hunting EXCEPTIONS (not scores) and returns the

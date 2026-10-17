@@ -2,10 +2,10 @@
 
 `python -m bench.run --smoke` is the CI form: build every corpus entry twice
 (determinism is invariant #1), check the oracle/no-op/round-trip invariants,
-score everything, write results JSON + RESULTS.md, exit nonzero on any
-violation. `--full` runs the seeds-expanded corpus; only a full run may
-rewrite the README's marked bench section — smoke numbers are for the
-terminal, not the storefront.
+score everything, write results JSON + `bench/results/smoke.md`, exit nonzero
+on any violation. `--full` runs the seeds-expanded corpus; only a full run
+writes `bench/RESULTS.md` or may rewrite the README's marked bench section —
+smoke numbers are for the terminal, not the storefront.
 """
 
 from __future__ import annotations
@@ -218,7 +218,7 @@ def _write_readme(readme: Path, report: dict) -> None:
 def run(
     mode: str = "smoke",
     results_dir: Path = Path("bench/results"),
-    results_md: Path = Path("bench/RESULTS.md"),
+    results_md: Path | None = None,
     external_root: Path = Path("data/external/raha"),
     write_readme: bool = False,
     readme: Path = Path("README.md"),
@@ -253,7 +253,7 @@ def run(
         try:
             clean_frame, dirty_frame, truth = load_scored_pair(name, root=external_root)
         except FileNotFoundError:
-            continue  # not fetched — skipped, reported in RESULTS.md, never fatal
+            continue  # not fetched — skipped, reported in the results markdown, never fatal
         external.append(
             {"name": name, "scores": score_pair(clean_frame, dirty_frame, truth, name)}
         )
@@ -268,6 +268,10 @@ def run(
     }
     results_dir.mkdir(parents=True, exist_ok=True)
     (results_dir / f"{mode}.json").write_text(json.dumps(report, indent=1))
+    if results_md is None:  # only a full run may rewrite the published tables
+        results_md = (
+            Path("bench/RESULTS.md") if mode == "full" else results_dir / "smoke.md"
+        )
     results_md.parent.mkdir(parents=True, exist_ok=True)
     results_md.write_text(_markdown(report))
     if write_readme:
