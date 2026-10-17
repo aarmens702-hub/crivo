@@ -393,9 +393,9 @@ def run_clean_once(
     applying the blanket policy). A skip whose decision carries a note
     (declined, elicitation unavailable) surfaces the note in needs_human.
     Returns a machine-readable summary: what ran, what was deferred to a
-    human, and where the durable artifacts landed. "notices" is present only
-    when the run raised one a caller must not miss (today: the once-per-
-    workspace autonomy notice, which no other headless surface renders).
+    human, and where the durable artifacts landed. "notices" is always
+    present: the notices a caller must not miss (today the once-per-workspace
+    autonomy notice), empty when none fired.
     Tolerant of SessionLike doubles, like every other driver in this module.
     """
     session.load(path, name)
@@ -440,9 +440,12 @@ def run_clean_once(
     except StopIteration:
         pass
 
-    summary = {"file": path, "variable": var, "needs_human": needs_human}
-    if told:
-        summary["notices"] = told
+    summary = {
+        "file": path,
+        "variable": var,
+        "needs_human": needs_human,
+        "notices": told,
+    }
     session_dir = getattr(session, "session_dir", None)
     reports = sorted(session_dir.glob("clean_reports/*.json")) if session_dir else []
     if reports:

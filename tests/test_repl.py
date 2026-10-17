@@ -658,6 +658,23 @@ def test_headless_policy_runs_auto_grade_and_defers_judgement() -> None:
     assert "merge variants" in summary["needs_human"][0]
 
 
+def test_the_headless_summary_always_carries_notices() -> None:
+    """Regression for #28. The autonomy notice fires once per workspace, so
+    from the second run on nothing fires, and the summary dropped the key:
+    a script reading `d["notices"]` crashed on its second run. The key is
+    always present, an empty list when no notice fired (the fired case is
+    pinned in test_loop_autonomy)."""
+    from crivo.repl import run_clean_once
+
+    session = FakeSession(
+        script=[GateRequest("fix_a", 1, title="fix 1/1 · trailing space", grade="AUTO")]
+    )
+    summary = run_clean_once(session, "data/x.csv", name="x")
+
+    assert [d.action for d in session.decisions] == ["run"], "the AUTO gate ran"
+    assert summary.get("notices") == [], sorted(summary)
+
+
 def test_the_gate_preview_is_printed_under_the_code_box() -> None:
     """R3's last mile: the loop computes the consequence, the terminal must
     actually show it, or the operator is back to executing pandas in their
