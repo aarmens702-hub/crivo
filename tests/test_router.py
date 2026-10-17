@@ -7,10 +7,6 @@ build plan are pinned here as tests: a model self-report can never raise a
 grade, and person-grade findings never route to auto.
 """
 
-import os
-import subprocess
-import sys
-
 import pytest
 
 from crivo.autoclean import FIXERS
@@ -103,28 +99,3 @@ def test_fixers_registry_is_injectable():
     result = route(_finding(41, "AUTO"), fixers=custom)
     assert result["executor"] == "autoclean"
     assert result["fixer"] == 41
-
-
-def test_import_is_keyless_and_pulls_no_core_module():
-    # conftest's autouse quarantine has already stripped every provider key
-    # from os.environ, so the child interpreter imports with no key at all;
-    # the reserved core modules must stay out of the import graph (contract:
-    # loop.py, prompts.py, skills.py, provenance.py are never touched)
-    code = (
-        "import sys\n"
-        "import crivo.router\n"
-        "reserved = ('crivo.loop', 'crivo.prompts', 'crivo.skills',"
-        " 'crivo.provenance', 'crivo.llm')\n"
-        "bad = [m for m in reserved if m in sys.modules]\n"
-        "print(bad)\n"
-        "sys.exit(1 if bad else 0)\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        env=dict(os.environ),
-        timeout=120,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr

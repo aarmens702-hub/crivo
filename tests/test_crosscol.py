@@ -72,25 +72,3 @@ def test_nulls_do_not_count_as_a_dependency_break():
         {"city": ["SF", "SF", "SF", "SF"], "state": ["CA", "CA", None, "CA"]}
     )
     assert crosscol.find_fd_violations(df, threshold=0.8) == []
-
-
-def test_import_is_keyless_and_pulls_no_core_module():
-    import os
-    import subprocess
-    import sys
-
-    code = (
-        "import sys, crivo.crosscol\n"
-        "bad=[m for m in ('crivo.loop','crivo.prompts','crivo.skills',"
-        "'crivo.provenance','crivo.llm') if m in sys.modules]\n"
-        "print(bad); sys.exit(1 if bad else 0)\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        env=dict(os.environ),
-        timeout=120,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr

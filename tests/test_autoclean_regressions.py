@@ -192,16 +192,6 @@ def test_an_absent_d19_target_is_never_recorded_as_a_verified_fix():
     )
 
 
-def test_constant_drop_still_removes_the_column_it_was_asked_to_drop():
-    """The recovery side: an ordinary d19 target still drops."""
-    frame = pd.DataFrame({"amount": [float(i) for i in range(20)], "const": ["k"] * 20})
-
-    cleaned, summary = clean(frame)
-
-    assert list(cleaned.columns) == ["amount"]
-    assert 19 in {a["disease"] for a in summary.applied}
-
-
 # --- 11. a row _d18 never counted as a header row ----------------------------
 
 

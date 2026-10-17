@@ -5,8 +5,8 @@ rows themselves matched by a key, sorting them into added / removed / changed /
 unchanged with a partition receipt. These tests pin the contract on crafted
 frames: the four buckets, composite keys, duplicate-key exclusion, null-key
 exclusion, key identity by value, the missing key error, disjoint columns, the
-receipt as a real partition invariant, bounded evidence (rows and columns), and
-keyless import.
+receipt as a real partition invariant, and bounded evidence (rows and columns).
+The keyless import of crivo.rowdiff is pinned in test_import_isolation.py.
 """
 
 import pandas as pd
@@ -330,28 +330,6 @@ def test_changed_row_before_after_are_bounded_in_width():
     assert len(change["after"]) == cap  # after dict bounded
     assert any("column" in note for note in result["notes"])
     assert result["receipt"] is True
-
-
-def test_import_is_keyless_and_pulls_no_core_module():
-    import os
-    import subprocess
-    import sys
-
-    code = (
-        "import sys, crivo.rowdiff\n"
-        "bad=[m for m in ('crivo.loop','crivo.prompts','crivo.skills',"
-        "'crivo.provenance','crivo.llm') if m in sys.modules]\n"
-        "print(bad); sys.exit(1 if bad else 0)\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        env=dict(os.environ),
-        timeout=120,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_reconcile_surface_is_exported():
