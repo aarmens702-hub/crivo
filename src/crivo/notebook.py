@@ -17,6 +17,7 @@ import base64
 import html
 from pathlib import Path
 
+from crivo import pii
 from crivo.detect import SINGLE_FRAME
 
 # --- identity tokens (docs/assets/terminal.svg) -----------------------------
@@ -110,7 +111,7 @@ def _cols_label(columns) -> str:
     return f"[{joined}]"
 
 
-def _finding(finding) -> str:
+def _finding(finding, flagged=None) -> str:
     color = GRADE.get(finding["grade"], MUTED_2)
     meta = (
         _span("&#9679;&nbsp;", color)
@@ -120,7 +121,10 @@ def _finding(finding) -> str:
         + _span("&nbsp;&nbsp;", MUTED)
         + _span(_cols_label(finding["columns"]), TEAL, mono=True)
     )
-    evidence = _span(_esc(finding["evidence"]), MUTED_2)
+    # mask before escaping: escape turns quotes into entities, and the masker
+    # finds a value by its quotes
+    redacted = pii.redact_text(finding["evidence"], finding["columns"], flagged or {})
+    evidence = _span(_esc(redacted), MUTED_2)
     # _cols_label already escapes each name; grade is enum but escape the
     # fallback so no interpolated value ever reaches the card unescaped
     note = _span(GRADE_NOTE.get(finding["grade"], _esc(finding["grade"])), color)
@@ -178,16 +182,22 @@ def _footer(clear, n_signals) -> str:
     )
 
 
-def report_html(name, frame, result):
+def report_html(name, frame, result, flagged=None):
+    """The diagnosis card. `flagged` maps a PII-flagged column name to its
+    type (`pii.flagged_columns`); evidence from those columns is masked. It is
+    computed from `frame` when `None`, so a caller that already scanned passes
+    it in."""
+    if flagged is None:
+        flagged = pii.flagged_columns(frame)
     findings = result.get("findings", [])
     fixable = sum(1 for f in findings if not f["indicator"])
-    flagged = sum(1 for f in findings if f["indicator"])
+    indicators = sum(1 for f in findings if f["indicator"])
     parts = [
         _header(name, len(frame), len(frame.columns)),
         _encoding_warning(frame),
-        _summary(fixable, flagged, len(result.get("clear", []))),
+        _summary(fixable, indicators, len(result.get("clear", []))),
     ]
-    parts.extend(_finding(f) for f in findings)
+    parts.extend(_finding(f, flagged) for f in findings)
     parts.append(_footer(result.get("clear", []), len(SINGLE_FRAME)))
     return _card("".join(parts))
 

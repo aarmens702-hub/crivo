@@ -2,9 +2,11 @@
 paints its own colours, never trusts the notebook theme, and escapes every
 value that crosses into it (GitHub / nbconvert sanitize aggressively)."""
 
+from html import escape
+
 import pandas as pd
 
-from crivo.detect import SINGLE_FRAME, detect_all
+from crivo.detect import SINGLE_FRAME, SLUGS, detect_all
 from crivo.notebook import report_html
 
 
@@ -93,6 +95,46 @@ def test_finding_escapes_an_unexpected_grade_value():
 
     assert "<b>x</b>" not in html
     assert "&lt;b&gt;x&lt;/b&gt;" in html
+
+
+def _contacts_diagnosis():
+    """A contacts export whose findings quote PII cells: emails and phones
+    padded with stray spaces (d06 on both) and a plan column with an 'N/A'
+    token (d04, not PII)."""
+    df = pd.DataFrame(
+        {
+            "email": [
+                f" ana.{i}@example.com  " if i % 4 == 1 else f"ana.{i}@example.com"
+                for i in range(20)
+            ],
+            "phone": [
+                f"  555-010-{2000 + i}" if i % 5 == 0 else f"(555) 010-{2000 + i}"
+                for i in range(20)
+            ],
+            "plan": ["basic", "N/A", "pro", "team"] * 5,
+        }
+    )
+    return df, detect_all(df, "contacts.csv")
+
+
+def test_report_html_masks_evidence_from_pii_flagged_columns():
+    """Regression for #18. The notebook card rendered finding evidence raw, so
+    padded emails and phones quoted by whitespace-damage reached the card.
+    Evidence from a PII-flagged column is masked; the finding and non-PII
+    evidence stay as they were."""
+    df, result = _contacts_diagnosis()
+    fired = {(f["slug"], tuple(f["columns"])) for f in result["findings"]}
+    assert (SLUGS[6], ("email",)) in fired
+    assert (SLUGS[6], ("phone",)) in fired
+
+    card = report_html("contacts.csv", df, result)
+
+    raw = {cell.strip() for column in ("email", "phone") for cell in df[column]}
+    leaked = sum(1 for cell in raw if cell in card)
+    assert leaked == 0  # a count, so the failure message carries no cell
+    assert SLUGS[6] in card
+    assert escape("'***@example.com'") in card  # masked, not dropped
+    assert escape("('N/A')") in card  # non-PII evidence is untouched
 
 
 def _clean_summary():

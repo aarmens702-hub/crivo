@@ -167,20 +167,29 @@ class Report:
         """Write the report as ONE standalone, self-contained HTML file — the
         notebook card wrapped in a document shell, every style inline, no
         scripts, no external assets — for sending to someone who will never
-        install anything. The PII ship-gate (B0.1) runs first and its masked
-        section is injected above the card, so a report that travels never
-        carries raw personal data. Returns the written path; parents made."""
+        install anything. The PII scan (B0.1) runs once: its masked section
+        goes above the card, and finding evidence from the columns it flags is
+        masked, so the file carries no raw value from a PII-flagged column
+        (email, phone, SSN, card); names are not detected. Returns the written
+        path; parents made."""
+        from html import escape
+
         from crivo import htmlreport as _htmlreport
         from crivo import notebook as _notebook
+        from crivo import pii as _pii
 
-        card = _notebook.report_html(self._name, self._frame, self._result)
-        pii_gate = _htmlreport.pii_section_html(self._frame)
+        hits = _pii.scan(self._frame)
+        flagged: dict[str, str] = {}
+        for hit in hits:  # first by position wins, as in pii.flagged_columns
+            flagged.setdefault(str(hit["column"]), hit["pii_type"])
+        card = _notebook.report_html(self._name, self._frame, self._result, flagged)
+        pii_gate = _htmlreport.pii_section_html(self._frame, hits=hits)
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
             '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f"<title>crivo report — {self._name}</title></head>\n"
+            f"<title>crivo report — {escape(str(self._name))}</title></head>\n"
             '<body style="margin:0;padding:24px;background:#f4f4f2">'
             '<div style="max-width:900px;margin:0 auto"><h2 style="font:600 '
             '15px system-ui,sans-serif;color:#1d3a3e">Personal data</h2>'
