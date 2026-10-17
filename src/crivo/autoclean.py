@@ -624,6 +624,22 @@ def _slim(finding: dict, **extra) -> dict:
     }
 
 
+# why an AUTO finding with no fixer is left for a person; the default covers
+# diseases still waiting on a fixer, the entries ones denied a fixer on purpose
+_NO_FIXER = {9: "removing duplicate rows deletes data, so a person decides"}
+
+
+def _why_deferred(finding: dict) -> dict:
+    """The `reason` for a finding clean() never attempted: empty unless it is
+    graded AUTO yet has no fixer, which would otherwise read as safe to fix."""
+    disease = finding["disease"]
+    if finding["grade"] != "AUTO" or disease in FIXERS:
+        return {}
+    return {
+        "reason": _NO_FIXER.get(disease, "no deterministic fixer for this disease yet")
+    }
+
+
 def changed_cells(
     before: pd.DataFrame, after: pd.DataFrame, applied: list[dict], per_fix: int = 3
 ) -> list[dict]:
@@ -768,6 +784,7 @@ def clean(df: pd.DataFrame, policy: str = "auto") -> tuple[pd.DataFrame, CleanSu
         return _ORDER.index(d) if d in _ORDER else len(_ORDER)
 
     auto = [f for f in findings if f["grade"] == "AUTO" and f["disease"] in FIXERS]
+    attempted = {id(f) for f in auto}
     for finding in sorted(auto, key=rank):
         disease, cols = finding["disease"], finding["columns"]
         # d18 alone reads a second argument: the header-row count the detector
@@ -793,10 +810,15 @@ def clean(df: pd.DataFrame, policy: str = "auto") -> tuple[pd.DataFrame, CleanSu
 
     reviewed = {(f["disease"], tuple(f["columns"])) for f in applied}
     for finding in findings:
-        if (finding["disease"], tuple(finding["columns"])) not in reviewed and not any(
-            r["disease"] == finding["disease"] and r["columns"] == finding["columns"]
-            for r in needs_review
-        ):
-            needs_review.append(_slim(finding))
+        if id(finding) in attempted:  # already applied or already in review
+            continue
+        disease, cols = finding["disease"], finding["columns"]
+        # a fix applied on these columns may have cleared this finding too;
+        # re-check rather than assume, so a HUMAN finding it left stays listed
+        if (disease, tuple(cols)) in reviewed and detect_one(
+            working, disease, cols
+        ) is None:
+            continue
+        needs_review.append(_slim(finding, **_why_deferred(finding)))
 
     return working, CleanSummary(df, working, applied, needs_review)

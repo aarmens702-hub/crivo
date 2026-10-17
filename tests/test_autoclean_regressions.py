@@ -351,3 +351,122 @@ def test_number_fix_refuses_the_magnitudes_spelled_as_words():
 
         assert cleaned["revenue"].tolist() == values, f"{spelling} was stripped"
         assert not any(a["disease"] == 1 for a in summary.applied), spelling
+
+
+# --- #24. a HUMAN finding that shares a column with an AUTO one --------------
+
+
+def _state_frame() -> pd.DataFrame:
+    """A CRM export's state column: three casings of one state (d07 AUTO) and
+    two misspellings a person must map (d07 HUMAN), both on ['state']. The
+    zero-padded ids keep every row distinct, so no row disease rides along."""
+    states = (
+        ["California"] * 5
+        + ["california", "CALIFORNIA"]
+        + ["Pennsylvania"] * 4
+        + ["Pensylvania"]
+        + ["Washington"] * 4
+        + ["Massachusetts"] * 3
+        + ["Massachusets"]
+    )
+    ids = [f"{n:06d}" for n in range(1041, 1041 + 7 * len(states), 7)]
+    return pd.DataFrame({"account_id": ids, "state": states})
+
+
+def test_a_human_finding_beside_an_auto_one_stays_in_review():
+    """Regression for #24. The second loop of clean() deduped review entries
+    on (disease, columns) alone, so once the d07 AUTO case finding landed in
+    review, the d07 HUMAN spelling finding on the same column matched it and
+    was dropped. The spelling variants are still in the cleaned frame; the
+    one finding a person had to decide vanished from the summary."""
+    frame = _state_frame()
+    found = {
+        (f["disease"], f["grade"])
+        for f in detect_all(frame)["findings"]
+        if f["columns"] == ["state"]
+    }
+    assert {(7, "AUTO"), (7, "HUMAN")} <= found, "the premise of this test"
+
+    _cleaned, summary = clean(frame)
+
+    assert any(
+        r["disease"] == 7 and r["grade"] == "HUMAN" for r in summary.needs_review
+    ), summary.needs_review
+
+
+def test_a_human_finding_the_applied_fix_also_cleared_is_not_left_in_review(
+    monkeypatch,
+):
+    """Pin beside #24, the other side of the line. When the fix applied on
+    a column also clears a HUMAN finding of the same disease there, the
+    re-check finds nothing and review must not carry a finding that is no
+    longer true. The stand-in fixer maps every variant onto its canonical
+    spelling, which is what a person would have decided."""
+    canonical = {
+        "california": "California",
+        "pennsylvania": "Pennsylvania",
+        "pensylvania": "Pennsylvania",
+        "washington": "Washington",
+        "massachusetts": "Massachusetts",
+        "massachusets": "Massachusetts",
+    }
+
+    def fold_and_respell(frame, cols):
+        out = frame.copy()
+        for c in cols:
+            out[c] = out[c].str.lower().map(canonical)
+        return out
+
+    monkeypatch.setitem(FIXERS, 7, fold_and_respell)
+
+    cleaned, summary = clean(_state_frame())
+
+    assert 7 in {a["disease"] for a in summary.applied}, summary.needs_review
+    assert detect_one(cleaned, 7, ["state"]) is None, "the premise of this test"
+    assert not _reviewed(summary, 7, ["state"]), summary.needs_review
+
+
+def _excel_damaged_ids() -> pd.DataFrame:
+    """A transactions export after a round trip through Excel, the shape of
+    the bench case tx-excel-ids: 30 'TX' ids zero-padded to six digits, three
+    of them still wearing Excel's leading-apostrophe text guard, and three a
+    numeric cast ate (prefix and zeros gone, one rendered in scientific
+    notation). Hand-checked against d22: 3 guarded of 30 sits in [2, 15], and
+    3 eaten against 27 intact clears max(3, 15), so both signals fire."""
+    ids = [f"TX{n:06d}" for n in range(4417, 4417 + 13 * 30, 13)]
+    for row in (2, 11, 23):  # 'TX004443, 'TX004560, 'TX004716
+        ids[row] = "'" + ids[row]
+    ids[5] = "4482"  # was TX004482
+    ids[17] = "4638"  # was TX004638
+    ids[26] = "4.76E+03"  # was TX004755
+    amounts = [round(12.5 + 7.25 * n, 2) for n in range(30)]
+    return pd.DataFrame({"txn_id": ids, "amount": amounts})
+
+
+def test_two_same_grade_findings_on_one_column_both_stay_in_review():
+    """Regression for #24. The old review dedupe matched on (disease, columns)
+    alone, so of two d22 GATE findings on one id column (the apostrophe guard
+    and the eaten ids, two different damages a person fixes differently) the
+    second was dropped from needs_review. Matching on (disease, columns,
+    grade) would drop it just the same; this guards against a future dedupe
+    of that kind. Every d22 finding on the column must reach review, one
+    entry for one finding."""
+    frame = _excel_damaged_ids()
+    d22 = [
+        f
+        for f in detect_all(frame)["findings"]
+        if f["disease"] == 22 and f["columns"] == ["txn_id"]
+    ]
+    assert [f["grade"] for f in d22] == ["GATE", "GATE"], "the premise of this test"
+
+    _cleaned, summary = clean(frame)
+
+    reviewed = [
+        r
+        for r in summary.needs_review
+        if r["disease"] == 22 and r["columns"] == ["txn_id"]
+    ]
+    expected = [(22, f["slug"], ["txn_id"], "GATE") for f in d22]
+    assert [
+        (r["disease"], r["slug"], r["columns"], r["grade"]) for r in reviewed
+    ] == expected, summary.needs_review

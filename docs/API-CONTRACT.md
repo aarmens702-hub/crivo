@@ -36,7 +36,7 @@ The accessor, registered on import: `df.crivo.diagnose(name=None) -> Report` and
 - `suggest(k=5) -> list[str]`: starter questions; column names may appear, cell values never do.
 
 ### `CleanSummary`
-- `applied`, `needs_review`: lists of `{disease, slug, columns, grade}`; a review entry may add `reason` (`"fix did not clear verification"`, `"fixer error: ..."`).
+- `applied`, `needs_review`: lists of `{disease, slug, columns, grade}`; a review entry may add `reason` (`"fix did not clear verification"`, `"fixer error: ..."`, and for an `AUTO` finding with no fixer `"removing duplicate rows deletes data, so a person decides"` (d09) or `"no deterministic fixer for this disease yet"`). There is one review entry per finding, and entries can share `disease`, `columns` and even `grade` (for example a d07 `AUTO` beside a d07 `HUMAN` on one column, or two d22 `GATE` findings on one id column).
 - `to_dict()` keys: `applied, needs_review, rows_before, rows_after, columns_before, columns_after`. `to_json(indent=2)`.
 - `samples(per_fix=3) -> list[dict]`: `{disease, slug, columns, examples: [{column, row, old, new}]}`.
 - `diff(max_rows=200)`: a pandas Styler of changed cells (needs jinja2, not a runtime dependency).
