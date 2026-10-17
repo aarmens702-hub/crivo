@@ -1,4 +1,4 @@
-"""Tests for the take-home dataset fetcher's one piece of real logic.
+"""Tests for the public dataset fetcher's one piece of real logic.
 
 The Canada consolidated contracts file is 641MB; the fetcher must stream it
 and keep a prefix rather than downloading the whole thing onto a laptop that
@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from fetch_takehome import take_prefix
+from fetch_public_spend import take_prefix
 
 
 def test_the_prefix_sample_keeps_the_header_plus_n_rows() -> None:

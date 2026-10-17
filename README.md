@@ -318,7 +318,7 @@ cell. Not on PyPI yet. The plan, stage by stage, lives in
 | --- | --- |
 | `src/crivo/` | the library, the analyst loop, the kernel supervisor, the MCP server |
 | `bench/` | the benchmark: corruption injectors, truth manifests, scorer, results |
-| `skills/` | skills the analyst has learned and a person admitted |
+| `skills/` | skill folders a person admitted (the ledger that activates them is local for now) |
 | `specs/` | a design spec for every phase, newest last |
 | `docs/` | the longer explanation, the architecture and contract, closed review records |
 

@@ -172,11 +172,11 @@ def test_clean_makes_a_real_file_pass_its_own_detectors() -> None:
     detectors — proven by re-diagnosing the cleaned frame."""
     from pathlib import Path
 
-    src = Path("data/takehome/hmt-spend-2026-03.csv")
+    src = Path("data/external/public-spend/hmt-spend-2026-03.csv")
     if not src.exists():
         import pytest
 
-        pytest.skip("run scripts/fetch_takehome.py for the real file")
+        pytest.skip("run scripts/fetch_public_spend.py for the real file")
 
     df = aa.read(src)
     cleaned, summary = aa.clean(df)
