@@ -84,11 +84,27 @@ def main() -> int:
         "the family harmonize; a QUERY turn still runs the cell you approve "
         "at its gate, whatever that cell does.",
     )
-    if sys.argv[1:2] == ["diagnose"]:
-        sys.argv = [sys.argv[0], "--diagnose", *sys.argv[2:]]
-    if sys.argv[1:2] == ["clean"]:
-        sys.argv = [sys.argv[0], "--clean", *sys.argv[2:]]
-    args = parser.parse_args()
+    parser.add_argument(
+        "file",
+        nargs="?",
+        metavar="FILE",
+        help="the file for `crivo diagnose FILE` and `crivo clean FILE`",
+    )
+    # the subcommand names the mode and FILE is a positional, so options may
+    # sit before or after it and `crivo diagnose --help` prints the help
+    mode = sys.argv[1] if sys.argv[1:2] in (["diagnose"], ["clean"]) else None
+    if mode:
+        parser.prog = f"crivo {mode}"
+    args = parser.parse_args(sys.argv[2:] if mode else sys.argv[1:])
+    if mode == "diagnose":
+        args.diagnose = args.diagnose or args.file
+    elif mode == "clean":
+        args.clean = args.clean or args.file
+    # the mode's own FILE only: `crivo clean --diagnose FILE` must not diagnose
+    if mode and not getattr(args, mode):
+        parser.error(f"crivo {mode} needs a FILE")
+    if not mode and args.file:
+        parser.error("unexpected FILE; did you mean `crivo diagnose FILE`?")
 
     if args.diagnose:
         import json as _json
