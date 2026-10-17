@@ -30,6 +30,26 @@ def _required_key() -> str | None:
     return None
 
 
+_PROVIDERS = ("deepseek", "claude", "openai", "faux")
+
+
+def provider_problem() -> str | None:
+    """Why the configured provider can't run yet, in one sentence, or None.
+
+    The one check the REPL, `clean`, `ask`, the MCP model tools and the agent
+    bench share. An empty CRIVO_PROVIDER is unset, so deepseek. Any other
+    value outside the four is refused: llm would send it to DeepSeek and stamp
+    the misspelling on the card."""
+    provider = os.environ.get("CRIVO_PROVIDER") or "deepseek"
+    if provider not in _PROVIDERS:
+        return (
+            f"CRIVO_PROVIDER={provider!r} is not a provider; "
+            f"set it to one of {', '.join(_PROVIDERS)}"
+        )
+    missing = _required_key()
+    return f"{missing} is not set" if missing else None
+
+
 def _make_session():
     """Session factory, module-level so tests can swap in a double."""
     from crivo.loop import Session
@@ -96,10 +116,10 @@ def _materialize(frame, name: str | None) -> str:
 
 def ask(data, question: str, *, name: str | None = None) -> Answer:
     """Answer one question over `data` (a DataFrame or a path) with receipts."""
-    missing = _required_key()
-    if missing:
+    problem = provider_problem()
+    if problem:
         raise RuntimeError(
-            f"{missing} is not set — the agent half needs a model key "
+            f"{problem} — the agent half needs a model key "
             f"(the keyless half, crivo.diagnose/crivo.clean, does not)"
         )
     import pandas as pd

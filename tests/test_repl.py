@@ -394,6 +394,86 @@ def test_main_without_api_key_exits_1(tmp_path) -> None:
     assert callable(main)
 
 
+def _main_up_to_the_repl(monkeypatch, tmp_path):
+    """`python -m crivo` in-process, stopped where the REPL would start: no
+    .env is read, no kernel starts, and every Session built is recorded."""
+    import crivo.__main__ as entry
+
+    built: list[dict] = []
+
+    class _Session:
+        def __init__(self, **kw):
+            built.append(kw)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(entry, "load_dotenv", lambda *a, **k: False)
+    monkeypatch.setattr("crivo.loop.Session", _Session)
+    monkeypatch.setattr("crivo.repl.run_repl", lambda session, **kw: 0)
+    monkeypatch.setattr("sys.argv", ["crivo"])
+    return entry.main, built
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({"CRIVO_PROVIDER": "faux"}, id="faux"),
+        pytest.param(
+            {
+                "CRIVO_PROVIDER": "openai",
+                "CRIVO_BASE_URL": "http://localhost:11434/v1",
+                "CRIVO_MODEL": "qwen3:32b",
+            },
+            id="openai-ollama",
+        ),
+    ],
+)
+def test_main_starts_without_a_deepseek_key_under_faux_and_openai(
+    monkeypatch, tmp_path, capsys, env
+) -> None:
+    """BP3: faux needs nothing and openai needs an endpoint and a model (the
+    README's Ollama example), so neither may be stopped for a DeepSeek key."""
+    main, built = _main_up_to_the_repl(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+
+    rc = main()
+
+    out = capsys.readouterr().out
+    assert "is not set" not in out, out
+    assert rc == 0
+    assert len(built) == 1, "the session must start"
+
+
+def test_main_refuses_a_misspelled_provider_and_still_starts_a_real_one(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """BP3: `CRIVO_PROVIDER=Claude` with keys on hand used to start a DeepSeek
+    session under the misspelling. It is refused before a session starts,
+    while the correctly spelled provider and an empty one (as .env.example
+    ships it, meaning deepseek) still start."""
+    main, built = _main_up_to_the_repl(monkeypatch, tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    assert main() == 0, "the correctly spelled provider must still start"
+    monkeypatch.setenv("CRIVO_PROVIDER", "")
+    assert main() == 0, "an empty CRIVO_PROVIDER is deepseek, not a misspelling"
+    assert len(built) == 2
+    capsys.readouterr()
+    built.clear()
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "Claude")
+    rc = main()
+
+    out = capsys.readouterr().out
+    assert not built, "no session may start under a provider that does not exist"
+    assert rc == 1
+    assert "deepseek, claude, openai, faux" in out
+
+
 # --- P2: the library view (R16) ----------------------------------------------
 
 

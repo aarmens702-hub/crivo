@@ -189,14 +189,11 @@ def _diagnose_file(path: str) -> str:
 
 
 def _required_key() -> str | None:
-    """R5: which env var the configured provider needs, or None when set."""
-    import os
+    """R5: why the configured provider can't run yet, or None when it can."""
+    from crivo.query import provider_problem
 
-    provider = os.environ.get("CRIVO_PROVIDER", "deepseek")
-    key = "ANTHROPIC_API_KEY" if provider == "claude" else "DEEPSEEK_API_KEY"
-    if not os.environ.get(key):
-        return f"{key} is not set — add it to the MCP client config env"
-    return None
+    problem = provider_problem()
+    return f"{problem}. Add it to the MCP client config env." if problem else None
 
 
 def _make_session():

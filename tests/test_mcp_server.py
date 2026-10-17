@@ -44,6 +44,55 @@ def test_key_needing_tools_name_the_missing_key(monkeypatch) -> None:
     assert "ANTHROPIC_API_KEY" in mcp_server._clean_file("x.csv")["error"]
 
 
+def test_required_key_is_per_provider(monkeypatch) -> None:
+    """BP3: the model tools ask each provider for what it needs and nothing
+    else. faux needs nothing; openai (Ollama, vLLM, OpenRouter) needs an
+    endpoint and a model, not a DeepSeek key; claude needs its own key; a
+    misspelled provider is refused instead of routed to DeepSeek; an empty
+    CRIVO_PROVIDER, as .env.example ships it, is deepseek."""
+    cases = [
+        ({"CRIVO_PROVIDER": "faux"}, None),
+        (
+            {
+                "CRIVO_PROVIDER": "openai",
+                "CRIVO_BASE_URL": "http://localhost:11434/v1",
+                "CRIVO_MODEL": "qwen3:32b",
+            },
+            None,
+        ),
+        (
+            {"CRIVO_PROVIDER": "openai", "CRIVO_BASE_URL": "http://localhost:11434/v1"},
+            "CRIVO_MODEL",
+        ),
+        (
+            {"CRIVO_PROVIDER": "claude", "DEEPSEEK_API_KEY": "sk-test"},
+            "ANTHROPIC_API_KEY",
+        ),
+        (
+            {
+                "CRIVO_PROVIDER": "Claude",
+                "DEEPSEEK_API_KEY": "sk-test",
+                "ANTHROPIC_API_KEY": "sk-ant-test",
+            },
+            "deepseek, claude, openai, faux",
+        ),
+        ({"CRIVO_PROVIDER": "", "DEEPSEEK_API_KEY": "sk-test"}, None),
+    ]
+    wrong = []
+    for env, expected in cases:
+        with monkeypatch.context() as m:
+            for var, value in env.items():
+                m.setenv(var, value)
+            message = mcp_server._required_key()
+        if expected is None:
+            ok = message is None
+        else:
+            ok = message is not None and expected in message
+        if not ok:
+            wrong.append({"env": env, "want": expected, "got": message})
+    assert not wrong, wrong
+
+
 class FakeSession:
     """SessionLike double in the tests/test_repl.py style: scripted event
     generators, recorded decisions, and just enough surface for the server."""

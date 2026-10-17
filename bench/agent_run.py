@@ -29,8 +29,8 @@ from bench.score import score_end_to_end
 from crivo import llm
 from crivo.autoclean import FIXERS
 from crivo.policy import PolicyRecord
+from crivo.query import provider_problem
 
-KEY_VARS = ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY")
 RESULTS_DIR = Path("bench/results/agent")
 
 # The cap defaults, named once: `main` gives them to the parser and
@@ -57,11 +57,10 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
 
 
 def _require_key() -> None:
-    if not any(os.environ.get(v) for v in KEY_VARS):
-        sys.exit(
-            "agent bench needs a model key; none of "
-            f"{', '.join(KEY_VARS)} set (checked env and .env) — R7"
-        )
+    """R7: the configured provider's own needs, the check the CLI shares."""
+    problem = provider_problem()
+    if problem:
+        sys.exit(f"agent bench: {problem} (checked env and .env)")
 
 
 def _drive(

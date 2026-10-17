@@ -92,7 +92,7 @@ Entry points: `crivo` and `python -m crivo` (same `main`), and `crivo-mcp`.
 
 **`python -m crivo`** starts the REPL. Shared flags: `--workspace` (default `workspace`), `--data-dir` (default `data`), `--docker`, `--resume SESSION`, `--auto-run` (skips gates, dev only), `--autonomy autonomous|careful|report-only` (default `autonomous`). REPL commands: `/load <path> [name]`, `/clean <var>`, `/clean-family <glob> <name>`, `/skills`, `/why [claim id]`, `/trace`, `/quit`; any other line is a question. The gate prompt is `[r]un / re[j]ect / [s]kip`.
 
-Key check: `clean` and the REPL require `ANTHROPIC_API_KEY` when `CRIVO_PROVIDER=claude` and `DEEPSEEK_API_KEY` for every other provider, including `openai` and `faux` (`__main__.py`). `crivo.ask` checks per provider instead (`query._required_key`).
+Key check: `clean`, the REPL, `crivo.ask`, the MCP model tools and the agent bench share one per-provider check (`query.provider_problem`): `deepseek` needs `DEEPSEEK_API_KEY`, `claude` needs `ANTHROPIC_API_KEY`, `openai` needs `CRIVO_BASE_URL` and `CRIVO_MODEL`, `faux` needs nothing. Any other `CRIVO_PROVIDER` value is refused.
 
 ## MCP tools (`crivo-mcp`, stdio)
 Every tool returns its errors as data (`{"error": ...}` or an error string), never a crash. Client paths must resolve inside `CRIVO_MCP_ROOT`.
@@ -106,7 +106,7 @@ Every tool returns its errors as data (`{"error": ...}` or an error string), nev
 | `why` | `session_id: str` | str, the provenance chain as markdown. |
 | `close_session` | `session_id: str` | bool, true when the session existed. |
 
-The model-backed tools use the same key check as the CLI (`mcp_server._required_key`).
+The model-backed tools use the same check.
 
 ## Session events (`events.py`)
 Drivers consume `SessionLike`: `load(path, name=None)`, `run_turn(question)`, `clean(var)`, `clean_family(pattern, name)`, `close()`. The three runners are generators of `Event`.

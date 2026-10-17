@@ -119,10 +119,12 @@ def main() -> int:
             1 if any(judgment.get(f["grade"], 2) >= threshold for f in findings) else 0
         )
 
-    provider = os.environ.get("CRIVO_PROVIDER", "deepseek")
-    key = "ANTHROPIC_API_KEY" if provider == "claude" else "DEEPSEEK_API_KEY"
-    if not os.environ.get(key):
-        print(f"{key} is not set — put it in .env or export it.")
+    # import-light: crivo.query imports only os at module level
+    from crivo.query import provider_problem
+
+    problem = provider_problem()
+    if problem:
+        print(f"{problem}. Put it in .env or export it.")
         return 1
 
     try:
