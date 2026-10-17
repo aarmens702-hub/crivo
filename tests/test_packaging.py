@@ -13,6 +13,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 _REPO = Path(__file__).resolve().parents[1]
 
 # import name -> distribution name, where the two differ
@@ -24,7 +26,6 @@ _IMPORT_TO_DIST = {
 # Undeclared on purpose: arrives through a declared package. One per line, so
 # a change that declares one deletes only its own line.
 _TRANSITIVE_ALLOWED = {
-    "numpy",  # via pandas; #8 declares it
     "anyio",  # via the model SDKs and mcp
     "pydantic",  # via the model SDKs and mcp
     "mcp_types",  # ships with mcp>=2
@@ -36,21 +37,18 @@ def _normalise(name):
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _requirement_name(spec):
-    try:
-        from packaging.requirements import Requirement
-    except ImportError:
-        return re.split(r"[<>=!~\[ ;]", spec.strip(), maxsplit=1)[0]
-    return Requirement(spec).name
-
-
-def _declared_distributions():
-    """Runtime and extras requirements; [dependency-groups] never ships."""
+def _requirement_specs():
+    """Raw runtime and extras requirement strings; [dependency-groups] never ships."""
     project = tomllib.loads((_REPO / "pyproject.toml").read_text())["project"]
     specs = list(project.get("dependencies", []))
     for extra in project.get("optional-dependencies", {}).values():
         specs.extend(extra)
-    return {_normalise(_requirement_name(spec)) for spec in specs}
+    return specs
+
+
+def _declared_distributions():
+    """Normalised distribution names of every requirement a user installs."""
+    return {_normalise(Requirement(spec).name) for spec in _requirement_specs()}
 
 
 def _third_party_imports():
@@ -94,3 +92,24 @@ def test_shipped_code_imports_only_declared_packages():
     assert offenders == [], (
         f"src/crivo imports packages pyproject.toml does not declare: {detail}"
     )
+
+
+def test_mcp_requirement_excludes_the_v1_api():
+    """mcp_server imports `mcp.server.mcpserver` and `mcp_types`, which only mcp 2.x has.
+
+    A floor that admits 1.x lets a resolver pick an mcp on which `crivo-mcp`
+    cannot start at all.
+    """
+    mcp_specs = [
+        spec
+        for spec in _requirement_specs()
+        if _normalise(Requirement(spec).name) == "mcp"
+    ]
+    assert len(mcp_specs) == 1, f"expected one mcp requirement, found {mcp_specs}"
+
+    specifier = Requirement(mcp_specs[0]).specifier
+    detail = f"pyproject.toml declares {mcp_specs[0]!r}"
+    assert not specifier.contains("1.26.0"), (
+        f"{detail}, which admits mcp 1.26.0 (no mcp.server.mcpserver, no mcp_types)"
+    )
+    assert specifier.contains("2.0.0"), f"{detail}, which refuses mcp 2.0.0"

@@ -31,7 +31,8 @@ dependencies = [
     "ipykernel>=7.3.0",
     "jupyter-client>=8.9.1",
     "matplotlib>=3.9",
-    "mcp>=1.2",
+    "mcp>=2.0,<3",
+    "numpy>=2.0",
     "openai>=2.53.0",
     "openpyxl>=3.1.5",
     "pandas>=3.0.5",
@@ -63,7 +64,6 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.2",
-    "tdd-guard-pytest>=0.1.2",
     # test-only: exercises CleanSummary.diff()'s pandas Styler. NOT a runtime
     # dependency — the keyless core and the notebook cards never need jinja2.
     "jinja2>=3.0",
@@ -71,7 +71,6 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-tdd_guard_project_root = "/Users/aarmensidhu/Desktop/analyst-agent"
 # bench/ is repo tooling (the Proving Ground), deliberately not shipped in the
 # wheel — the repo root on sys.path is what makes `import bench` work in tests
 pythonpath = ["."]
