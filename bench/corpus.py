@@ -28,6 +28,19 @@ SMOKE: list[dict] = [
     {"name": "tx-dates-frozen", "base": _TX, "diseases": [2], "seed": 102, "n": 250},
     {"name": "tx-dates-mixed", "base": _TX, "diseases": [3], "seed": 103, "n": 250},
     {"name": "tx-sentinels", "base": _TX, "diseases": [4], "seed": 104, "n": 250},
+    # d04 with numeric placeholders only, typed into whole numbers held as
+    # text: tx-sentinels mixes -999 with N/A, so a missed -999 never shows
+    {
+        "name": "units-numeric-sentinels",
+        "base": (
+            "typed_frame",
+            {"spec": {"row_id": "id", "units": "numeric_text", "amount": "numeric"}},
+        ),
+        "diseases": [4],
+        "params": {4: {"columns": ["units"], "sentinels": ("-999", "-9999")}},
+        "seed": 129,
+        "n": 250,
+    },
     {"name": "tx-suppression", "base": _TX, "diseases": [5], "seed": 105, "n": 250},
     {"name": "tx-whitespace", "base": _TX, "diseases": [6], "seed": 106, "n": 250},
     {"name": "tx-case-variants", "base": _TX, "diseases": [7], "seed": 107, "n": 250},
@@ -119,15 +132,19 @@ def build(entry: dict) -> tuple:
     fn_name, kwargs = entry["base"]
     pristine = getattr(bases, fn_name)(seed=entry["seed"], n=entry["n"], **kwargs)
     dirty, truth = corrupt(
-        pristine, entry["diseases"], seed=entry["seed"], base=entry["name"]
+        pristine,
+        entry["diseases"],
+        seed=entry["seed"],
+        base=entry["name"],
+        params=entry.get("params"),
     )
     return pristine, dirty, truth
 
 
 def full_corpus(seeds: int = 50) -> list[dict]:
-    """Every SMOKE mix expanded across `seeds` fresh seeds (23 x 50 = 1150
-    datasets by default; raise `seeds` for more). Names stay unique and each
-    entry remains individually reproducible."""
+    """Every SMOKE mix expanded across `seeds` fresh seeds (len(SMOKE) x
+    seeds datasets, 50 seeds by default; raise `seeds` for more). Names stay
+    unique and each entry remains individually reproducible."""
     out = []
     for entry in SMOKE:
         for k in range(seeds):

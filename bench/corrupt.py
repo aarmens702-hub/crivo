@@ -168,20 +168,22 @@ def inject_d4(
     rng: np.random.Generator,
     columns: list[str] | None = None,
     rate: float = 0.1,
+    sentinels: tuple[str, ...] = _SENTINELS,
 ) -> pd.DataFrame:
     """sentinel-missing: rate of cells in a chosen column replaced by a
-    sentinel drawn from a fixed vocabulary; untouched cells keep their exact
-    pristine value (only their column's dtype may degrade to hold the mix)."""
+    sentinel drawn from `sentinels` (default: the mixed vocabulary
+    _SENTINELS); untouched cells keep their exact pristine value (only their
+    column's dtype may degrade to hold the mix)."""
     col = _pick_column(list(frame.columns), columns, 4, "sentinel-missing")
     n = len(frame)
     holder = _holder_for(frame, col)
     k = _count(rate, n)
     rows = rng.choice(n, size=k, replace=False)
-    sentinel_idx = rng.integers(0, len(_SENTINELS), size=k)
+    sentinel_idx = rng.integers(0, len(sentinels), size=k)
     cells = []
     for row, s in zip(rows, sentinel_idx):
         original = frame[col].iat[int(row)]
-        sentinel = _SENTINELS[s]
+        sentinel = sentinels[s]
         holder.iat[int(row)] = sentinel
         cells.append(
             Cell(
@@ -1302,12 +1304,21 @@ def inject_d26(
 
 
 def corrupt(
-    frame: pd.DataFrame, diseases: list[int], seed: int, base: str
+    frame: pd.DataFrame,
+    diseases: list[int],
+    seed: int,
+    base: str,
+    params: dict[int, dict] | None = None,
 ) -> tuple[pd.DataFrame, GroundTruth]:
     """Apply `diseases` in order over one rng stream; ground truth's
     n_rows/n_cols come from the pristine `frame`, frame_sha256 from the final
-    dirty frame. Same (frame, diseases, seed, base) => identical dirty frame
-    and manifest, forever.
+    dirty frame. Same (frame, diseases, seed, base, params) => identical dirty
+    frame and manifest, forever.
+
+    `params` maps a disease id to keyword arguments for its injector, e.g.
+    {4: {"columns": ["units"], "sentinels": ("-999",)}}. A disease with no
+    entry (or params=None) runs on the injector's own defaults. A keyword the
+    injector doesn't take raises TypeError.
 
     Put disease 18 (header-damage) last when combining with cell/row
     diseases: a rename would orphan any later injector's column-name lookup.
@@ -1327,6 +1338,6 @@ def corrupt(
             raise ValueError(
                 f"corrupt(): no injector registered for disease {disease_id}"
             )
-        dirty = fn(dirty, truth, rng)
+        dirty = fn(dirty, truth, rng, **(params or {}).get(disease_id, {}))
     truth.frame_sha256 = frame_sha256(dirty)
     return dirty, truth

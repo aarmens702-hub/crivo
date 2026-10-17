@@ -11,7 +11,7 @@ def test_smoke_corpus_is_deterministic_and_covers_every_injector():
     covered: set[int] = set()
     names = [entry["name"] for entry in SMOKE]
     assert len(names) == len(set(names)), "corpus names must be unique"
-    assert 12 <= len(SMOKE) <= 30, "smoke-sized by design (~20 datasets)"
+    assert 12 <= len(SMOKE) <= 40, "smoke-sized by design (about 30 datasets)"
     for entry in SMOKE:
         pristine, dirty, truth = build(entry)
         _, _, again = build(entry)

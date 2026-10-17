@@ -58,6 +58,10 @@ def _typed_column(kind: str, name: str, n: int, rng: np.random.Generator):
         return rng.uniform(1.0, 1000.0, n).round(2)
     if kind == "int":
         return rng.integers(0, 1000, n).astype("int64")
+    if kind == "numeric_text":
+        # whole numbers held as strings, the way a CSV column arrives when it
+        # is read as text
+        return rng.integers(1, 500, n).astype(str)
     if kind in ("datetime", "start"):
         return _dates(rng, n)
     if kind == "category":
@@ -79,8 +83,8 @@ def _typed_column(kind: str, name: str, n: int, rng: np.random.Generator):
 
 def typed_frame(seed: int, n: int, spec: dict[str, str]) -> pd.DataFrame:
     """Build a frame from a column-name -> kind spec. Kinds: numeric, int,
-    datetime, category, text, flag (two-valued yes/no), id, lat, lon,
-    start/end (paired, end >= start).
+    numeric_text (whole numbers stored as strings), datetime, category, text,
+    flag (two-valued yes/no), id, lat, lon, start/end (paired, end >= start).
 
     "end" is built in a second pass so its position in `spec` doesn't matter —
     it always resolves against whichever column declared kind "start".
