@@ -195,18 +195,18 @@ class Report:
         no dataset rows on any output surface)."""
         frame = self._frame
         n = len(frame)
-        numeric = [c for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])]
-        datetimes = [
-            c for c in frame.columns if pd.api.types.is_datetime64_any_dtype(frame[c])
-        ]
-        ids = [c for c in frame.columns if n > 1 and frame[c].nunique(dropna=True) == n]
+        # by position: frame[c] is a DataFrame when a name repeats
+        cols = [(frame.columns[i], frame.iloc[:, i]) for i in range(frame.shape[1])]
+        numeric = [c for c, s in cols if pd.api.types.is_numeric_dtype(s)]
+        datetimes = [c for c, s in cols if pd.api.types.is_datetime64_any_dtype(s)]
+        ids = [c for c, s in cols if n > 1 and s.nunique(dropna=True) == n]
         categorical = [
             c
-            for c in frame.columns
+            for c, s in cols
             if c not in ids
-            and not pd.api.types.is_numeric_dtype(frame[c])
-            and not pd.api.types.is_datetime64_any_dtype(frame[c])
-            and 0 < frame[c].nunique(dropna=True) <= max(20, n // 10)
+            and not pd.api.types.is_numeric_dtype(s)
+            and not pd.api.types.is_datetime64_any_dtype(s)
+            and 0 < s.nunique(dropna=True) <= max(20, n // 10)
         ]
 
         out: list[str] = []
