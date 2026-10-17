@@ -2,14 +2,14 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Claude Code's own memory lives on one laptop only, so anything worth keeping goes here. Update it at the end of each session (Claude: do it as part of wrapping up).
 
-*Last updated: 2026-10-17, Mac session.*
+*Last updated: 2026-10-17 (late), Mac session.*
 
 ## Where things are
 - **The repo is `github.com/aarmens702-hub/crivo`** (renamed from `analyst-agent` on 2026-10-14; the old URLs redirect). MIT. Not on PyPI yet.
 - **Branches:** `dev` is the workspace and `main` is what the public sees, as of 2026-10-14 (the EDISON workflow: `/start-task`, `/ship`, `/promote`). Before that everything went straight to `main`.
 - **The last code work was 2026-09-07** (wave 1.5, commit `5adec38`). 2026-10-14 was docs and process only: the README rebuild, the repo rename, the GitHub Action fixed to install from its own checkout, and this workflow.
 - **2026-10-17:** a five-reviewer code review of `dev` found Stage A larger than planned (a fresh install cannot start the analyst; the MCP server cannot start on mcp 1.x; every Claude call fails on current models; `crivo diagnose` calls a JSON file clean; PII leaks through four shareable outputs). Stage A is filed as issues #6 to #43 plus #3 (`specs/2026-10-17-stage-a-stabilize.md`). Work types for agentic work landed (AGENTS.md, "Work types").
-- **Tests:** 1,045 passing, keyless and offline, about 70 s. CI runs ruff, pytest and the bench smoke on Linux and macOS for `dev`, `main` and PRs.
+- **Tests:** about 1,126 passing on `dev`, keyless and offline, about 70 s. CI runs ruff, pytest and the bench smoke on Linux and macOS for `dev`, `main` and PRs.
 - **Bench, deterministic mode** (2026-09-07, 1,450 synthetic + 4 external datasets): detection micro-F1 0.731, repair F1 0.923 (where defined), survived verification 0.673. Full tables in `bench/RESULTS.md`.
 
 ## To do, in order
@@ -17,7 +17,7 @@
 
 | Stage | What | State |
 |---|---|---|
-| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **In progress** (wave 1 started 2026-10-17) |
+| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **In progress:** 10 of 39 shipped (wave 1 done); paused 2026-10-17 mid wave 2 |
 | 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | After A |
 | 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, charts and descriptive analysis, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
 | 2 | Two tracks in parallel. 2a the analyst toolkit: statistics, drivers, segments and cohorts, forecasting, anomalies, dashboards. 2b learning: System 1 as the loop's first filter, skills, the glossary, saved answers, `crivo verify`, the nightly skill loop | |
@@ -26,6 +26,23 @@
 | 5 | The release: plugin, PyPI with trusted publishing, docs site, platform matrix | |
 
 25 owner decisions are listed in the plan with the stage each is needed by.
+
+### Stage A, paused 2026-10-17: pick up here
+- **Shipped to `dev` and closed (10):** #3, #6, #7, #8, #9, #10, #11, #12, #15, #16. `v0.1.0` is tagged on `main` and released. CI is green on every push.
+- **In progress.** The work sits uncommitted in each issue's worktree (`.worktrees/<n>`, local to this Mac). Resume each from the step named:
+
+| Issue | State | Next step |
+|---|---|---|
+| #17 loop ids + `</execute>` cut (core) | Built; 13 new tests pass, full suite green | Reviewer, then the core gate (Aarmen's yes on the `loop.py` diff). Commit says the behaviour effect is unmeasured. |
+| #24 HUMAN finding stays in review | Built; contract reworded to "one review entry per finding" | Test-writer adds the d22 two-GATE-findings test, then a final review. Commit notes `needs_review` rose 1 to 2 on `tx-excel-ids` and `tx-excel-guard`. |
+| #23 drivers nulls + receipt | Built with `math.isclose`; Aarmen chose a tolerance scaled to the totals | Test-writer: fault-injection test (receipt False), tiny-delta test, numeric tie order, soften "EXACTLY". Then the builder switches the formula and fixes the docstring and contract wording. |
+| #14 diagnose reads json/xlsx | Built; 6 directory tests added (2 pass, 6 fail) | Builder: `checkup.load` raises ValueError when a directory read gives no columns; narrow the docstring (not sqlite). Then review. Follow-up bug to file: the library `read_file` has the same empty-directory false clean, and `.db` reads as CSV in the CLI. |
+| #13 Claude path (core) | Scouted; worktree clean | Test-writer (the plan is in the session notes: request-args contract test against `MessageCreateParamsStreaming`, usage test, cancel test, card footer test; retire `test_the_cost_column_admits_which_providers_it_can_price`), then build, review, core gate. Every Claude call fails today on anthropic 1.x. |
+| #18 HTML report masking | Scouted; worktree clean | Test-writer, build, review. Redact before escaping; rename the local `flagged` count in `notebook.report_html`. |
+
+- **Not started (23):** #19 to #22, #25 (core, after #24), #26 (core, the `-999` fix; the bench case from #10 shows d04 recall 0 today), #27 to #35, #36 to #43. Wave order and shared-file order are in the Stage A spec.
+- **Changelog fragments:** `/ship` writes `changes/<n>.<kind>.md` for user-visible changes (from #12 on). #3, #6, #7 and #11 shipped before the rule and have none yet; add them before the next `/promote`.
+- **Aarmen, once:** in the main checkout run `rm -rf .claude/tdd-guard && uv sync --dev` (#8 removed the plugin; the old venv still loads it).
 
 ## What we've learned
 - **The bench measures variance, not coverage.** Wave 1.5's regressions scored perfectly clean because the smoke corpus contains none of the shapes involved. A change that handles a new shape needs a corpus case, or the bench can't see it.
