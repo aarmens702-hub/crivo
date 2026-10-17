@@ -13,11 +13,12 @@ one cost to build honestly.
 
 The agent writes code; the kernel runs it; only executed assertions count.
 
-A check mark on an answer card is lifted from an `assert` that actually ran to
-completion in the kernel. If the model writes an answer without asserting
-anything, the card says `unchecked` rather than nothing. If the model claims a
-fix worked, that claim is worth exactly zero until the detector that found the
-disease re-runs and comes back clean.
+A check mark on an answer card is lifted from an `assert` in a cell that ran to
+completion in the kernel. Today every `assert` in that cell counts, even one
+inside a branch that never ran; closing that gap is planned. If the model
+writes an answer without asserting anything, the card says `unchecked` rather
+than nothing. If the model claims a fix worked, that claim is worth exactly
+zero until the detector that found the disease re-runs and comes back clean.
 
 Cleaning goes further, because a cleaning fix can silently destroy data while
 looking successful. A fix counts as verified only when all of these hold:
@@ -49,7 +50,7 @@ never model judgments:
    along with rows it did not. The generalised `fix(df, columns)` is re-run
    against that case and must still trip the detector there (or passing proves
    nothing), must clear it, and must leave the untouched rows byte-identical.
-2. **Its own test.** The shipped test runs in the sandbox.
+2. **Its own test.** The shipped test runs in the kernel.
 3. **A human.** One yes or no.
 
 The frozen-case gate is the one that matters, and it is easy to get wrong. A

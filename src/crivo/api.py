@@ -9,7 +9,7 @@
 Deliberately keyless and kernel-free: this is the deterministic half of the
 project — the detection engine and honest I/O — that works with zero setup.
 The LLM-authored cleaning with gates and provenance stays the agent surface
-(`python -m crivo`), because that half needs a model and a sandbox.
+(`python -m crivo`), because that half needs a model and a kernel.
 """
 
 import json as _json

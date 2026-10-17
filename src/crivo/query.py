@@ -2,8 +2,9 @@
 
 A public wrapper on the same seam the MCP server drives (`mcp_server._ask`):
 construct a session, load the data, run one turn, auto-approve gates — the
-caller is the operator, the `--auto-run` trust position; the sandbox and the
-card's executed checks still stand — and return the finished answer card.
+caller is the operator, the `--auto-run` trust position; the kernel is a host
+subprocess (there is no sandbox option here yet); the card's executed checks
+still stand — and return the finished answer card.
 Wrapper only: the loop's trust and gate semantics are untouched.
 """
 

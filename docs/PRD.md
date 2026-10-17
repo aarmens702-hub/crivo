@@ -8,7 +8,7 @@
 
 ## The three surfaces
 1. **The library** (`import crivo`): diagnose, clean, read, write, compare, reconcile. Keyless, no kernel.
-2. **The analyst** (`python -m crivo`, `crivo.ask`): a model driving a sandboxed IPython kernel, every model-written cell behind a gate.
+2. **The analyst** (`python -m crivo`, `crivo.ask`): a model driving an IPython kernel (a host subprocess with your files and network by default, a container with no network under `--docker`). In the REPL every model-written cell waits at a gate; `crivo.ask` and MCP `ask` run query cells without one.
 3. **The agent tools**: the MCP server (`crivo-mcp`), the GitHub Action, the `/crivo` agent skill, and `crivo diagnose` as a data linter.
 
 ## Demo story

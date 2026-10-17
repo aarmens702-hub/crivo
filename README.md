@@ -22,9 +22,17 @@ reverted, not kept.
 
 It has two halves. The **library** (`diagnose`, `clean`, `read`) is plain
 Python: no API key, no kernel, nothing to trust yet. The **analyst** is a model
-driving a sandboxed IPython kernel: it writes the pandas that answers your
+driving an IPython kernel: it writes the pandas that answers your
 question or lands the harder fix, and every answer comes back with the code it
 ran, the checks that passed, and where the numbers came from.
+
+> **The analyst is not sandboxed by default.** Model-written code runs in a
+> subprocess on your machine, as you, with your files (including `.env`) and
+> your network. `--docker` runs it in a container with no network instead;
+> build the image first with
+> `docker build -t analyst-kernel -f docker/Dockerfile .`. The MCP server does
+> the same when `CRIVO_MCP_SANDBOX=docker` is set. `crivo.ask` has no sandbox
+> option yet. The library half and the GitHub Action never run model code.
 
 ## Quickstart
 
@@ -103,8 +111,9 @@ returns an `Answer` with the text, the code, the checks, and the lineage.
 
 ## What it does
 
-- **Diagnoses** any table against [26 named checks](#the-26-checks) and grades
-  each finding: safe to fix, fix and confirm, or needs a person.
+- **Diagnoses** any table against [26 named checks](#the-26-checks) (25 run on
+  a single file; schema drift compares a set of files) and grades each
+  finding: safe to fix, fix and confirm, or needs a person.
 - **Cleans** the safe ones and re-checks every fix. If the check still fires,
   the fix is reverted and reported instead of kept.
 - **Answers questions** in plain English and ships each answer with its code,
@@ -152,17 +161,20 @@ it breaks: "nothing grounds this" and "a step on the path failed" are
 different answers.
 
 <details>
-<summary><b>How the analyst runs code safely</b></summary>
+<summary><b>How the analyst runs code</b></summary>
 
 <br>
 
 The model runs on the host. It drives an IPython kernel over a small stdio
 protocol: a subprocess by default, or a `--network=none` Docker container with
-`--docker`. Your datasets are variables in that kernel. The model sees the
-schema, some statistics, and truncated samples, never the raw rows. It writes
-short pandas cells; a traceback comes back as the next thing it reads. A
-cleaned dataset is always a copy with its lineage recorded, and verified fixes
-survive a kernel crash through namespace snapshots.
+`--docker`. The subprocess is not a sandbox: it runs as you, with your files
+and your network. Build the container image once with
+`docker build -t analyst-kernel -f docker/Dockerfile .`. Your datasets are
+variables in that kernel. The model sees the schema, some statistics, and
+truncated samples, never the raw rows. It writes short pandas cells; a
+traceback comes back as the next thing it reads. A cleaned dataset is always a
+copy with its lineage recorded, and verified fixes survive a kernel crash
+through namespace snapshots.
 
 </details>
 
@@ -175,7 +187,7 @@ After a clean run, each fix the model wrote is rewritten as a general
 `fix(df, columns)` and has to earn its place. On the original frozen case it
 has to trip the detector, clear it, and leave the rows that were never broken
 alone. That last part matters: a "fix" that blanks the whole column also
-clears the detector. Its own shipped test has to pass in the sandbox. Then a
+clears the detector. Its own shipped test has to pass in the kernel. Then a
 person says yes.
 
 New skills start on probation: retrieved and applied, but always gated. Three
