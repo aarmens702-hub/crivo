@@ -17,7 +17,7 @@ Every signature below is copied from the source. Shapes marked "seen" were captu
 | `compare` | `compare(before, after, name_before="before", name_after="after")` | `str`, one self-contained HTML document. |
 | `reconcile` | `reconcile(a, b, keys)` | `dict` with keys `keys, counts, added, removed, changed, duplicate_keys, null_keys, column_diff, receipt, notes` (seen). `keys` is a column name or list. |
 | `reconcile_report` | `reconcile_report(a, b, keys)` | `str`, HTML. |
-| `drivers` | `drivers(before, after, value_col, by_col)` | `dict` with keys `metric, by, total_before, total_after, delta, contributions, receipt` (seen). |
+| `drivers` | `drivers(before, after, value_col, by_col)` | `dict` with keys `metric, by, total_before, total_after, delta, contributions, receipt` (seen). Rows with an empty `by_col` (None or NaN) form one contribution whose `category` is `None`. `receipt` is true when the contributions sum to `delta`, the change in the whole frames' totals, within rounding scaled to the size of the values (about 1e-9 of their absolute sum), so it cannot see a lost row smaller than that (e.g. under about $2.50 on a ledger with $2.5B of absolute volume). |
 | `analyze_excel` | `analyze_excel(path)` | `list[dict]`, one per sheet: `sheet, header_row, preamble_rows, tables, grade, evidence, suggestion, kind` (seen). |
 | `export_notebook` | `export_notebook(source, path)` | `Path` of a runnable .ipynb that re-reads and re-diagnoses `source`. |
 | `ask` | `ask(data, question, *, name=None)` | `Answer`. Needs a model (see Environment). Raises `RuntimeError` naming the missing variable. Gates auto-run. |

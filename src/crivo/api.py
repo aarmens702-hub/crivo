@@ -249,8 +249,9 @@ def drivers(
     before: pd.DataFrame, after: pd.DataFrame, value_col: str, by_col: str
 ) -> dict:
     """Explain a metric change: rank each category's contribution to the
-    change in sum(value_col), with the exact receipt that contributions sum
-    to the observed delta (B1.2). Keyless and pure."""
+    change in sum(value_col) (B1.2). Rows with an empty `by_col` form a
+    `None` category, and the `receipt` checks the contributions against the
+    change in the whole frames' totals. Keyless and pure."""
     from crivo.decompose import decompose_sum
 
     return decompose_sum(before, after, value_col, by_col)
