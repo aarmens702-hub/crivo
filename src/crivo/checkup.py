@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from crivo import pii
 from crivo.detect import SINGLE_FRAME, detect_all
 from crivo.readers import _sniff
 
@@ -215,7 +216,17 @@ def report(path, as_json: bool = False) -> str:
     return render(path, frame, result)
 
 
+def _masked(frame: pd.DataFrame, result: dict) -> dict:
+    """A copy of `result` whose evidence is masked for PII-flagged columns
+    (#22): the text report lands in CI logs, public on a public repo. The
+    caller's `result` is untouched, so the exit code and `--json` read the
+    raw findings."""
+    flagged = pii.flagged_columns(frame)
+    return {**result, "findings": pii.redact_findings(result["findings"], flagged)}
+
+
 def render(path, frame: pd.DataFrame, result: dict) -> str:
+    result = _masked(frame, result)
     findings = result["findings"]
     fixable = [f for f in findings if not f["indicator"]]
     flagged = [f for f in findings if f["indicator"]]
@@ -288,6 +299,7 @@ def render_console(path, frame: pd.DataFrame, result: dict, console=None) -> Non
     from rich.text import Text
 
     console = console or Console()
+    result = _masked(frame, result)
     findings = result["findings"]
     fixable = [f for f in findings if not f["indicator"]]
     flagged = [f for f in findings if f["indicator"]]

@@ -360,3 +360,133 @@ def test_cli_diagnose_exits_2_on_a_directory_with_no_table(
     out = capsys.readouterr().out.replace(str(directory), "<dir>")
     assert code == 2
     assert "clean" not in out
+
+
+def write_customers_csv(tmp_path):
+    """40 rows of a CRM customer export: zero-padded ids, money as strings,
+    and two padded text columns. 16 emails carry stray spaces (every row with
+    i % 5 in {0, 1}), one is "N/A" and one is blank; 20 cities are padded.
+    Only `email` holds PII, so `city` is the twin that must stay raw."""
+    names = [
+        "ana.souza",
+        "kemi.okafor",
+        "min_lee",
+        "priya.nair",
+        "tom-hughes",
+        "wei.zhang",
+        "aoife.obrien",
+        "sam.reyes",
+        "lars.berg",
+        "dee.ndiaye",
+    ]
+    domains = ["example.com", "Mail.co.uk", "corp.io", "example.org"]
+    emails = [f"{names[i % 10]}{i:02d}@{domains[i % 4]}" for i in range(40)]
+    emails = [
+        "  " + e if i % 5 == 0 else e + " " if i % 5 == 1 else e
+        for i, e in enumerate(emails)
+    ]
+    emails[37], emails[38] = "N/A", ""
+    cities = ["Lisbon", "Leeds", "Lagos", "Seoul", "Pune", "York", "Wuhan", "Cork"] * 5
+    cities = [
+        " " + c if i % 4 == 0 else c + "  " if i % 4 == 1 else c
+        for i, c in enumerate(cities)
+    ]
+    frame = pd.DataFrame(
+        {
+            "customer_id": [f"{i:06d}" for i in range(31, 71)],
+            "email": emails,
+            "city": cities,
+            "balance": ["$1,204.50", "$88.00", "$12,000.75", "$7.10"] * 10,
+        }
+    )
+    path = tmp_path / "customers.csv"
+    frame.to_csv(path, index=False)
+    local_parts = [e.strip().split("@")[0] for e in emails if "@" in e]
+    return path, local_parts
+
+
+TEXT_REPORTS = {
+    "crivo-diagnose-text": lambda path: checkup.report(path),
+    "print-report": lambda path: str(crivo.diagnose(path)),
+}
+
+
+@pytest.mark.parametrize("surface", list(TEXT_REPORTS))
+def test_text_report_masks_evidence_from_pii_flagged_columns(tmp_path, surface) -> None:
+    """Regression for #22. The GitHub Action prints the `crivo diagnose`
+    text report into CI logs, public on a public repo, and `print(report)`
+    renders the same text. A padded email column showed its raw addresses as
+    whitespace-damage samples. The finding must still be there with its
+    samples in the masked form (`***@` plus the domain), and no local part
+    may reach the text. `city` is padded too but holds no PII, so its raw
+    samples stay: masking is for flagged columns, not every quoted value."""
+    path, local_parts = write_customers_csv(tmp_path)
+
+    out = TEXT_REPORTS[surface](path).replace(str(path), "<file>")
+
+    assert "whitespace-damage" in out
+    assert sum(local in out for local in local_parts) == 0, (
+        "raw email local parts reached the text report"
+    )
+    assert "***@" in out, "the email samples must be masked, not dropped"
+    assert "' Lisbon'" in out and "'Leeds  '" in out, "non-PII samples stay raw"
+
+
+@pytest.mark.parametrize("via", ["render_console", "cli"])
+def test_the_styled_report_masks_evidence_too(
+    tmp_path, monkeypatch, capsys, via
+) -> None:
+    """Regression for #22. `crivo diagnose FILE` (what action.yml runs) prints
+    through `render_console`, not `render`, so the styled report must mask
+    the same way. The console is wide so a long evidence line cannot wrap a
+    sample apart and pass or fail on layout instead of on the masking."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("COLORTERM", raising=False)
+    path, local_parts = write_customers_csv(tmp_path)
+
+    if via == "render_console":
+        frame = checkup.load(path)
+        result = checkup.detect_all(frame, path.name)
+        buffer = StringIO()
+        console = Console(file=buffer, width=200)
+        checkup.render_console(path, frame, result, console=console)
+        out = buffer.getvalue()
+    else:
+        monkeypatch.setenv("COLUMNS", "200")
+        monkeypatch.setattr(
+            "sys.argv", ["crivo", "diagnose", str(path), "--fail-on", "never"]
+        )
+        from crivo.__main__ import main
+
+        assert main() == 0
+        out = capsys.readouterr().out
+    out = out.replace(str(path), "<file>")
+
+    assert "whitespace-damage" in out
+    assert sum(local in out for local in local_parts) == 0, (
+        "raw email local parts reached the styled report"
+    )
+    assert "***@" in out, "the email samples must be masked, not dropped"
+    assert "' Lisbon'" in out and "'Leeds  '" in out, "non-PII samples stay raw"
+
+
+def test_diagnose_json_keeps_the_raw_evidence(tmp_path) -> None:
+    """#22 masks the text report only. `crivo diagnose --json` is the
+    programmatic output and is exempt in the contract ("PII masking"), so its
+    email evidence still carries the real samples a fix would need."""
+    path, local_parts = write_customers_csv(tmp_path)
+
+    payload = json.loads(checkup.report(path, as_json=True))
+    [email] = [
+        f
+        for f in payload["findings"]
+        if f["slug"] == "whitespace-damage" and f["columns"] == ["email"]
+    ]
+
+    assert sum(local in email["evidence"] for local in local_parts) > 0, (
+        "--json must keep the raw samples"
+    )

@@ -28,7 +28,7 @@ The accessor, registered on import: `df.crivo.diagnose(name=None) -> Report` and
 ### `Report`
 - `findings: list[dict]`, `clear: list[int]` (disease ids that ran and found nothing), `broken: dict` (ids that could not run, with why).
 - `to_dict()` keys: `name, rows, columns, findings, clear, broken`. `to_json(indent=2)`.
-- `repr()` is the text report; `_repr_html_()` is the notebook card, with finding evidence from PII-flagged columns masked (see "PII masking").
+- `repr()` is the text report and `_repr_html_()` the notebook card, both with finding evidence from PII-flagged columns masked (see "PII masking").
 - `plot(ax=None)` returns a matplotlib `Axes` and never calls `show`.
 - `pii() -> list[dict]`, `semantic_types() -> list[dict]`, `cross_column(threshold=0.9) -> list[dict]` (each `columns, violations, strength, grade, confidence, evidence, examples`, graded HUMAN).
 - `pii()` reads columns by position, so a frame with a duplicated column name can return two findings that share a `column`.
@@ -98,14 +98,14 @@ One shared masker in `pii.py`, keyless. Each surface under "Masked when rendered
 | `redact_text` | `redact_text(text, columns, flagged)` | `str`. Every quoted literal (Python repr quoting, single or double) becomes its masked form, quotes kept, when a name in `columns` (as `str`) is in `flagged` (the first flagged name in `columns` order sets the type), or else when the literal is PII on its own. A quote mark right after a word character (the apostrophe in `Excel's`, or a `"` stuck to a word) does not open a literal. All other text is unchanged. |
 | `redact_findings` | `redact_findings(findings, flagged)` | `list[dict]`: shallow copies with `evidence` passed through `redact_text(f["evidence"], f["columns"], flagged)`. Never mutates its input; `flagged` is precomputed so a caller scans once. |
 
-**Masked when rendered** (surfaces a person may send on): `Report.to_html` and `_repr_html_`, the clean card and `export_notebook` (pending #19), `reconcile_report` (pending #20), `Report.cross_column` examples (pending #21, which decides whether they are masked), `crivo diagnose` text output (pending #22).
+**Masked when rendered** (surfaces a person may send on): `Report.to_html` and `_repr_html_`, the clean card and `export_notebook` (pending #19), `reconcile_report` (pending #20), `Report.cross_column` examples (pending #21, which decides whether they are masked), `crivo diagnose` text output and `Report.__repr__` (`print(report)`).
 
 **Exempt** (programmatic or interactive by design): `Report.findings`, `to_dict`, `to_json`, `crivo diagnose --json`, the `reconcile()` and `drivers()` dicts, `CleanSummary.diff()` and `samples()`, gate previews, MCP tool results.
 
 ## CLI
 Entry points: `crivo` and `python -m crivo` (same `main`), and `crivo-mcp`.
 
-**`crivo diagnose FILE [--json] [--fail-on AUTO|GATE|HUMAN|never]`.** Keyless. FILE is read like `crivo.read` reads a local file (csv, tsv, parquet, json, jsonl, xlsx and the other formats in `readers.files.SUPPORTED`). `--fail-on` defaults to `GATE`. Exit `0`: no finding at or above the threshold. Exit `1`: at least one. Exit `2`: the file could not be read. `never` always exits `0`. `--json` prints `{file, rows, columns, findings, clear, broken}`. Options may come before or after FILE; `--help` works after the subcommand.
+**`crivo diagnose FILE [--json] [--fail-on AUTO|GATE|HUMAN|never]`.** Keyless. FILE is read like `crivo.read` reads a local file (csv, tsv, parquet, json, jsonl, xlsx and the other formats in `readers.files.SUPPORTED`). `--fail-on` defaults to `GATE`. Exit `0`: no finding at or above the threshold. Exit `1`: at least one. Exit `2`: the file could not be read. `never` always exits `0`. `--json` prints `{file, rows, columns, findings, clear, broken}`. The text report masks evidence from PII-flagged columns (see "PII masking"); in a finding on no flagged column (a whole-table one, say) only a quoted literal that is PII on its own is masked. `--json` carries the raw evidence (programmatic, exempt). Options may come before or after FILE; `--help` works after the subcommand.
 
 **`crivo clean FILE [--name NAME] [--autonomy LEVEL] [--policy auto|all] [--json]`.** Needs a model and a kernel. Chatter goes to stderr; stdout is one JSON object with `--json`, else a short text summary. Exit `0` unless the summary carries `error`. `--policy` is still accepted and widens nothing: only AUTO runs unattended. Summary (`repl.run_clean_once`): `{file, variable, needs_human: [str], notices: [str], policy}` (`notices` empty when none fired), and when a report was written `report, fixes: [{disease, slug, grade, status, unattended}], autonomy, outputs, skills_admitted`. On a failed load: `{file, error}`. `status` is `fixed`, `skipped`, `failed` or `aborted` (shown as "not attempted"). Options may come before or after FILE; `--help` works after the subcommand.
 
