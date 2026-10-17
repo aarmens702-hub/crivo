@@ -78,14 +78,45 @@ def load(path, **kwargs) -> pd.DataFrame:
     like their plain form (pandas infers the codec from the path), and are
     refused first if they look like decompression bombs. Extra keyword args are
     forwarded to the pandas reader and override the sniffed defaults.
+
+    The non-csv formats in `readers.files.SUPPORTED` (json, jsonl, xlsx and
+    the rest) and parquet directories go through `crivo.read`'s file reader.
+    A directory with no parquet parts is refused, not read as an empty table.
     """
     # this is a door, not a detail: `crivo diagnose` (keyless, aimed at a
     # stranger's file) and ingest.load_url both reach pandas through here with
     # nothing else standing between those bytes and the expansion
-    from crivo.readers.files import guard_compressed
+    from crivo.readers.files import guard_compressed, read_file
 
     path = Path(path)
     guard_compressed(path)
+    suffix = path.suffix.lower()
+    if suffix in {".gz", ".zip", ".bz2", ".xz"} and len(path.suffixes) >= 2:
+        suffix = path.suffixes[-2].lower()
+    if path.is_dir() or suffix in {
+        ".json",
+        ".jsonl",
+        ".ndjson",
+        ".xlsx",
+        ".xls",
+        ".feather",
+        ".orc",
+        ".dta",
+        ".sas7bdat",
+    }:
+        # read_file sends only the csv family and parquet back here, so this
+        # cannot recurse; a missing optional reader (xlrd for .xls) becomes a
+        # could-not-read the CLI exits 2 on, not a traceback
+        try:
+            frame = read_file(path, **kwargs)
+        except ImportError as exc:
+            raise ValueError(str(exc)) from exc
+        if path.is_dir() and frame.columns.empty:
+            # an empty directory, or a Spark output holding only _SUCCESS, is
+            # a 0 x 0 frame that passes every check: nothing to check is a
+            # could-not-run, never a clean
+            raise ValueError(f"{path.name}: no parquet parts in this directory")
+        return frame
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path, **kwargs)
     sample = _text_sample(path)

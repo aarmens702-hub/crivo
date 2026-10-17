@@ -5,8 +5,13 @@ needs a file. It is the only surface where the strongest part of the codebase,
 the detection engine, is reachable without a model being involved at all.
 """
 
-import pandas as pd
+import importlib.util
+import json
 
+import pandas as pd
+import pytest
+
+import crivo
 from crivo import checkup
 
 
@@ -192,3 +197,166 @@ def test_render_console_styles_findings_without_corrupting_the_facts(
     assert "ounces" in out
     assert "fixable" in out and "signals clear" in out
     assert "\x1b[" not in out, "no ANSI escapes when the console is not a TTY"
+
+
+def spend_frame() -> pd.DataFrame:
+    """40 rows of a vendor-spend export: zero-padded vendor ids, money as
+    strings with a currency sign and thousands separators, and 8 "N/A" cells
+    in the money column. No date-like column names, because pd.read_json
+    converts those."""
+    return pd.DataFrame(
+        {
+            "vendor_id": [f"{i:05d}" for i in range(7, 47)],
+            "vendor": [f"Vendor {i}" for i in range(40)],
+            "amount": ["$1,300.50", "$85.00", "$12,004.10", "$7.25"] * 8 + ["N/A"] * 8,
+            "region": ["North", "South", "East", "West"] * 10,
+        }
+    )
+
+
+# how each format is written; pandas infers gzip from the .gz suffix
+WRITERS = {
+    "spend.json": lambda df, p: df.to_json(p, orient="records"),
+    "spend.jsonl": lambda df, p: df.to_json(p, orient="records", lines=True),
+    "spend.xlsx": lambda df, p: df.to_excel(p, index=False),
+    "spend.json.gz": lambda df, p: df.to_json(p, orient="records"),
+}
+
+
+@pytest.mark.parametrize("name", list(WRITERS))
+def test_cli_diagnose_reads_json_jsonl_and_xlsx_like_the_library(
+    tmp_path, name
+) -> None:
+    """Regression for #14. The CLI read every non-parquet file as CSV while
+    `crivo.diagnose` read it by its format. A JSON records file is one line,
+    so it came back as a bare header: 0 rows, every check clear, exit 0, a
+    false clean the GitHub Action would pass. JSON lines came back one row
+    short with a finding the data does not have, and xlsx died on an encoding
+    error. One file must get one diagnosis, whichever door it came in by. The
+    .json.gz case pins the compressed form of the same rule."""
+    df = spend_frame()
+    path = tmp_path / name
+    WRITERS[name](df, path)
+
+    try:
+        payload = json.loads(checkup.report(path, as_json=True))
+    except ValueError as exc:  # UnicodeDecodeError and ParserError included
+        pytest.fail(f"checkup could not read {name}: {type(exc).__name__}: {exc}")
+    library = {f["slug"] for f in crivo.diagnose(path).findings}
+
+    assert payload["rows"] == 40  # spend_frame's rows, counted by hand
+    assert {f["slug"] for f in payload["findings"]} == library
+    assert "sentinel-missing" in library, "parity must not pass with both sides empty"
+
+
+def test_cli_diagnose_json_with_planted_na_is_not_a_false_clean(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Regression for #14. `crivo diagnose x.json --fail-on never` exits 0
+    either way, so the exit code cannot catch the false clean; the report
+    itself must carry the rows and the planted "N/A"."""
+    df = spend_frame()
+    path = tmp_path / "spend.json"
+    WRITERS["spend.json"](df, path)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["crivo", "diagnose", str(path), "--json", "--fail-on", "never"],
+    )
+
+    from crivo.__main__ import main
+
+    assert main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"] == 40  # spend_frame's rows, counted by hand
+    assert "sentinel-missing" in {f["slug"] for f in payload["findings"]}
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("xlrd") is not None,
+    reason="xlrd is installed, so .xls has its reader",
+)
+def test_cli_diagnose_exits_2_on_xls_without_its_reader(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Regression for #14. crivo advertises .xls but does not ship xlrd, its
+    reader. Once the CLI reads .xls the way the library does, a missing xlrd
+    is a could-not-run: exit 2 with the file and the package named, never a
+    traceback. Today the CLI sniffs the bytes as CSV and calls the file clean
+    (0 rows, exit 0). The .xlsx case above is the legitimate twin it must
+    still read."""
+    path = tmp_path / "x.xls"
+    # the OLE2 signature every .xls opens with, then an empty header block
+    path.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 504)
+    monkeypatch.setattr("sys.argv", ["crivo", "diagnose", str(path)])
+
+    from crivo.__main__ import main
+
+    try:
+        code = main()
+    except ImportError as exc:
+        pytest.fail(f"a missing optional reader escaped as a traceback: {exc}")
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "x.xls" in out and "xlrd" in out
+
+
+@pytest.mark.parametrize("dirname", ["spend", "spend.parquet"])
+def test_cli_diagnose_reads_a_parquet_directory_like_the_library(
+    tmp_path, dirname
+) -> None:
+    """Regression for #14. A partitioned parquet export is a directory of
+    part files; Spark names it like a file (spend.parquet/) and drops a
+    _SUCCESS marker beside the parts. The CLI must read every part, the same
+    rows and the same findings `crivo.diagnose` gets. This is the legitimate
+    twin of the directory refusal below."""
+    df = spend_frame()
+    directory = tmp_path / dirname
+    directory.mkdir()
+    parts = [df.iloc[:24], df.iloc[24:]]  # the 8 "N/A" cells all land in part-1
+    for i, part in enumerate(parts):
+        part.to_parquet(directory / f"part-{i}.parquet", index=False)
+    (directory / "_SUCCESS").touch()
+
+    payload = json.loads(checkup.report(directory, as_json=True))
+    library = {f["slug"] for f in crivo.diagnose(directory).findings}
+
+    assert payload["rows"] == sum(len(p) for p in parts) == 40  # 24 + 16
+    assert {f["slug"] for f in payload["findings"]} == library
+    assert "sentinel-missing" in library, "parity must not pass with both sides empty"
+
+
+@pytest.mark.parametrize("flags", [[], ["--json"]], ids=["text", "json"])
+@pytest.mark.parametrize(
+    "dirname, files",
+    [
+        ("exports", []),
+        ("spend.parquet", ["_SUCCESS"]),
+        ("spend.parquet", ["_SUCCESS", ".DS_Store"]),
+    ],
+    ids=["empty", "success-marker-only", "success-and-ds-store"],
+)
+def test_cli_diagnose_exits_2_on_a_directory_with_no_table(
+    tmp_path, monkeypatch, capsys, dirname, files, flags
+) -> None:
+    """Regression for #14. A directory with no data files (empty, or a Spark
+    output whose job wrote only the _SUCCESS marker, with a Finder .DS_Store
+    beside it) reads as a 0 x 0 frame, and 0 x 0 passes every check: exit 0,
+    "the file is clean", a false clean the GitHub Action would pass. There is
+    nothing to check, so it is a could-not-run: exit 2, never clean. The
+    parquet directory above is the twin it must still read."""
+    directory = tmp_path / dirname
+    directory.mkdir()
+    for name in files:
+        (directory / name).touch()
+    monkeypatch.setattr("sys.argv", ["crivo", "diagnose", str(directory), *flags])
+
+    from crivo.__main__ import main
+
+    try:
+        code = main()
+    except SystemExit as exc:
+        code = exc.code
+    # the path is echoed back; drop it so a tmp dir name cannot match "clean"
+    out = capsys.readouterr().out.replace(str(directory), "<dir>")
+    assert code == 2
+    assert "clean" not in out
