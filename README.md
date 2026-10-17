@@ -308,7 +308,7 @@ cell. Not on PyPI yet. The plan, stage by stage, lives in
 | `bench/` | the benchmark: corruption injectors, truth manifests, scorer, results |
 | `skills/` | skills the analyst has learned and a person admitted |
 | `specs/` | a design spec for every phase, newest last |
-| `docs/` | the longer explanation, a first-run walkthrough, review findings |
+| `docs/` | the longer explanation, the architecture and contract, closed review records |
 
 ## Development
 

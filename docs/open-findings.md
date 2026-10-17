@@ -1,5 +1,7 @@
 # Open findings — 2026-08-13
 
+> **Historical record (closed 2026-10-17).** Kept for how and why. What is still open lives in `specs/2026-10-14-the-plan.md`, with ids in `specs/2026-10-14-plan-inventory.md`.
+
 Two sources, kept in one list because they interact: a max-effort review of
 `origin/main...HEAD` (15 findings, 10 finder angles plus a gap sweep), and a
 run of `diagnose` against a synthetic transaction file (`scripts/make_transactions.py`).
