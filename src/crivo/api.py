@@ -279,7 +279,7 @@ def compare(before, after, name_before="before", name_after="after") -> str:
 def reconcile(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) -> dict:
     """The keyed twin of `compare`: sort two frames' rows onto a key into
     added, removed, changed, and unchanged, excluding duplicate and null keys,
-    and ride a partition receipt (P7 design spec decision 3). `keys` is the key
+    and ride a receipt (P7 design spec decision 3). `keys` is the key
     column or columns. Keyless and pure; returns the result dict."""
     from crivo.rowdiff import reconcile as _reconcile
 

@@ -15,8 +15,8 @@ Every signature below is copied from the source. Shapes marked "seen" were captu
 | `diagnose` | `diagnose(data, name=None)` | `Report`. `data` is a DataFrame or a path (read with `read`). |
 | `clean` | `clean(df, policy="auto")` | `(DataFrame, CleanSummary)`. Input never mutated. `policy` is accepted and not read. |
 | `compare` | `compare(before, after, name_before="before", name_after="after")` | `str`, one self-contained HTML document. |
-| `reconcile` | `reconcile(a, b, keys)` | `dict` with keys `keys, counts, added, removed, changed, duplicate_keys, null_keys, column_diff, receipt, notes` (seen). `keys` is a column name or list. |
-| `reconcile_report` | `reconcile_report(a, b, keys)` | `str`, HTML. |
+| `reconcile` | `reconcile(a, b, keys)` | `dict` with keys `keys, counts, added, removed, changed, duplicate_keys, null_keys, column_diff, receipt, notes` (seen). `keys` is a column name or list. `receipt` is true when every distinct key lands in exactly one bucket or excluded set and an independent recount of changed rows, done without the per-row comparison, equals `counts["changed"]`. |
+| `reconcile_report` | `reconcile_report(a, b, keys)` | `str`, HTML. A key cell or changed value from a column `flagged_columns(a, b)` flags is masked with `mask_cell`; counts, receipt and notes are unchanged. |
 | `drivers` | `drivers(before, after, value_col, by_col)` | `dict` with keys `metric, by, total_before, total_after, delta, contributions, receipt` (seen). Rows with an empty `by_col` (None or NaN) form one contribution whose `category` is `None`. `receipt` is true when the contributions sum to `delta`, the change in the whole frames' totals, within rounding scaled to the size of the values (about 1e-9 of their absolute sum), so it cannot see a lost row smaller than that (e.g. under about $2.50 on a ledger with $2.5B of absolute volume). |
 | `analyze_excel` | `analyze_excel(path)` | `list[dict]`, one per sheet: `sheet, header_row, preamble_rows, tables, grade, evidence, suggestion, kind` (seen). |
 | `export_notebook` | `export_notebook(source, path)` | `Path` of a runnable .ipynb that re-reads and re-diagnoses `source`. |
@@ -98,7 +98,7 @@ One shared masker in `pii.py`, keyless. Each surface under "Masked when rendered
 | `redact_text` | `redact_text(text, columns, flagged)` | `str`. Every quoted literal (Python repr quoting, single or double) becomes its masked form, quotes kept, when a name in `columns` (as `str`) is in `flagged` (the first flagged name in `columns` order sets the type), or else when the literal is PII on its own. A quote mark right after a word character (the apostrophe in `Excel's`, or a `"` stuck to a word) does not open a literal. All other text is unchanged. |
 | `redact_findings` | `redact_findings(findings, flagged)` | `list[dict]`: shallow copies with `evidence` passed through `redact_text(f["evidence"], f["columns"], flagged)`. Never mutates its input; `flagged` is precomputed so a caller scans once. |
 
-**Masked when rendered** (surfaces a person may send on): `Report.to_html` and `_repr_html_`, the clean card and `export_notebook` (pending #19), `reconcile_report` (pending #20), `Report.cross_column` examples (pending #21, which decides whether they are masked), `crivo diagnose` text output and `Report.__repr__` (`print(report)`).
+**Masked when rendered** (surfaces a person may send on): `Report.to_html` and `_repr_html_`, the clean card and `export_notebook` (pending #19), `reconcile_report`, `Report.cross_column` examples (pending #21, which decides whether they are masked), `crivo diagnose` text output and `Report.__repr__` (`print(report)`).
 
 **Exempt** (programmatic or interactive by design): `Report.findings`, `to_dict`, `to_json`, `crivo diagnose --json`, the `reconcile()` and `drivers()` dicts, `CleanSummary.diff()` and `samples()`, gate previews, MCP tool results.
 
