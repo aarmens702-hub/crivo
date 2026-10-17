@@ -12,7 +12,7 @@ The issue is an approved design, so don't brainstorm or write a spec. You are th
 1. **Pick the issue.**
    - If no number was given, list open unassigned issues with `gh issue list --search "no:assignee" --state open --label task` and `... --label bug`, and let the user choose.
    - Leave out any issue that has a "Claimed by" comment (check with `gh issue view <n> --comments`).
-   - Suggest `bug` issues first, then the lowest-numbered `task` in the current wave of `specs/2026-09-06-master-plan.md` (`docs/STATUS.md` says which wave).
+   - Suggest `bug` issues first, then the lowest-numbered `task` in the current stage of `specs/2026-10-14-the-plan.md`, following the wave order in that stage's WRAP spec (`docs/STATUS.md` says which stage).
 2. **Read it.** Run `gh issue view <n> --comments`. If Goal, Files or Done-when is missing, or contradicts the docs, stop: tell the user what's unclear.
 3. **Claim it,** before making the worktree.
    - If the issue is closed, or has a "Claimed by" comment from another session, stop and tell the user who has it.
@@ -28,6 +28,8 @@ The issue is an approved design, so don't brainstorm or write a spec. You are th
    - Branches always come off `dev` and stay local: `/ship` pushes the finished work straight to `dev`, then removes the worktree.
 
 ## 2. Size it (say which path and why, in one line)
+**Type first.** Read the issue's Type (AGENTS.md, "Work types"). `code` issues follow the paths below. For `behaviour`, `eval` or `experiment`, stop and tell the user: their tooling (the `/eval` skill, the eval-author agent, record and replay tests) lands before Stage 0.
+
 **Full path: scout → test-writer → builder → reviewer.** Use it if **any** of these is true:
 - The issue is labelled `core`, or would touch `loop.py`, `prompts.py`, `llm.py`, `card.py`, `skills.py`, `library.py`, `provenance.py` or `detect.py`.
 - It changes logic: detection, fixing, verification, readers, the bench, the MCP server, the CLI, or anything in `docs/API-CONTRACT.md`.

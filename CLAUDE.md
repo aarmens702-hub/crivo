@@ -10,10 +10,11 @@
   - `/demo-check`: walk the demo story on `main` the way a new user would.
   - `/crivo`: drive the crivo CLI on a data file (the product skill, not a workflow one).
 - **QA:** `/qa-pass` is the full `docs/QA.md` run against `dev`, black-box, at checkpoints. It files failures as `bug` issues.
+- **Route by work type first** (AGENTS.md, "Work types"). `code` issues take the paths below. `behaviour`, `eval` and `experiment` issues need tooling that lands before Stage 0 (the `/eval` skill, an eval-author agent that cannot read the prompts, record and replay tests); until it exists, `/start-task` stops and asks Aarmen.
 - **`/start-task` is an orchestrator.** It sizes the issue, then runs the specialists in `.claude/agents/`:
   - **Full path** (logic, the contract, the core, bugs, more than 2 files): scout → test-writer → builder → reviewer.
   - **Lean path** (at most 2 files of docs or text): builder → reviewer.
-- **The specialists' limits are enforced, not trusted:**
+- **Write limits are enforced, not trusted. Read limits are not enforced yet:** the bench rule (injector authors don't read `detect.py` or `autoclean.py`) lives in the agents' prompts only, so the reviewer checks it.
   - scout and reviewer can't edit files; qa-tester can't edit files either.
   - A hook keeps the test-writer inside test files (`tests/`, `test_*.py`, `conftest.py`), and keeps the builder out of them.
 - **Other hooks:**

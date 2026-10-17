@@ -21,4 +21,4 @@ What a new visitor does in under three minutes. `/demo-check` and `/promote` wal
 5. With a model key: `python -m crivo`, `/load` the file, ask "which region has the most revenue?", approve the cell at the gate, then `/why` shows where the answer came from.
 
 ## Not building
-From `specs/2026-09-06-master-plan.md`, "Explicitly excluded": durable agent memory (until the agent is accurate), parallel read-only fan-out, slide export, dashboard servers, imputation except as a person-graded suggestion with receipts, and model-written statistics.
+From `specs/2026-10-14-the-plan.md`, "Dropped, with reasons": slide export, dashboard servers, imputation except as a person-graded suggestion with receipts, model-written statistics, parallel read-only fan-out, speculative drafting, and sub-agents with their own kernels. crivo's own governed memory is in the plan (its Memory section), so it is no longer excluded.

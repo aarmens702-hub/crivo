@@ -295,8 +295,8 @@ Or anywhere else: `crivo diagnose file.csv --fail-on AUTO --json`.
 
 Over 1,000 tests pass on Linux and macOS in CI. The library half does no
 network, subprocess, or Docker work on import, so it is safe in any notebook
-cell. Not on PyPI yet. The current plan and what is next live in
-[specs/2026-09-06-master-plan.md](specs/2026-09-06-master-plan.md).
+cell. Not on PyPI yet. The plan, stage by stage, lives in
+[specs/2026-10-14-the-plan.md](specs/2026-10-14-the-plan.md).
 
 ## Repo map
 

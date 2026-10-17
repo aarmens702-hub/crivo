@@ -16,6 +16,19 @@ If you are an agent: your job is the issue in front of you, nothing more. When t
 - **The core is reviewed, not delegated:** `src/crivo/loop.py`, `prompts.py`, `llm.py`, `card.py`, `skills.py`, `library.py`, `provenance.py` and `detect.py`. An agent may draft a change to one of them on its branch, as a small diff with the tradeoffs stated, but `/ship` stops and shows Aarmen the diff. Nothing in the core reaches `dev` without his explicit yes. Issues that touch the core carry the `core` label.
 - Write big calls under "Key decisions" in `docs/ARCHITECTURE.md` so they aren't re-argued. A multi-day feature gets a short WRAP spec in `specs/` first (What, Requirements, Acceptance criteria, Priority).
 
+## Work types: behaviour is measured, not tested
+crivo is an agent, so a green test suite proves the code, not what the model does: a prompt rewrite passes CI unchanged. Every issue has a type, and the type sets what "done" means.
+
+| Type | Covers | Done when |
+|---|---|---|
+| `code` | The library, detectors, fixers, the referee, harness plumbing, the CLI and MCP | A failing test goes green, plus a bench line if detection or repair moved. |
+| `behaviour` | What the model does: prompts, turn structure, tool descriptions the model reads, model and effort defaults | The harness change is tested on recorded model replies, and a pre-registered eval on the dev split (3 runs or more) meets its rule; the false-backed rate never rises. Aarmen sees the diff and the result. |
+| `eval` | Trap cases, graders, injectors, attacks | The oracle passes, no-op and cheating strategies fail, and the author never read the prompts, the loop or the referee. |
+| `experiment` | Bake-offs, loop runs, spikes | The hypothesis and decision rule are on the issue before the first paid call. The result is recorded, then adopted (as a new `code` or `behaviour` issue) or dropped. |
+
+- Until the eval tooling lands (before Stage 0), say plainly when a behaviour change is unmeasured. Never call it verified.
+- Never quote eval or trap cases in an issue, a prompt or a skill. Name the suite.
+
 ## Branches: dev is the workspace, main is tested
 - **`dev`** is the workspace.
   - Work on a local branch off `dev`, in its own worktree at `.worktrees/<n>` (`/start-task` makes both). The main checkout stays on `dev`.
@@ -49,7 +62,7 @@ Run from the repo root (or the worktree root).
 - `docs/API-CONTRACT.md`: the public API, finding and summary shapes, CLI flags and exit codes, MCP tools, session events, env vars. **Read before writing code that calls, or is called by, another module.** Build against it exactly.
 - `docs/QA.md`: the black-box cases `/qa-pass` runs, with the expected result of each.
 - `docs/what-this-is.md`: the long version of why crivo is built this way.
-- `specs/2026-09-06-master-plan.md`: the plan, wave by wave. Other `specs/` files are the design of record for their items.
+- `specs/2026-10-14-the-plan.md`: the plan, stage by stage, and the only sequencing authority. `specs/2026-10-14-plan-inventory.md` defines its ids. Each stage has a WRAP spec (Stage A: `specs/2026-10-17-stage-a-stabilize.md`). Other `specs/` files are the design of record for their items.
 - `bench/RESULTS.md`: the full benchmark tables.
 - The original brief: `~/Desktop/mailo/coop-project/crivo-brief.md` and `crivo-build-research.md` (on Aarmen's Mac only): stack patterns, the disease taxonomy, datasets.
 

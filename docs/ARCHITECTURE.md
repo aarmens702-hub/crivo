@@ -59,7 +59,7 @@ CLEAN:    Session.clean(var) -> detect_all in kernel -> router.route per finding
 ```
 
 ## Who works where
-- **Core, Aarmen reviews.** Agents draft changes as small reviewed diffs, never landed unattended: `loop.py`, `prompts.py`, `llm.py`, `card.py` (ownership line in `specs/2026-08-09-p0-core-design.md`), `skills.py` and `library.py` (the skill lifecycle and governance, CLAUDE.md), `provenance.py` (CLAUDE.md), `detect.py` (rule 2 of `specs/2026-09-06-master-plan.md`).
+- **Core, Aarmen reviews.** Agents draft changes as small reviewed diffs, never landed unattended: `loop.py`, `prompts.py`, `llm.py`, `card.py` (ownership line in `specs/2026-08-09-p0-core-design.md`), `skills.py` and `library.py` (the skill lifecycle and governance, CLAUDE.md), `provenance.py` (CLAUDE.md), `detect.py` (rule 5 of `specs/2026-10-14-the-plan.md`).
 - **Agent-owned:** everything else. Tests, bench, scripts, docs, Docker, kernel plumbing, readers, the drivers (`repl.py`, `mcp_server.py`, `__main__.py`, `query.py`) and the keyless capability modules.
 - **Bench rule:** whoever writes corruption injectors (`bench/corrupt.py`, `bench/bases.py`) must not read `detect.py` or `autoclean.py`. The bench grades that code; an injector written from its internals grades its own exam.
 
@@ -80,4 +80,4 @@ CLEAN:    Session.clean(var) -> detect_all in kernel -> router.route per finding
 - **Recursion is capped at depth 1** (p0 spec).
 - **Provenance is a DAG:** a claim is trusted when it is reachable from raw bytes with passing checks on every step (`specs/2026-08-12-p3-trust-layer-design.md`).
 - **Autonomy levels:** `autonomous` (default) applies AUTO findings with a deterministic fixer unattended, `careful` gates them, `report-only` changes nothing; no level decides a HUMAN finding or admits a skill. The MCP server runs `careful` explicitly (`specs/2026-09-05-autonomy-default-design.md`).
-- **No capability ships ahead of the instrument that measures it.** PyPI publish is wave 14, after correctness and capability (`specs/2026-09-06-master-plan.md`).
+- **No capability ships ahead of the instrument that measures it.** PyPI publish is Stage 5 (decision D22), after correctness and capability (rule 1 of `specs/2026-10-14-the-plan.md`).
