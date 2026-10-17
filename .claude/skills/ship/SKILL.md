@@ -26,7 +26,7 @@ description: Finish the current task - run checks, review, stop for Aarmen on co
    - Show Aarmen the diff of those files and the tradeoffs in two or three lines.
    - Wait for his explicit yes in this conversation. A yes for an earlier diff doesn't count for this one.
    - On no, stop. Leave the branch and worktree as they are.
-5. **Commit.** Stage only this task's files by name, never `.env*` and never `git add -A`. Use a short imperative message in the repo's style (`fix: ...`, `feat: ...`, `docs: ...`), with a body that says why, ending with `Closes #<n>` when there's an issue. No Co-Authored-By trailer.
+5. **Commit.** If the change is user-visible (a CLI flag, an exit code, an output shape, a report, the README), write `changes/<n>.<kind>.md` with one line and stage it with the task's files. Stage only this task's files by name, never `.env*` and never `git add -A`. Use a short imperative message in the repo's style (`fix: ...`, `feat: ...`, `docs: ...`), with a body that says why, ending with `Closes #<n>` when there's an issue. No Co-Authored-By trailer.
 6. **Rebase and push to `dev`.**
    - Run `git fetch origin dev && git rebase origin/dev`.
    - On conflicts, keep both sides' intent, show the user what you chose, and re-run step 2's checks.

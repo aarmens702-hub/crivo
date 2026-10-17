@@ -16,6 +16,7 @@ You get: the issue text, the scout's change map, and the worktree path. Work onl
 
 1. **One test per Done-when item** where a test can check it. Tests go in `tests/`, in the file the change map names, following the style of the tests already there (plain functions, `pytest.mark.parametrize` and table-driven cases over near-copies).
    - **For a `bug` issue, first write a test that reproduces the bug exactly**, on the smallest frame that shows it.
+     - On a `bug` issue, open the regression test's docstring with `Regression for #<n>.` Keep the test name describing the behaviour.
    - **Use real data shapes.** Build frames that look like real messy exports (mixed formats, sentinels, ids with leading zeros), with hand-checked expected values. Complex cases stay complex.
    - **Keyless and offline.** Never a real model key or the network: use the fake providers and tmp files that `tests/conftest.py` and the existing tests use. No Docker.
    - **Don't mock the thing under test.** Faking the provider is fine; faking the detector in a test of the detector is not.

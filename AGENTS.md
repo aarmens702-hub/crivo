@@ -34,7 +34,7 @@ crivo is an agent, so a green test suite proves the code, not what the model doe
   - Work on a local branch off `dev`, in its own worktree at `.worktrees/<n>` (`/start-task` makes both). The main checkout stays on `dev`.
   - `/ship` runs the checks, rebases onto the latest `dev`, and pushes straight to `dev`. No PR.
   - CI (`.github/workflows/ci.yml`: ruff, pytest and the bench smoke on Linux and macOS) runs on every push to `dev`. `/ship`'s local checks are still the gate, so never push without them. If `dev` breaks, whoever broke it fixes it first.
-- **`main`** is tested and is what the public sees: the README, the GitHub Action (`uses: aarmens702-hub/crivo@main`) and `pip install git+...` all read it.
+- **`main`** is tested and is what the public sees: the README, the GitHub Action (`uses: aarmens702-hub/crivo@vX.Y.Z`, a release tag on `main`) and `pip install git+...` all read it.
   - `/promote`: the local checks on `dev`, a walk of the demo story, then a `dev → main` PR merged once CI is green on it.
   - Nothing reaches `main` any other way.
 - **`/qa-pass`** runs all of `docs/QA.md` black-box. It's for checkpoints (before a release, after a big wave), not every promotion. It files `bug` issues.
@@ -82,6 +82,7 @@ Run from the repo root (or the worktree root).
 - **Tests are keyless and offline.** `tests/conftest.py` quarantines provider credentials. Use the fake providers and tmp files; never a real key or the network.
 - **The bench grades the code, so it can't be written from the code.** Authors of corruption injectors (`bench/corrupt.py`, `bench/bases.py`) must not read `src/crivo/detect.py` or `src/crivo/autoclean.py`. Plant what the taxonomy says a disease is. The scorer side may read anything.
 - **The instrument comes before the capability it measures.** A change meant to move detection or repair shows its bench effect in the commit. A new detector or fixer ships with corpus cases that exercise it.
+- **User-visible changes get a changelog fragment** (`changes/<issue#>.<kind>.md`). Regression tests for a bug open their docstring with `Regression for #<n>.`
 
 ## Boundaries
 **Always**
