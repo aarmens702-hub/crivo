@@ -38,7 +38,6 @@
   ```
 - **No key needed for INST, LIB, CLI, MCP and BENCH.** The analyst cases (AN) run free on the faux provider (`CRIVO_PROVIDER=faux`), which replays canned replies queued with `crivo.llm.faux_enqueue()` in the same process. Cases marked **costs money** call a real model and need a real `DEEPSEEK_API_KEY`; run them only when Aarmen asks.
 - **The faux runs set `DEEPSEEK_API_KEY=unused`.** The CLI still demands that variable under faux (AN-03). The value is never sent anywhere: faux makes no network calls.
-- **Known blocker on a fresh install:** until INST-04 passes, run `uv pip install -q --python ../venv/bin/python httpx` before the AN cases, and say in the report that you did.
 - **Never** run `--docker` or `pytest -m docker`. Docker is not allowed on Aarmen's Mac.
 
 ## Install (INST)
@@ -48,7 +47,7 @@
 | INST-01 | The Setup install, then `ls ../venv/bin \| grep crivo` | It installs with no error, and both `crivo` and `crivo-mcp` are listed. |
 | INST-02 | Save as `audit.py` and run `$PY audit.py`: `import sys; seen=[]; sys.addaudithook(lambda e, a: seen.append(e) if e.startswith(("socket.", "subprocess.", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork")) else None); import crivo; print("events:", sorted(set(seen)) or "none")` | Prints `events: none`. Importing crivo opens no socket and starts no process. |
 | INST-03 | `$CRIVO --help; echo $?` | The first line starts `usage: crivo [-h] [--auto-run]`, the flags include `--autonomy {autonomous,careful,report-only}`, and the exit code is `0`. |
-| INST-04 | `$PY -c "import crivo.loop"; echo $?` on a fresh install, before any workaround | Exit code `0`, no output. **Fails today:** `ModuleNotFoundError: No module named 'httpx'`. `crivo/llm.py` imports `httpx` but crivo does not declare it, and a fresh install resolves `anthropic` 1.14, `openai` 3.31 and `mcp` 2.3, which pull `httpx2` instead. This breaks `cv.ask`, the REPL and the MCP analyst tools. |
+| INST-04 | `$PY -c "import crivo.loop"; echo $?` on a fresh install, before any workaround | Exit code `0`, no output. |
 
 ## Library (LIB)
 

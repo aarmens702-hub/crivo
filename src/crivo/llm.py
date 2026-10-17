@@ -13,8 +13,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator
 
-import httpx
-from openai import OpenAI
+from openai import OpenAI, Timeout
 
 # Overflow shapes for the providers generate() actually speaks to, each with
 # the real error message it came from:
@@ -302,14 +301,13 @@ def _generate(messages: Iterable[dict], model: str | None, usage_sink) -> Iterat
         # the final stream chunk then carries usage, including DeepSeek's
         # prompt_cache_hit_tokens / prompt_cache_miss_tokens (A0 R4/R5)
         stream_options={"include_usage": True},
-        # First line of defense, not the only one: httpx re-applies this read
-        # timeout to every socket read for the life of the stream (confirmed
-        # against a real local socket -- it is not just a connect timeout), so
-        # it independently catches true wire silence for the real client. The
-        # wall-clock checks below no longer assume that is enough on its own.
-        timeout=httpx.Timeout(
-            connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0
-        ),
+        # First line of defense, not the only one: the SDK's HTTP client re-applies
+        # this read timeout to every socket read for the life of the stream, so it
+        # independently catches true wire silence for the real client. Confirmed
+        # against a real local socket on httpx (it is not just a connect timeout);
+        # httpx2, which newer SDKs use, is its successor and was not re-tested.
+        # The wall-clock checks below no longer assume that is enough on its own.
+        timeout=Timeout(connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0),
     )
     yield from _watched(stream, _deepseek_text, usage_sink)
 
