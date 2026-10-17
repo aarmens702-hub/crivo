@@ -195,9 +195,17 @@ class Session:
                     f"no session {resume!r} under {self.workspace_root}"
                 )
         else:
-            self.session_id = self._next_session_id()
-            self.session_dir = self.workspace_root / self.session_id
-            self.session_dir.mkdir(parents=True, exist_ok=True)
+            # claim the directory, never share it: two MCP workers can scan
+            # the workspace at once, and the one whose mkdir loses moves on
+            for attempt in range(5):
+                self.session_id = self._next_session_id()
+                self.session_dir = self.workspace_root / self.session_id
+                try:
+                    self.session_dir.mkdir(exist_ok=False)
+                    break
+                except FileExistsError:
+                    if attempt == 4:
+                        raise
         self.data_dir = Path(data_dir)
         self.docker = docker
         self.skills_dir = Path(skills_dir)
@@ -1168,7 +1176,7 @@ class Session:
         ]
         for attempt in range(1, CLEAN_MAX_ATTEMPTS + 1):
             try:
-                resp = yield from self._generate_scoped(msgs)
+                resp = yield from self._generate_scoped(msgs, until_execute=True)
             except Exception as exc:  # noqa: BLE001 — surface and fall through
                 yield Notice("llm_error", f"{type(exc).__name__}: {exc}")
                 return False
@@ -1311,7 +1319,7 @@ class Session:
 
         while attempts < CLEAN_MAX_ATTEMPTS:
             try:
-                resp = yield from self._generate_scoped(msgs)
+                resp = yield from self._generate_scoped(msgs, until_execute=True)
             except Exception as exc:  # noqa: BLE001 — surface, fail the finding
                 yield Notice("llm_error", f"{type(exc).__name__}: {exc}")
                 break
@@ -1892,8 +1900,9 @@ class Session:
         """After the run, offer each model-authored verified fix as a skill.
 
         Only `origin == "model"` records qualify: a fix a skill produced never
-        spawns another skill. That is the depth-1 recursion cap, and keeping it
-        here in the flow means no prompt can talk its way past it (R5).
+        spawns another skill. That is the rule that skills never breed skills,
+        and keeping it here in the flow means no prompt can talk its way past
+        it (R5).
         """
         candidates = [
             r
@@ -2028,7 +2037,7 @@ class Session:
         """Both execution gates. Returns "" when admitted, else why not (R7/R8).
 
         Runs in the kernel, not the host: this is model-authored code meeting
-        real data, and the sandbox is where that belongs.
+        real data.
         """
         adm, _, _, _ev = yield from self._exec_events(
             verify.admission_cell(
@@ -2132,32 +2141,55 @@ class Session:
                 [
                     {"role": "system", "content": prompts.SYSTEM_PROMPT},
                     *self.history,
-                ]
+                ],
+                until_execute=True,
             )
         )
 
-    def _generate_scoped(self, msgs: list[dict], stream: bool = True):
+    def _generate_scoped(
+        self, msgs: list[dict], stream: bool = True, until_execute: bool = False
+    ):
         """Complete an explicit message list + fresh registry.
 
         `stream=False` for housekeeping calls whose text is not the answer —
         rendering an intent check as if it were the model thinking out loud
         would put the checker's words in the analyst's mouth.
+
+        `until_execute=True` ends the reply at the first `</execute>` that
+        closes an `<execute>`: an "Output:" the model invents past its cell
+        never reaches the screen, the history or the transcript. The stream
+        is still read to its end, since usage reaches telemetry only then.
+        No cut once an `<answer>` opened before the cell: the reply stays
+        whole, so a cell quoted inside a closed answer parses malformed and
+        never runs. An answer cut off before its `</answer>` still parses as
+        the cell it quotes (`parse_tags`, unchanged here).
         """
         parts: list[str] = []
         context = [*msgs, {"role": "user", "content": self._registry_block()}]
         beats = 0
+        cut = -1  # once the cell closes: where the kept reply ends
         for chunk in llm.generate(context):
+            if cut >= 0:
+                continue  # drained, not kept
             if not chunk:  # a heartbeat from the reasoning phase, not content
                 beats += 1
                 if stream and beats % HEARTBEAT_EVERY == 0:
                     yield StreamText("model", "·")
                 continue
             parts.append(chunk)
+            if until_execute and ">" in chunk:
+                text = "".join(parts)
+                cell = EXEC_RE.search(text)
+                if cell and "<answer>" not in text[: cell.start()]:
+                    # it closes in this chunk: keep up to the tag's end
+                    cut = cell.end()
+                    chunk = chunk[: len(chunk) - (len(text) - cut)]
             if stream:
                 yield StreamText("model", chunk)
         if stream:
             yield StreamText("model", "\n")
-        return "".join(parts)
+        text = "".join(parts)
+        return text[:cut] if cut >= 0 else text
 
     def _exec_events(self, code: str, quiet: bool = False, tolerate_death=False):
         """Execute a cell; yield render events unless quiet; log the exec.
@@ -2373,7 +2405,11 @@ class Session:
         return f"/data/{rel}"
 
     def _next_session_id(self) -> str:
-        taken = {d.name for d in self.workspace_root.glob("s[0-9][0-9]")}
+        taken = {
+            d.name
+            for d in self.workspace_root.iterdir()
+            if re.fullmatch(r"s\d+", d.name)
+        }
         n = 1
         while f"s{n:02d}" in taken:
             n += 1

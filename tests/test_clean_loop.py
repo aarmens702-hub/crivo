@@ -212,6 +212,53 @@ def test_reject_note_then_fixed(session, monkeypatch):
     assert "-998" in rep["fixes"][0]["fix_source"]
 
 
+FIX_NA = (
+    "<execute>def fix_sentinel_missing(df):\n"
+    "    out = df.copy()\n"
+    "    out['a'] = out['a'].replace('N/A', None)\n"
+    "    return out\n"
+    "df = fix_sentinel_missing(df)\n"
+    "assert not (df['a'] == 'N/A').any()</execute>"
+)
+# what a model writes when it runs past its own cell: an output it never saw
+INVENTED = "\nOutput:\n999\nSo 999 cells were placeholders and are now missing."
+
+
+def test_a_fix_reply_ends_at_its_cell(session, monkeypatch):
+    """Regression for #17. A fix reply that ran past </execute> and invented an
+    "Output:" kept that text in the mini turn's messages and its transcript
+    event, so after a reject the retry read a count the kernel never printed.
+    The reply ends at its cell, and the cell still reaches the gate."""
+    stub = counting_generate([FIX_NA + INVENTED, FIX_NA])
+    monkeypatch.setattr(llm, "generate", stub)
+    FakeClient.script = [
+        diag([finding(evidence="'N/A' appears 12x")]),
+        baseline(),
+        [ok()],  # the second fix cell
+        [ok()],  # verify
+        case(),
+        baseline(),
+        saved(),
+    ]
+    events = drive(
+        session.clean("df"),
+        decisions=[GateDecision("reject", "keep the blanks too"), GateDecision("run")],
+    )
+
+    retry = json.dumps(stub.calls[1])
+    assert "keep the blanks too" in retry, "the second call is the retry"
+    assert "999" not in retry, "the retry read invented output"
+    models = [e for e in session.transcript.events() if e["kind"] == "model"]
+    assert models[0]["text"] == FIX_NA
+    assert not [e for e in models if "999" in e["text"]]
+    streamed = "".join(e.text for e in events if isinstance(e, StreamText))
+    assert "999" not in streamed, "invented output was streamed"
+    body = FIX_NA.removeprefix("<execute>").removesuffix("</execute>")
+    gates = [e for e in events if isinstance(e, GateRequest)]
+    assert [g.code for g in gates] == [body, body]
+    assert report_of(session)["fixes"][0]["status"] == "fixed"
+
+
 def test_verify_failure_reverts_and_retries(session, monkeypatch):
     monkeypatch.setattr(llm, "generate", gen([FIX_A, FIX_B]))
     FakeClient.script = [
@@ -757,6 +804,50 @@ def test_family_harmonizes_once_then_cleans_each_slice(session, monkeypatch):
     gates = [e for e in events if isinstance(e, GateRequest)]
     assert len(gates) == 1, "one mapping for the whole family, not one per slice"
     assert "harmonize 2 slices" in gates[0].title
+
+
+def test_a_harmonize_reply_ends_at_its_cell(session, monkeypatch):
+    """Regression for #17. The harmonize turn kept an "Output:" the model
+    invented past its cell in its messages and its transcript event, so after
+    a reject the retry read a count the kernel never printed. The reply ends
+    at its cell, and the mapping still reaches the gate."""
+    stub = counting_generate([HARMONIZE + INVENTED, HARMONIZE])
+    monkeypatch.setattr(llm, "generate", stub)
+    FakeClient.script = [
+        family_meta(),
+        drift_finding(),
+        [ok()],  # family baseline
+        [ok()],  # the second harmonize cell
+        [ok()],  # family verification passes
+        [ok()],  # bind slice 1 to its own variable
+        diag([]),  # ... and clean it: nothing to fix
+        baseline(),
+        [ok()],  # bind slice 2
+        diag([]),
+        baseline(),
+    ]
+    events = drive(
+        session.clean_family("data/vancouver/*.csv", "tax"),
+        decisions=[GateDecision("reject", "map note, do not drop it")],
+    )
+
+    retry = json.dumps(stub.calls[1])
+    assert "map note, do not drop it" in retry, "the second call is the retry"
+    assert "999" not in retry, "the retry read invented output"
+    models = [
+        e
+        for e in session.transcript.events()
+        if e["kind"] == "model" and e.get("kind_note") == "harmonize"
+    ]
+    assert models[0]["text"] == HARMONIZE
+    assert not [e for e in models if "999" in e["text"]]
+    streamed = "".join(e.text for e in events if isinstance(e, StreamText))
+    assert "999" not in streamed, "invented output was streamed"
+    body = HARMONIZE.removeprefix("<execute>").removesuffix("</execute>")
+    gates = [e for e in events if isinstance(e, GateRequest)]
+    assert [g.code for g in gates] == [body, body]
+    notices = [e.text for e in events if isinstance(e, Notice)]
+    assert any("harmonized 2 slices" in n for n in notices)
 
 
 def test_a_mapping_that_loses_data_is_reverted(session, monkeypatch):
