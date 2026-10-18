@@ -5,9 +5,11 @@ value that crosses into it (GitHub / nbconvert sanitize aggressively)."""
 from html import escape
 
 import pandas as pd
+import pytest
 
+from crivo import autoclean, pii
 from crivo.detect import SINGLE_FRAME, SLUGS, detect_all
-from crivo.notebook import report_html
+from crivo.notebook import clean_html, report_html
 
 
 def _diagnosis():
@@ -158,3 +160,233 @@ def test_clean_html_shows_an_applied_fix_and_a_before_after_example():
     assert card.startswith("<div")
     assert "✓" in card, "an applied fix should be marked done"
     assert "→" in card, "a before/after example should render"
+
+
+# --- #19: the clean card masks PII-flagged values and clips every value -----
+
+MONEY = ["$1,200", "$3,400.50", "$15", "$980"] * 5  # d01, not PII
+
+
+def _padded_emails(n=20):
+    """A CRM export's email column, every fourth address padded (d06)."""
+    return [
+        f" jane.doe{i}@example.com  " if i % 4 == 1 else f"jane.doe{i}@example.com"
+        for i in range(n)
+    ]
+
+
+def _mixed_phones(n=20):
+    """Phones in two formats, every fifth one padded (d06)."""
+    return [
+        f"  555-010-{2000 + i}" if i % 5 == 0 else f"(555) 010-{2000 + i}"
+        for i in range(n)
+    ]
+
+
+def _leaked(rendered, cells) -> int:
+    """How many distinct raw cells appear in `rendered`, raw or escaped. A
+    count, so a failing assertion message carries no cell."""
+    raw = {str(cell).strip() for cell in cells}
+    return sum(1 for cell in raw if cell in rendered or escape(cell) in rendered)
+
+
+def _card_or_error(summary) -> str:
+    """The clean card, or the exception it raised as text, so a crash fails on
+    the test's assertion instead of erroring out of the test."""
+    try:
+        return clean_html(summary)
+    except Exception as exc:  # noqa: BLE001 - the crash is what is under test
+        return f"clean_html raised {type(exc).__name__}: {exc}"
+
+
+@pytest.mark.parametrize(
+    "column, cells, disease, masked",
+    [
+        pytest.param("email", _padded_emails(), 6, "***@example.com", id="d06-email"),
+        pytest.param("phone", _mixed_phones(), 6, pii.REDACTED, id="d06-phone"),
+        pytest.param(
+            "owner_email",
+            ["acct.owner@example.com"] * 20,
+            19,
+            "***@example.com",
+            id="d19-constant-email",
+        ),
+    ],
+)
+def test_clean_html_masks_values_from_pii_flagged_columns(
+    column, cells, disease, masked
+):
+    """Regression for #19. The clean card printed each applied fix's examples
+    raw, so a padded email trimmed by d06, or the constant a d19 drop removed,
+    reached a card a person forwards. Values from a PII-flagged column show
+    masked; the money column beside it keeps its real values."""
+    df = pd.DataFrame({column: cells, "amount": MONEY})
+    _cleaned, summary = autoclean.clean(df)
+    fixed = {(a["disease"], tuple(a["columns"])) for a in summary.applied}
+    assert (disease, (column,)) in fixed  # the premise: the fix ran
+    assert column in pii.flagged_columns(df)  # and the column is flagged
+
+    card = summary._repr_html_()
+
+    leaked = _leaked(card, cells)  # a count, never the cells, in a failure
+    assert leaked == 0
+    assert masked in card  # masked, not dropped
+    assert "✓" in card
+    assert escape("'$1,200'") in card  # a non-PII example keeps its value
+
+
+def test_clean_html_caps_each_example():
+    """Regression for #19. `_applied_row` rendered `old` and `new` with no
+    length cap, so a 1,400-character note printed whole, twice. Each shown
+    value is clipped to the 40-character limit `detect._samples` uses."""
+    notes = ["called back", "left voicemail", "no answer", "sent quote"] * 5
+    notes[3] = "  " + "SECRET-" * 200 + "  "
+    df = pd.DataFrame({"notes": notes, "amount": MONEY})
+    _cleaned, summary = autoclean.clean(df)
+    assert (6, ("notes",)) in {
+        (a["disease"], tuple(a["columns"])) for a in summary.applied
+    }
+
+    card = clean_html(summary)
+
+    shown = card.count("SECRET-")
+    assert shown > 0  # clipped, not dropped
+    assert shown <= 12
+
+
+def test_clean_html_renders_a_header_rename():
+    """Regression for #19. A d18 header repair's examples are
+    `{column, renamed, new}` with no `old`, so the clean card raised
+    KeyError on every header repair. It renders the rename instead."""
+    df = pd.DataFrame(
+        {
+            "Unnamed: 0": range(20),  # a pandas index written back out to csv
+            "name ": [f"Customer {i}" for i in range(20)],
+            "z": [round(0.25 * i, 2) for i in range(20)],
+        }
+    )
+    _cleaned, summary = autoclean.clean(df)
+    assert 18 in {a["disease"] for a in summary.applied}
+
+    card = _card_or_error(summary)
+
+    assert "column_0" in card
+
+
+def test_clean_html_shows_a_renamed_header_unmasked_on_a_pii_flagged_column():
+    """Regression for #19. A header name is schema, not a cell value: a d18
+    rename of a PII-flagged column shows its names as they are, not masked to
+    REDACTED by the masking that hides the column's cells."""
+    df = pd.DataFrame(
+        {
+            "Unnamed: 0": range(20),
+            "email ": [f"jane.doe{i}@example.com" for i in range(20)],
+            "plan": ["basic", "pro", "team", "free"] * 5,
+        }
+    )
+    _cleaned, summary = autoclean.clean(df)
+    assert 18 in {a["disease"] for a in summary.applied}
+    assert "email " in pii.flagged_columns(df)  # the premise: the column is flagged
+
+    card = _card_or_error(summary)
+
+    assert "column_0" in card
+    assert pii.REDACTED not in card
+
+
+SURVEY_QUESTION = (
+    "How satisfied were you with the onboarding process, on a scale of 1 to 10?"
+)
+
+
+def test_clean_html_clips_a_long_header_name_in_a_rename():
+    """Regression for #19. Survey exports carry whole questions as headers,
+    often with trailing spaces. The d18 rename row clips each name to the
+    40-character limit rather than printing the question whole on both sides
+    of the arrow."""
+    df = pd.DataFrame(
+        {
+            SURVEY_QUESTION + "   ": [i % 10 + 1 for i in range(20)],
+            "respondent_id": [f"R{i:04d}" for i in range(20)],
+        }
+    )
+    _cleaned, summary = autoclean.clean(df)
+    assert 18 in {a["disease"] for a in summary.applied}
+
+    card = _card_or_error(summary)
+
+    # the fix's column label, then both sides of the rename, each clipped
+    assert card.count(escape(SURVEY_QUESTION[:30])) >= 3
+    # only the column label may carry the whole question
+    assert card.count(escape(SURVEY_QUESTION)) <= 1
+
+
+def _fixer_raising(message):
+    """A fixer that fails the way pandas does, quoting the cell it choked on."""
+
+    def fixer(frame, cols, **_extra):
+        raise ValueError(message)
+
+    return fixer
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        pytest.param("could not convert string to float: {cell!r}", id="pandas"),
+        # a quote right after a word is an apostrophe, never a literal's start
+        pytest.param("Excel's text import padded {cell!r}", id="apostrophe"),
+    ],
+)
+def test_clean_html_masks_a_deferred_reason_quoting_a_pii_value(monkeypatch, template):
+    """Regression for #19. A review entry's `reason` ("fixer error: ...")
+    can quote the cell the fixer failed on, and the card printed it raw. The
+    reason goes through `pii.redact_text` before escaping; a reason on a
+    non-PII column keeps its literal."""
+    emails = _padded_emails()
+    message = template.format(cell=emails[1])
+    monkeypatch.setitem(autoclean.FIXERS, 6, _fixer_raising(message))
+    monkeypatch.setitem(
+        autoclean.FIXERS,
+        1,
+        _fixer_raising("could not convert string to float: '$1,200'"),
+    )
+    df = pd.DataFrame({"email": emails, "amount": MONEY})
+    _cleaned, summary = autoclean.clean(df)
+    reasons = {
+        (r["disease"], tuple(r["columns"])): r.get("reason", "")
+        for r in summary.needs_review
+    }
+    assert reasons[(6, ("email",))].startswith("fixer error:")  # the premise
+
+    card = clean_html(summary)
+
+    leaked = _leaked(card, emails)
+    assert leaked == 0
+    assert escape("'***@example.com'") in card  # masked, quotes kept
+    assert escape(template.split("{cell!r}")[0]) in card  # the prose is kept
+    assert escape("could not convert string to float: '$1,200'") in card
+
+
+def test_clean_summary_repr_masks_a_deferred_reason_quoting_a_pii_value(monkeypatch):
+    """Regression for #19. `repr(summary)` (what `print` shows) prints each
+    review entry's reason too, so a fixer error quoting a PII cell is masked
+    there as on the card; a non-PII literal stays."""
+    emails = _padded_emails()
+    message = f"could not convert string to float: {emails[1]!r}"
+    monkeypatch.setitem(autoclean.FIXERS, 6, _fixer_raising(message))
+    monkeypatch.setitem(
+        autoclean.FIXERS,
+        1,
+        _fixer_raising("could not convert string to float: '$1,200'"),
+    )
+    df = pd.DataFrame({"email": emails, "amount": MONEY})
+    _cleaned, summary = autoclean.clean(df)
+
+    text = repr(summary)
+
+    leaked = _leaked(text, emails)
+    assert leaked == 0
+    assert "'***@example.com'" in text
+    assert SLUGS[6] in text
+    assert "could not convert string to float: '$1,200'" in text

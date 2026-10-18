@@ -12,6 +12,10 @@ import ast
 import json
 from pathlib import Path
 
+import pandas as pd
+
+import crivo
+from crivo.detect import SLUGS
 from crivo.notebook_export import diagnosis_to_notebook
 
 
@@ -133,3 +137,28 @@ def test_module_imports_only_stdlib_no_jupyter_or_nbformat():
     # generated `import crivo` lives in a string the reader runs, not here.
     assert imported <= {"__future__", "json", "pathlib"}
     assert {"crivo", "nbformat", "jupyter"}.isdisjoint(imported)
+
+
+def test_export_notebook_carries_no_raw_value_from_a_pii_flagged_column(tmp_path):
+    """Regression for #19. `export_notebook` wrote each finding's evidence
+    into the notebook's markdown raw, so the padded emails d06 quotes reached
+    a file meant to be handed on. Evidence from a PII-flagged column is
+    masked; the finding stays listed and non-PII evidence stays as it was."""
+    emails = [
+        f" jane.doe{i}@example.com  " if i % 4 == 1 else f"jane.doe{i}@example.com"
+        for i in range(20)
+    ]
+    df = pd.DataFrame({"email": emails, "plan": ["basic", "N/A", "pro", "team"] * 5})
+    source = tmp_path / "contacts.csv"
+    df.to_csv(source, index=False)
+
+    path = crivo.export_notebook(source, tmp_path / "contacts.ipynb")
+    text = path.read_text(encoding="utf-8")
+
+    raw = {cell.strip() for cell in emails}
+    assert (
+        sum(1 for cell in raw if cell in text) == 0
+    )  # a count: no cell in the message
+    assert SLUGS[6] in text  # the whitespace finding is still listed
+    assert "'***@example.com'" in text  # masked, not dropped
+    assert "('N/A')" in text  # non-PII evidence is untouched

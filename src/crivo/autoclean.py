@@ -586,6 +586,11 @@ class CleanSummary:
         return _json.dumps(self.to_dict(), indent=indent, default=str)
 
     def __repr__(self) -> str:
+        from crivo import pii
+
+        # a fixer error can quote the cell it failed on, so a review reason is
+        # masked like the clean card's (see notebook._deferred_row)
+        flagged = pii.flagged_columns(self._before)
         lines = [
             (
                 f"cleaned: {len(self.applied)} fix(es) applied, "
@@ -597,7 +602,10 @@ class CleanSummary:
             lines.append(f"  ✓ d{a['disease']:02d} {a['slug']} [{where}]")
         for r in self.needs_review:
             where = ", ".join(r["columns"]) or "whole table"
-            why = f" — {r['reason']}" if r.get("reason") else ""
+            reason = r.get("reason")
+            why = (
+                f" — {pii.redact_text(reason, r['columns'], flagged)}" if reason else ""
+            )
             lines.append(f"  · d{r['disease']:02d} {r['slug']} [{where}]{why}")
         return "\n".join(lines)
 

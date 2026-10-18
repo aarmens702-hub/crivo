@@ -19,7 +19,7 @@ Every signature below is copied from the source. Shapes marked "seen" were captu
 | `reconcile_report` | `reconcile_report(a, b, keys)` | `str`, HTML. A key cell or changed value from a column `flagged_columns(a, b)` flags is masked with `mask_cell`; counts, receipt and notes are unchanged. |
 | `drivers` | `drivers(before, after, value_col, by_col)` | `dict` with keys `metric, by, total_before, total_after, delta, contributions, receipt` (seen). Rows with an empty `by_col` (None or NaN) form one contribution whose `category` is `None`. `receipt` is true when the contributions sum to `delta`, the change in the whole frames' totals, within rounding scaled to the size of the values (about 1e-9 of their absolute sum), so it cannot see a lost row smaller than that (e.g. under about $2.50 on a ledger with $2.5B of absolute volume). |
 | `analyze_excel` | `analyze_excel(path)` | `list[dict]`, one per sheet: `sheet, header_row, preamble_rows, tables, grade, evidence, suggestion, kind` (seen). |
-| `export_notebook` | `export_notebook(source, path)` | `Path` of a runnable .ipynb that re-reads and re-diagnoses `source`. |
+| `export_notebook` | `export_notebook(source, path)` | `Path` of a runnable .ipynb that re-reads and re-diagnoses `source`. Finding evidence in its markdown is masked (`pii.redact_findings`, see "PII masking"). |
 | `ask` | `ask(data, question, *, name=None)` | `Answer`. Needs a model (see Environment). Raises `RuntimeError` naming the missing variable. Gates auto-run. |
 | `main` | `main()` | `int`, the console-script entry. |
 
@@ -39,7 +39,8 @@ The accessor, registered on import: `df.crivo.diagnose(name=None) -> Report` and
 ### `CleanSummary`
 - `applied`, `needs_review`: lists of `{disease, slug, columns, grade}`; a review entry may add `reason` (`"fix did not clear verification"`, `"fixer error: ..."`, and for an `AUTO` finding with no fixer `"removing duplicate rows deletes data, so a person decides"` (d09) or `"no deterministic fixer for this disease yet"`). There is one review entry per finding, and entries can share `disease`, `columns` and even `grade` (for example a d07 `AUTO` beside a d07 `HUMAN` on one column, or two d22 `GATE` findings on one id column).
 - `to_dict()` keys: `applied, needs_review, rows_before, rows_after, columns_before, columns_after`. `to_json(indent=2)`.
-- `samples(per_fix=3) -> list[dict]`: `{disease, slug, columns, examples: [{column, row, old, new}]}`.
+- `samples(per_fix=3) -> list[dict]`: `{disease, slug, columns, examples}`. An example is `{column, row, old, new}` for a changed cell, `{column, renamed: True, new}` for a d18 header repair (`column` the old name, `new` the new one), or `{column, removed: True, value}` for a d19 constant-column drop (`value` the constant). Values are raw (exempt, see "PII masking").
+- `repr()` is the text summary and `_repr_html_()` the clean card. Both mask a review `reason` with `pii.redact_text`; the card also masks example values from PII-flagged columns (never a header name) and clips each example value to 40 characters. A reason is masked, not clipped.
 - `diff(max_rows=200)`: a pandas Styler of changed cells (needs jinja2, not a runtime dependency).
 
 ### `Answer`
@@ -86,7 +87,7 @@ Seen: `{"disease": 1, "slug": "numbers-as-strings", "columns": ["revenue"], "evi
 Fixed sets in `detect.py`: `INDICATORS = {12, 15}`, `FAMILY_ONLY = {20}`, `COLUMN_CHANGING = {17, 18, 19, 25}` (a fix may change the column list), `WHOLE_FRAME = {9, 10, 18, 24}` (the detector reads the whole frame).
 
 ## PII masking
-One shared masker in `pii.py`, keyless. Each surface under "Masked when rendered" masks when it renders once its pending issue lands; until then it does not mask. Detection (`detect._samples`) keeps real values, because the agent loop needs them to write a fix.
+One shared masker in `pii.py`, keyless. Each surface under "Masked when rendered" masks when it renders. Detection (`detect._samples`) keeps real values, because the agent loop needs them to write a fix.
 
 **Detected types:** `email`, `phone`, `ssn`, `credit_card` (Luhn-checked). Names and street addresses are not detected (they need NER).
 
@@ -99,7 +100,7 @@ One shared masker in `pii.py`, keyless. Each surface under "Masked when rendered
 | `redact_text` | `redact_text(text, columns, flagged)` | `str`. Every quoted literal (Python repr quoting, single or double) becomes its masked form, quotes kept, when a name in `columns` (as `str`) is in `flagged` (the first flagged name in `columns` order sets the type), or else when the literal is PII on its own. A quote mark right after a word character (the apostrophe in `Excel's`, or a `"` stuck to a word) does not open a literal. All other text is unchanged. |
 | `redact_findings` | `redact_findings(findings, flagged)` | `list[dict]`: shallow copies with `evidence` passed through `redact_text(f["evidence"], f["columns"], flagged)`. Never mutates its input; `flagged` is precomputed so a caller scans once. |
 
-**Masked when rendered** (surfaces a person may send on): `Report.to_html` and `_repr_html_`, the clean card and `export_notebook` (pending #19), `reconcile_report`, `Report.cross_column` examples, `crivo diagnose` text output and `Report.__repr__` (`print(report)`).
+**Masked when rendered** (surfaces a person may send on): `Report.to_html` and `_repr_html_`, the clean card, `print(summary)` and `export_notebook`, `reconcile_report`, `Report.cross_column` examples, `crivo diagnose` text output and `Report.__repr__` (`print(report)`).
 
 **Exempt** (programmatic or interactive by design): `Report.findings`, `to_dict`, `to_json`, `crivo diagnose --json`, the `reconcile()` and `drivers()` dicts, `CleanSummary.diff()` and `samples()`, gate previews, MCP tool results.
 

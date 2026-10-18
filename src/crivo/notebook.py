@@ -213,31 +213,62 @@ def _fix_head(mark, mark_color, slug_color, fix) -> str:
     )
 
 
-def _applied_row(fix, examples) -> str:
+CLIP = 40  # characters per example value, the limit detect._samples uses
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= CLIP else text[:CLIP] + "…"
+
+
+def _shown(value, kind=None, *, quote=False) -> str:
+    """One value as the clean card shows it: masked as PII type `kind` (when
+    not None), clipped, then escaped. Masking runs before escaping, which
+    turns quotes into entities. A string is clipped before it is quoted, so
+    its closing quote stays."""
+    if kind:
+        value = pii.mask_cell(value, kind)
+    if isinstance(value, str):
+        text = repr(_clip(value)) if quote else _clip(value)
+    else:
+        text = _clip(repr(value) if quote else str(value))
+    return _esc(text)
+
+
+def _applied_row(fix, examples, flagged) -> str:
     rows = [
         f'<div style="margin-top:10px;">{_fix_head("✓", GRADE["AUTO"], GRADE["AUTO"], fix)}</div>'
     ]
     for ex in examples[:3]:
-        if ex.get("removed"):
-            text = _esc(f"{ex['column']} removed (constant {ex['value']!r})")
+        kind = flagged.get(str(ex["column"]))
+        if ex.get("renamed"):  # d18: a header name is schema, clipped but never masked
+            text = _shown(ex["column"], quote=True) + " → " + _shown(ex["new"])
+        elif ex.get("removed"):  # d19: the dropped constant is a cell value
+            value = _shown(ex["value"], kind, quote=True)
+            text = f"{_shown(ex['column'])} removed (constant {value})"
         else:
-            text = _esc(repr(ex["old"])) + " → " + _esc(str(ex["new"]))
+            text = _shown(ex["old"], kind, quote=True) + " → " + _shown(ex["new"], kind)
         rows.append(
             f'<div style="margin:2px 0 0 18px;">{_span(text, MUTED_2, mono=True)}</div>'
         )
     return "".join(rows)
 
 
-def _deferred_row(fix) -> str:
+def _deferred_row(fix, flagged) -> str:
     head = _fix_head("&#183;", MUTED, MUTED_2, fix)
     reason = fix.get("reason")
     if reason:
-        head += _span("&nbsp;&#8212; " + _esc(reason), MUTED)
+        # mask before escaping, as in _finding: a fixer error can quote a cell
+        redacted = pii.redact_text(reason, fix["columns"], flagged)
+        head += _span("&nbsp;&#8212; " + _esc(redacted), MUTED)
     return f'<div style="margin-top:8px;">{head}</div>'
 
 
 def clean_html(summary):
+    """The clean card. Example values and review reasons from PII-flagged
+    columns of the frame before cleaning are masked; each example value is
+    clipped to CLIP characters. Reasons are masked, not clipped."""
     applied, deferred = summary.applied, summary.needs_review
+    flagged = pii.flagged_columns(summary._before)
     samples = {
         (s["disease"], tuple(s["columns"])): s["examples"] for s in summary.samples()
     }
@@ -248,10 +279,10 @@ def clean_html(summary):
     )
     parts = [f'<div style="margin:0 0 2px;">{header}</div>{_rule()}']
     parts.extend(
-        _applied_row(f, samples.get((f["disease"], tuple(f["columns"])), []))
+        _applied_row(f, samples.get((f["disease"], tuple(f["columns"])), []), flagged)
         for f in applied
     )
-    parts.extend(_deferred_row(f) for f in deferred)
+    parts.extend(_deferred_row(f, flagged) for f in deferred)
     return _card("".join(parts))
 
 

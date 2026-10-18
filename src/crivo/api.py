@@ -320,11 +320,15 @@ def export_notebook(source, path) -> Path:
     `source` (B3.2): the analysis as a reproducible .ipynb a colleague can
     open. Reads and diagnoses the source to seed the finding cells; returns
     the written path."""
+    from crivo import pii as _pii
     from crivo.notebook_export import diagnosis_to_notebook
 
     frame = read(source)
     findings = detect_all(frame, Path(str(source)).name)["findings"]
-    return diagnosis_to_notebook(source, findings, path)
+    # the notebook is meant to be handed on: evidence from PII-flagged columns
+    # is masked here, so notebook_export stays pure
+    redacted = _pii.redact_findings(findings, _pii.flagged_columns(frame))
+    return diagnosis_to_notebook(source, redacted, path)
 
 
 def diagnose(data, name: str | None = None) -> Report:
