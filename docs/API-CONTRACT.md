@@ -160,7 +160,7 @@ One JSON object per line. The host writes requests to the supervisor's stdin; ev
 | `DEEPSEEK_API_KEY` | none | the deepseek provider's key |
 | `ANTHROPIC_API_KEY` | none | the claude provider's key |
 | `CRIVO_BASE_URL` | none | the openai provider's endpoint (required there) |
-| `CRIVO_MODEL` | `deepseek-v4-pro`, or `claude-opus-5` for claude | overrides the model; required for openai |
+| `CRIVO_MODEL` | `deepseek-v4-pro`, or `claude-opus-5-5` for claude | overrides the model; required for openai |
 | `CRIVO_API_KEY` | `local-no-key` | key sent to the openai provider |
 | `CRIVO_STALL_S` | 90 | seconds with no stream bytes before a call is dead |
 | `CRIVO_MAX_CALL_S` | 420 | cap on one model call, in seconds |

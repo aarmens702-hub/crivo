@@ -557,38 +557,6 @@ def test_one_additive_term_alone_is_not_a_cost_basis(tmp_path):
     assert _stats("in2", {"gen_ai.usage.input_tokens": 900})["input_tokens"] == 900
 
 
-def test_the_cost_column_admits_which_providers_it_can_price(tmp_path):
-    """crivo.llm maps usage from `prompt_tokens`/`completion_tokens`, the
-    OpenAI and DeepSeek spelling. Anthropic's usage object spells them
-    `input_tokens`/`output_tokens`, so on the Claude provider no span carries
-    either additive term, every case reads unknown, and the whole cost column
-    is silent. Nothing in the code says so, and a reader of the docstring's
-    three states would read that silence as cancelled calls."""
-    import json
-
-    tele = tmp_path / "claude.jsonl"
-    tele.write_text(
-        json.dumps(
-            {
-                "name": "gen_ai.client.call",
-                "dur_s": 4.0,
-                "attrs": {
-                    "gen_ai.system": "claude",
-                    "gen_ai.request.model": "claude-sonnet-4-6",
-                },
-            }
-        )
-        + "\n"
-    )
-
-    stats = agent_run._call_stats(tele)
-    assert stats["count"] == 1, "the call happened and was billed"
-    assert stats["new_work_tokens"] is None
-
-    doc = agent_run._call_stats.__doc__ or ""
-    assert "claude" in doc.lower(), "the provider gap has to be named, not implied"
-
-
 def test_absent_telemetry_publishes_an_unknown_count_not_a_zero_one(tmp_path):
     """The same return said two things: new_work_tokens None ("we do not know
     whether a call was made") beside count 0 ("no call was made"). The count

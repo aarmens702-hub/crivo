@@ -5,13 +5,31 @@ block -- so we can drive the same code paths a real DeepSeek stream would hit
 without ever opening a socket."""
 
 import inspect
+import json
 import os
 import re
 import time
 from types import SimpleNamespace
 
 import pytest
+from anthropic.types import (
+    Message,
+    MessageDeltaUsage,
+    RawContentBlockDeltaEvent,
+    RawContentBlockStartEvent,
+    RawContentBlockStopEvent,
+    RawMessageDeltaEvent,
+    RawMessageStartEvent,
+    RawMessageStopEvent,
+    TextBlock,
+    TextDelta,
+    Usage,
+)
+from anthropic.types.message_create_params import MessageCreateParamsStreaming
+from anthropic.types.raw_message_delta_event import Delta
+from openai.types.chat import ChatCompletionChunk
 
+from bench import agent_run
 from crivo import llm
 
 
@@ -205,6 +223,261 @@ def test_claude_thinking_deltas_are_heartbeats_not_text(monkeypatch):
     monkeypatch.setattr(llm, "_get_claude_client", lambda: fake_claude_client(stream))
 
     assert list(llm.generate([{"role": "user", "content": "hi"}])) == ["", "done"]
+
+
+def test_claude_request_matches_the_current_messages_api(monkeypatch):
+    """Regression for #13. DD1: models after Claude Opus 4.6 answer any
+    temperature, top_p or top_k with HTTP 400, so every call on
+    CRIVO_PROVIDER=claude failed. Thinking is always on and spends from
+    max_tokens, so 8192 can cut a reply short; effort is the control now.
+    Summarized thinking streams deltas, which the stall timer reads as a live
+    stream instead of a dead one."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    calls: list = []
+    stream = iter(
+        [claude_event(thinking="weighing the medians"), claude_event(text="ok")]
+    )
+    monkeypatch.setattr(
+        llm, "_get_claude_client", lambda: fake_claude_client(stream, calls)
+    )
+
+    reply = llm.generate(
+        [
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "which district grew most?"},
+        ]
+    )
+    assert list(reply) == ["", "ok"]
+
+    sent = calls[0]
+    assert not {"temperature", "top_p", "top_k"} & set(sent), (
+        f"current Claude models reject these with HTTP 400: {sorted(sent)}"
+    )
+    assert sent.get("model") == "claude-opus-5-5"
+    assert sent.get("max_tokens", 0) >= 32000, "thinking spends from max_tokens"
+    effort = getattr(llm, "CLAUDE_EFFORT", None)
+    assert effort == "high"  # Aarmen's call: a constant, not an env var
+    assert sent.get("output_config") == {"effort": effort}
+    thinking = sent.get("thinking") or {}
+    assert thinking.get("type") == "adaptive"
+    assert "budget_tokens" not in thinking
+    assert thinking.get("display") == "summarized", "keeps the stall timer honest"
+    assert sent.get("stream") is True
+    fields = (
+        MessageCreateParamsStreaming.__required_keys__
+        | MessageCreateParamsStreaming.__optional_keys__
+    )
+    assert set(sent) <= fields, f"not Messages API fields: {set(sent) - fields}"
+
+    assert llm.model_info() == {
+        "provider": "claude",
+        "model": "claude-opus-5-5",
+        "effort": "high",
+    }
+
+
+@pytest.mark.parametrize(
+    ("provider", "seam", "env"),
+    [
+        pytest.param("deepseek", "_get_client", {}, id="deepseek"),
+        pytest.param(
+            "openai", "_get_openai_client", {"CRIVO_MODEL": "llama3.3"}, id="openai"
+        ),
+    ],
+)
+def test_openai_compatible_requests_keep_their_temperature(
+    monkeypatch, provider, seam, env
+):
+    """Pin beside DD1: dropping temperature is a Claude fact. DeepSeek and
+    the generic OpenAI endpoint still accept it, and still get 0.0."""
+    monkeypatch.setenv("CRIVO_PROVIDER", provider)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    sent: dict = {}
+
+    def create(**kw):
+        sent.update(kw)
+        return iter([chunk(content="pong")])
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    monkeypatch.setattr(llm, seam, lambda: client)
+
+    assert list(llm.generate([{"role": "user", "content": "hi"}])) == ["pong"]
+    assert sent.get("temperature") == llm.TEMPERATURE == 0.0
+    assert llm.model_info()["temperature"] == 0.0
+
+
+_USAGE_ATTRS = (
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.output_tokens",
+    "crivo.cache.hit_tokens",
+    "crivo.cache.miss_tokens",
+)
+
+
+def _claude_stream(start_usage: dict | None, output_tokens: int = 57) -> list:
+    """The event sequence a real Messages API stream sends, built from the
+    SDK's own types. Input and cache counts arrive once, on message_start;
+    message_delta carries the running output count."""
+    events: list = []
+    if start_usage is not None:
+        events.append(
+            RawMessageStartEvent(
+                type="message_start",
+                message=Message(
+                    id="msg_01XFDUDYJgAACzvnptvVoYEL",
+                    type="message",
+                    role="assistant",
+                    model="claude-opus-5-5",
+                    content=[],
+                    stop_reason=None,
+                    stop_sequence=None,
+                    usage=Usage(**start_usage),
+                ),
+            )
+        )
+    events += [
+        RawContentBlockStartEvent(
+            type="content_block_start",
+            index=0,
+            content_block=TextBlock(type="text", text="", citations=None),
+        ),
+        RawContentBlockDeltaEvent(
+            type="content_block_delta",
+            index=0,
+            delta=TextDelta(type="text_delta", text="RS-1 grew most."),
+        ),
+        RawContentBlockStopEvent(type="content_block_stop", index=0),
+        RawMessageDeltaEvent(
+            type="message_delta",
+            delta=Delta(stop_reason="end_turn", stop_sequence=None),
+            usage=MessageDeltaUsage(output_tokens=output_tokens),
+        ),
+        RawMessageStopEvent(type="message_stop"),
+    ]
+    return events
+
+
+def _call_attrs(path) -> dict:
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    return next(r for r in rows if r["name"] == "gen_ai.client.call")["attrs"]
+
+
+@pytest.mark.parametrize(
+    ("cache_written", "expected", "new_work"),
+    [
+        # 1200 fresh + 200 read + 0 written in; 57 out (the last count, not
+        # 1 + 57); 1400 - 200 + 57 = 1257 new work
+        pytest.param(None, (1400, 57, 200, 1200), 1257, id="cache-read"),
+        # a cache write is new work: 1200 + 300 + 200 = 1700 in, 1500 missed,
+        # 1700 - 200 + 57 = 1557
+        pytest.param(300, (1700, 57, 200, 1500), 1557, id="cache-read-and-write"),
+    ],
+)
+def test_claude_usage_reaches_the_telemetry_span(
+    tmp_path, monkeypatch, cache_written, expected, new_work
+):
+    """Regression for #13. W23r: generate() mapped only the OpenAI spelling,
+    and _watched never looked inside message_start, so no Claude span carried
+    a token count and the bench's cost column read unknown. Anthropic's
+    input_tokens excludes cache reads and writes, where DeepSeek's
+    prompt_tokens includes the hits; the span carries DeepSeek's meaning, so
+    the bench's input - hit + output counts the cache once, not twice."""
+    path = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("CRIVO_TELEMETRY", str(path))
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    stream = _claude_stream(
+        {
+            "input_tokens": 1200,
+            "cache_read_input_tokens": 200,
+            "cache_creation_input_tokens": cache_written,
+            "output_tokens": 1,
+        }
+    )
+    monkeypatch.setattr(
+        llm, "_get_claude_client", lambda: fake_claude_client(iter(stream))
+    )
+
+    reply = "".join(llm.generate([{"role": "user", "content": "q"}]))
+    assert reply == "RS-1 grew most."
+
+    attrs = _call_attrs(path)
+    assert tuple(attrs.get(a) for a in _USAGE_ATTRS) == expected
+    assert agent_run._call_stats(path)["new_work_tokens"] == new_work
+
+
+def _deepseek_stream() -> list:
+    """DeepSeek's final chunk: no choices, usage only. prompt_tokens already
+    includes the cache hits; the hit/miss split is DeepSeek's own extension."""
+    return [
+        chunk(content="RS-1 grew most."),
+        ChatCompletionChunk.model_validate(
+            {
+                "id": "a3f1c9e2-5b7d-4e8a-9c0f-1d2e3f4a5b6c",
+                "object": "chat.completion.chunk",
+                "created": 1760700000,
+                "model": "deepseek-v4-pro",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 1400,
+                    "completion_tokens": 57,
+                    "total_tokens": 1457,
+                    "prompt_cache_hit_tokens": 200,
+                    "prompt_cache_miss_tokens": 1200,
+                },
+            }
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("provider", "seam", "stream", "expected", "new_work"),
+    [
+        # the same call in DeepSeek's spelling prices the same as Claude's
+        pytest.param(
+            "deepseek",
+            "_get_client",
+            _deepseek_stream,
+            dict(zip(_USAGE_ATTRS, (1400, 57, 200, 1200), strict=True)),
+            1257,
+            id="deepseek-spelling-unchanged",
+        ),
+        # no message_start reached us, so input is unknown: an output count
+        # alone would publish a call that knowably cost more as a cheap one
+        pytest.param(
+            "claude",
+            "_get_claude_client",
+            lambda: _claude_stream(None),
+            {},
+            None,
+            id="claude-without-input-tokens",
+        ),
+    ],
+)
+def test_usage_mapping_the_claude_change_leaves_alone(
+    tmp_path, monkeypatch, provider, seam, stream, expected, new_work
+):
+    """Pins beside W23r: the OpenAI-name mapping stays as it was, and a
+    Claude usage with no input_tokens maps none of the four attributes
+    (Aarmen's call)."""
+    path = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("CRIVO_TELEMETRY", str(path))
+    monkeypatch.setenv("CRIVO_PROVIDER", provider)
+    events = iter(stream())
+    client = SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **_: events),
+        chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: events)),
+    )
+    monkeypatch.setattr(llm, seam, lambda: client)
+
+    reply = "".join(llm.generate([{"role": "user", "content": "q"}]))
+    assert reply == "RS-1 grew most."
+
+    attrs = _call_attrs(path)
+    assert {a: attrs[a] for a in _USAGE_ATTRS if a in attrs} == expected
+    assert agent_run._call_stats(path)["new_work_tokens"] == new_work
 
 
 def test_content_chunks_pass_through_unchanged(monkeypatch):
