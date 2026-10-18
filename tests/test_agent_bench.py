@@ -1863,3 +1863,234 @@ def test_cassettes_written_into_the_checkout_do_not_mark_it_dirty(
 
     (checkout / "loop.py").write_text("STEP = 2\n")
     assert stamp("third_case")["dirty"] is True, "a changed tracked file is one"
+
+
+# --- the per-case dollar cap (EV9, #72) ---------------------------------------
+# With args.per_case_usd set, `_run_case` wraps llm.generate in a spend guard,
+# inside the recorder: after each call it re-reads the case's telemetry and
+# prices every span (bench.prices); once the case costs more than the cap it
+# refuses every later call without sending it, and the case ends "aborted:
+# per-case budget". The loop turns a raise from generate into an llm_error
+# notice and goes on (loop.py), so a raise stops one request, never the case:
+# the guard has to refuse each call after the one that crossed. The row carries
+# what the case cost as row["cost_usd"], None when it can't be read.
+
+# A made-up price for faux, in USD per million tokens, so its calls cost money
+# here; not any provider's. Every span the billed provider writes costs,
+# hand-checked: 120000 * 0.27 + 2000 * 1.10 = 32400 + 2200 per million tokens,
+# $0.0346 a call.
+BILLED_PRICE = {
+    "input": 0.27,
+    "cache_hit": 0.07,
+    "output": 1.10,
+    "source": "a test price, not read from any provider's page",
+    "checked": "2026-10-18",
+}
+BILLED_USAGE = {
+    "gen_ai.usage.input_tokens": 120_000,
+    "gen_ai.usage.output_tokens": 2_000,
+    "crivo.cache.hit_tokens": 0,
+    "crivo.cache.miss_tokens": 120_000,
+}
+PER_CALL_USD = 0.0346
+ATTEMPTS = 5
+
+
+def _prices():
+    """bench.prices, looked up so that a missing module fails on this
+    assertion rather than on an ImportError."""
+    import importlib
+    import importlib.util
+
+    assert importlib.util.find_spec("bench.prices") is not None, (
+        "bench/prices.py does not exist yet (#72)"
+    )
+    return importlib.import_module("bench.prices")
+
+
+def _billed_faux(monkeypatch, usage=lambda i: BILLED_USAGE, price=BILLED_PRICE):
+    """CRIVO_PROVIDER=faux priced at `price` (None keeps faux's own zero
+    price), and llm.generate replaced by a provider that bills: call i yields
+    one reply, then writes the span llm.generate writes, through
+    crivo.telemetry, with `usage(i)` on it (None: that call writes no span at
+    all). Returns the list of calls that reached it; a call counts when
+    generate is called, before its stream is read. No network, no key."""
+    from crivo import llm, telemetry
+
+    prices = _prices()
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    if price is not None:
+        monkeypatch.setitem(prices.PRICES, "faux", dict(price))
+    reached: list = []
+
+    def generate(messages, model=None):
+        i = len(reached)
+        reached.append(i)
+        attrs = usage(i)
+
+        def stream():
+            try:
+                yield "<execute>\ndf['acct'] = df['acct'].str.strip()\n</execute>"
+            finally:  # as llm.generate's span, written when the call ends
+                if attrs is not None:
+                    telemetry.emit(
+                        "gen_ai.client.call",
+                        dur_s=1.2,
+                        **{
+                            "gen_ai.system": "faux",
+                            "gen_ai.request.model": "m",
+                            "gen_ai.response.model": "m",
+                            **attrs,
+                        },
+                    )
+
+        return stream()
+
+    monkeypatch.setattr(llm, "generate", generate)
+    return reached
+
+
+def _calling_flow(attempts=ATTEMPTS):
+    """The body of a CLEAN flow that asks the model `attempts` times before it
+    yields any event, as one turn's nested calls can, so only the guard can
+    stop a call. A raise is caught as the loop catches it, and the flow goes
+    on. Returns the flow and the refusals it caught."""
+    from crivo import llm
+    from crivo.events import StreamText
+
+    refusals: list = []
+    messages = [
+        {"role": "system", "content": "You are crivo's cleaning analyst."},
+        {
+            "role": "user",
+            "content": "<dataset variable='df'>\nacct: '00417', ' 00982', 'N/A'\n"
+            "</dataset>",
+        },
+    ]
+
+    def clean(session):
+        for _ in range(attempts):
+            try:
+                "".join(llm.generate(messages))
+            except Exception as exc:  # noqa: BLE001 — the loop's own catch
+                refusals.append(exc)
+        yield StreamText("model", "done")
+
+    return clean, refusals
+
+
+@pytest.mark.parametrize(
+    "cap, reached, aborted",
+    [
+        (0.05, 2, True),
+        (0.1, 3, True),
+        (1.0, ATTEMPTS, False),
+        (None, ATTEMPTS, False),
+    ],
+    ids=["over on call 2", "over on call 3", "under the cap", "no cap"],
+)
+def test_a_case_over_its_cap_aborts_and_no_later_call_reaches_the_provider(
+    tmp_path, monkeypatch, cap, reached, aborted
+):
+    """Done when 3: each call costs $0.0346, so a $0.05 cap is crossed by the
+    second call ($0.0692) and a $0.10 cap by the third ($0.1038). The call
+    that crosses it went out; every later one is refused before it reaches
+    the provider, with one fixed text that quotes nothing, and the case ends
+    "aborted: per-case budget". Under the cap all five calls go out; with no
+    cap (the agent lane outside an eval) there is no guard."""
+    calls = _billed_faux(monkeypatch)
+    clean, refusals = _calling_flow()
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    args = _record_args(tmp_path, record=None, per_case_usd=cap)
+
+    row = agent_run._run_case({"name": "acct_case", "diseases": [6]}, args)
+
+    assert len(calls) == reached, "a call past the cap reached the provider"
+    if aborted:
+        assert row["status"] == "aborted: per-case budget"
+        assert len(refusals) == ATTEMPTS - reached, "a later call was not refused"
+        assert len({str(exc) for exc in refusals}) == 1, "the refusal is one text"
+        assert "00417" not in str(refusals[0])
+        assert row.get("cost_usd") == pytest.approx(reached * PER_CALL_USD)
+    else:
+        assert not row["status"].startswith("aborted"), "a case under its cap aborted"
+        assert refusals == []
+        if cap is not None:
+            assert row.get("cost_usd") == pytest.approx(ATTEMPTS * PER_CALL_USD)
+
+
+@pytest.mark.parametrize(
+    "spans, cap, reached, unread",
+    [
+        ("no usage", 1.0, 1, True),
+        ("no span", 1.0, 1, True),
+        ("usage, then none", 1.0, 2, True),
+        ("faux at zero, no usage", 0.0, ATTEMPTS, False),
+    ],
+    ids=["no usage", "no span", "usage, then none", "faux at zero"],
+)
+def test_a_priced_case_whose_spend_cant_be_read_fails_closed(
+    tmp_path, monkeypatch, spans, cap, reached, unread
+):
+    """Scout call 1: on a priced model, a span with no usage (what a call that
+    died mid-stream leaves) or a call that wrote no span (fewer spans than
+    calls) means the case's spend is unknown, so it stops there: "aborted:
+    per-case budget (spend unread)", and its cost is None, not 0. faux at its
+    own zero price costs nothing whatever its spans report (the faux provider
+    reports no usage), so a faux case runs on, even under a $0 cap."""
+    usage = {
+        "no usage": lambda i: {},
+        "no span": lambda i: None,
+        "usage, then none": lambda i: BILLED_USAGE if i == 0 else {},
+        "faux at zero, no usage": lambda i: {},
+    }[spans]
+    price = None if spans.startswith("faux at zero") else BILLED_PRICE
+    calls = _billed_faux(monkeypatch, usage=usage, price=price)
+    clean, refusals = _calling_flow()
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    args = _record_args(tmp_path, record=None, per_case_usd=cap)
+
+    row = agent_run._run_case({"name": "acct_case", "diseases": [6]}, args)
+
+    assert len(calls) == reached
+    if unread:
+        assert row["status"] == "aborted: per-case budget (spend unread)"
+        assert len(refusals) == ATTEMPTS - reached, "a later call was not refused"
+        assert row.get("cost_usd", "absent") is None, "an unread spend is not 0"
+    else:
+        assert not row["status"].startswith("aborted"), "a faux case at $0 aborted"
+        assert refusals == []
+        assert row.get("cost_usd") == 0.0
+
+
+def test_a_refused_call_lands_in_the_cassette_as_an_error(tmp_path, monkeypatch):
+    """The guard sits inside the recorder, so a refused call is in the
+    cassette: recorded when it starts, never complete, nothing replied, and
+    the guard's fixed error on it. The two calls that went out are whole."""
+    import json
+
+    calls = _billed_faux(monkeypatch)
+    clean, _ = _calling_flow()
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+
+    row = agent_run._run_case(
+        {"name": "acct_case", "diseases": [6]},
+        _record_args(rec_dir, per_case_usd=0.05),
+    )
+
+    assert len(calls) == 2
+    assert row["status"] == "aborted: per-case budget"
+    cassette = json.loads((rec_dir / "acct_case.json").read_text())
+    assert cassette["outcome"]["status"] == row["status"]
+    recorded = cassette["calls"]
+    assert len(recorded) == ATTEMPTS, "a refused call is missing from the cassette"
+    sent, refused = recorded[:2], recorded[2:]
+    assert all(c["complete"] is True and c["error"] is None for c in sent)
+    for call in refused:
+        assert call["complete"] is False
+        assert call["reply"] == ""
+        assert call["error"] is not None, "a refused call was recorded as no error"
+    assert len({json.dumps(c["error"], sort_keys=True) for c in refused}) == 1
+    assert "00417" not in json.dumps(recorded)

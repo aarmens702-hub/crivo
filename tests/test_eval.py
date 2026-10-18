@@ -1,4 +1,5 @@
-"""bench.eval units (spec: specs/2026-10-17-eval-tooling.md EV8, #71).
+"""bench.eval units (spec: specs/2026-10-17-eval-tooling.md EV8, #71; the caps,
+EV9, #72).
 
 `register` writes a registered row, `run` runs the suite's cases k times per
 arm through the agent lane and writes the result row, and `decide` writes the
@@ -22,6 +23,24 @@ The interface these tests pin where the issue leaves it open:
 - A null metric carries `<key>_reason` beside it, as ledger.py's
   `false_backed_reason` does: `model_cases`, `cost_usd`, `noise_floor`.
 - `noise_floor` is {"arms", "pass_at_1_diff", "flaky"}.
+
+EV9 (#72), where the issue leaves it open:
+- A registered arm carries its price entry, copied from bench.prices, as
+  `arm["price"]`.
+- `run` hands each case the registration's cap as `args.per_case_usd`, and
+  `agent_run._run_case` returns what the case cost as `row["cost_usd"]`
+  (None when it can't be read). The canned rows below carry it: 0.0 under
+  faux's zero price, None when the telemetry was unread.
+- A result whose budget stopped the run lists every case it never started in
+  `cases_not_run`, each {"arm", "case", "run"}.
+- `register --dry` prints the worst case and appends nothing.
+- When a case raises, the rows already run and the spend so far are kept as
+  JSON (.json or .jsonl) under bench/results/eval/<row id>/.
+- The review's decisions on #72: a run stops at the first case whose spend is
+  unread (budget_hit, every later case not run); run re-checks the
+  registered caps; decide --adopted hashes the files committed at HEAD and
+  refuses when the working tree drifts from them; an A/A pair whose arms ran
+  unequal numbers of runs gets no noise floor.
 """
 
 import copy
@@ -59,7 +78,15 @@ ARMED = (
     "DEEPSEEK_API_KEY",
     "CRIVO_TELEMETRY",
 )
-EV9_REFUSAL = "no prices or caps until EV9 (#72)"
+OPUS = "claude-opus-5-5"
+# A made-up price, in USD per million tokens; not any provider's.
+TEST_PRICE = {
+    "input": 5.0,
+    "cache_hit": 0.5,
+    "output": 25.0,
+    "source": "a test price, not read from any provider's page",
+    "checked": "2026-10-18",
+}
 # Exception text quoting a value from the data (an account id with a leading
 # zero). The ledger is committed, so this must never reach it.
 LEAKED_VALUE = "00417-ACME"
@@ -75,6 +102,23 @@ def _eval():
         "bench/eval.py does not exist yet (#71)"
     )
     return importlib.import_module("bench.eval")
+
+
+def _prices():
+    """bench.prices, imported per test, so a missing module fails each test on
+    this assert instead of erroring the whole file at collection."""
+    assert importlib.util.find_spec("bench.prices") is not None, (
+        "bench/prices.py does not exist yet (#72)"
+    )
+    return importlib.import_module("bench.prices")
+
+
+def _price(monkeypatch, provider, model, entry=None):
+    """A test price for the model, monkeypatched into bench.prices.PRICES."""
+    prices = _prices()
+    entry = dict(TEST_PRICE if entry is None else entry)
+    monkeypatch.setitem(prices.PRICES, prices.price_key(provider, model), entry)
+    return entry
 
 
 def _check_locks():
@@ -180,14 +224,24 @@ def _ok(code) -> bool:
     return code in (0, None)
 
 
-def _register_argv(*arms, issue=71, k=3, type_="code", split="dev", extra=()):
+def _register_argv(
+    *arms,
+    issue=71,
+    k=3,
+    type_="code",
+    split="dev",
+    budget=1.0,
+    per_case=0.25,
+    extra=(),
+):
     argv = ["register", "--issue", str(issue)]
     if type_ is not None:
         argv += ["--type", type_]
     argv += ["--suite", SUITE, "--split", split]
     for arm in arms:
         argv += ["--arm", arm]
-    argv += ["--k", str(k), "--budget-usd", "1.0", "--per-case-usd", "0.25"]
+    argv += ["--k", str(k), "--budget-usd", str(budget)]
+    argv += ["--per-case-usd", str(per_case)]
     argv += ["--hypothesis", HYPOTHESIS, "--primary", "pass_at_1"]
     argv += ["--guards", "aborted", "--rule", RULE]
     return argv + list(extra)
@@ -199,15 +253,17 @@ def _register(ev, capsys, *arms, **kw):
     return ledger.rows(kind="registered")[-1]
 
 
-def _arm(name, provider, model):
+def _arm(name, provider, model, price=None):
     """A registered arm as register writes it: the baseline agent-lane arm,
-    with the sampling control llm.model_info() reports for its provider."""
+    with the sampling control llm.model_info() reports for its provider, and
+    (EV9) the price entry register copied onto it. `price` None leaves it off:
+    a registration register never wrote."""
     control = (
         {"effort": llm.CLAUDE_EFFORT}
         if provider == "claude"
         else {"temperature": llm.TEMPERATURE}
     )
-    return {
+    arm = {
         "name": name,
         "provider": provider,
         "model": model,
@@ -219,11 +275,18 @@ def _arm(name, provider, model):
         "max_events": agent_run.DEFAULT_MAX_EVENTS,
         "wall_cap": agent_run.DEFAULT_WALL_CAP,
     }
+    if price is not None:
+        arm["price"] = dict(price)
+    return arm
 
 
-def _row(name, status, f1, count, wall, served=()):
+def _row(name, status, f1, count, wall, served=(), cost=0.0):
     """A row shaped as agent_run._run_case returns it. `count` None is
-    unreadable telemetry: calls, tokens and served models are all unknown."""
+    unreadable telemetry: calls, tokens and served models are all unknown.
+    `cost` is what the case cost (EV9): 0.0 by default, since faux's zero
+    price bills nothing even when its telemetry is unread (agent_run's
+    _case_cost); None is a priced case's spend that couldn't be read, so its
+    tokens are unknown too."""
     if count is None:
         calls = {
             "count": None,
@@ -240,6 +303,8 @@ def _row(name, status, f1, count, wall, served=()):
             "new_work_tokens": count * 1500,
             "served_models": sorted(served),
         }
+    if cost is None and count is not None:
+        calls["new_work_tokens"] = None  # a span reported no usage
     row = {
         "name": name,
         "diseases": next(e["diseases"] for e in corpus.SMOKE if e["name"] == name),
@@ -253,6 +318,7 @@ def _row(name, status, f1, count, wall, served=()):
         "calls": calls,
         "gates": {"run": 1, "skip": 0},
         "wall_secs": wall,
+        "cost_usd": cost,
     }
     if status in ("ok", "ok_unchanged"):
         row["events"] = 40
@@ -397,31 +463,35 @@ def _aa_row(model, name, i):
     return _row(name, *AA_TABLE[name][i])
 
 
-def _ledger_registered(issue):
-    """A registration appended straight through ledger.append."""
+def _ledger_registered(
+    issue, type_="code", arms=None, suite=SUITE, suite_hash=None, **fields
+):
+    """A registration appended straight through ledger.append, never through
+    register, so nothing refused it. `type_` None writes an untyped one."""
+    typed = {} if type_ is None else {"type": type_}
     row = ledger.new_row(
         "registered",
         issue,
-        type="code",
-        suite=SUITE,
+        **typed,
+        suite=suite,
         split="dev",
-        arms=[_arm("a1", "faux", "m")],
+        arms=arms or [_arm("a1", "faux", "m")],
         k=3,
         hypothesis=HYPOTHESIS,
         primary="pass_at_1",
         guards=["aborted"],
         rule=RULE,
-        budget_usd=0.0,
-        per_case_usd=0.0,
+        **{"budget_usd": 0.0, "per_case_usd": 0.0, **fields},
         fingerprints=ledger.fingerprints(),
-        suite_hash={"sha256": "c4" * 32, "files": ["bench/corpus.py"]},
+        suite_hash=suite_hash or {"sha256": "c4" * 32, "files": ["bench/corpus.py"]},
     )
     ledger.append(row)
     return row
 
 
-def _ledger_result(reg):
-    """A result naming `reg`, appended straight through ledger.append."""
+def _ledger_result(reg, cost=None):
+    """A result naming `reg`, appended straight through ledger.append. `cost`
+    set: its one arm ran every case 3 times at `cost` dollars a run (EV9)."""
     reason = "no verdicts exist before 0b; agent-clean-smoke, ED1"
     row = ledger.new_row(
         "result",
@@ -431,7 +501,22 @@ def _ledger_result(reg):
         suite_hash=reg["suite_hash"],
         k=3,
         served_models={"a1": []},
-        cases=[],
+        cases=[
+            {
+                "case": name,
+                "arm": "a1",
+                "run": run,
+                "status": "ok",
+                "solved": True,
+                "repair_f1": 1.0,
+                "calls": 4,
+                "new_work_tokens": 61_200,
+                "cost_usd": cost,
+                "wall_s": 41.0,
+            }
+            for name in (CASES if cost is not None else ())
+            for run in (1, 2, 3)
+        ],
         arms={
             "a1": {
                 "pass_k": 1.0,
@@ -441,13 +526,13 @@ def _ledger_result(reg):
                 "false_backed_reason": reason,
                 "backed_rate": None,
                 "backed_rate_reason": reason,
-                "cost_usd": None,
+                "cost_usd": None if cost is None else {"p50": cost, "p95": cost},
                 "wall_s": {"p50": 5.0, "p95": 5.0},
                 "aborted": 0,
                 "contained": "host",
             }
         },
-        spent_usd=0.0,
+        spent_usd=0.0 if cost is None else round(9 * cost, 4),
         budget_hit=False,
     )
     ledger.append(row)
@@ -475,7 +560,8 @@ def test_agent_clean_smoke_is_smoke_on_the_dev_split_with_its_known_limits():
 
 def test_register_appends_one_registered_row(tmp_path, monkeypatch, capsys):
     """Done when 1: register in a tmp git repo appends exactly one row, with
-    the arm resolved under its own env and the code it was registered on."""
+    the arm resolved under its own env and the code it was registered on. The
+    faux arm carries faux's own (zero) price entry (EV9)."""
     ev, _ = _setup(tmp_path, monkeypatch)
     code, text = _call(ev, _register_argv("a1=faux:m"), capsys)
     assert _ok(code), f"register was refused: {text}"
@@ -488,7 +574,7 @@ def test_register_appends_one_registered_row(tmp_path, monkeypatch, capsys):
     assert row["type"] == "code"
     assert row["suite"] == SUITE
     assert row["split"] == "dev"
-    assert row["arms"] == [_arm("a1", "faux", "m")]
+    assert row["arms"] == [_arm("a1", "faux", "m", price=_prices().PRICES["faux"])]
     assert row["k"] == 3
     assert row["hypothesis"] == HYPOTHESIS
     assert row["primary"] == "pass_at_1"
@@ -587,9 +673,11 @@ def test_register_refuses_an_arm_whose_key_is_missing(
 ):
     """Step 2: an arm whose provider fails query.provider_problem once the key
     file is loaded is refused, naming the key; with the key in the key file
-    the arm registers. The key itself is never printed."""
+    the arm registers. The key itself is never printed. The model is priced
+    (EV9), so the key is the only reason."""
     secret = f"sk-test-{provider}-9f3a71c2"
     ev, _ = _setup(tmp_path, monkeypatch)
+    price = _price(monkeypatch, provider, model)
     arm = f"a1={provider}:{model}"
 
     code, refused = _call(ev, _register_argv(arm), capsys)
@@ -600,7 +688,8 @@ def test_register_refuses_an_arm_whose_key_is_missing(
     _keys(tmp_path, monkeypatch, ev, f"{key}={secret}\n")
     code, text = _call(ev, _register_argv(arm), capsys)
     assert _ok(code), f"register was refused with the key loaded: {text}"
-    assert ledger.rows(kind="registered")[-1]["arms"] == [_arm("a1", provider, model)]
+    registered = ledger.rows(kind="registered")[-1]["arms"]
+    assert registered == [_arm("a1", provider, model, price=price)]
     assert secret not in refused + text, "the key was printed"
 
 
@@ -628,8 +717,150 @@ def test_an_arm_splits_on_its_first_colon(tmp_path, monkeypatch, capsys):
     model id can hold a colon, a provider can't."""
     keys = "CRIVO_BASE_URL=http://localhost:11434/v1\n"
     ev, _ = _setup(tmp_path, monkeypatch, keys=keys)
+    price = _price(monkeypatch, "openai", "qwen3:32b")
     reg = _register(ev, capsys, "a1=openai:qwen3:32b")
-    assert reg["arms"] == [_arm("a1", "openai", "qwen3:32b")]
+    assert reg["arms"] == [_arm("a1", "openai", "qwen3:32b", price=price)]
+
+
+@pytest.mark.parametrize(
+    "provider, model, keys",
+    [
+        ("claude", OPUS, "ANTHROPIC_API_KEY=sk-ant-test\n"),
+        ("deepseek", "deepseek-v4-pro", "DEEPSEEK_API_KEY=sk-test\n"),
+        ("openai", "qwen3:32b", "CRIVO_BASE_URL=http://localhost:11434/v1\n"),
+    ],
+    ids=["claude", "deepseek", "openai"],
+)
+def test_register_refuses_an_arm_whose_model_has_no_price(
+    tmp_path, monkeypatch, capsys, provider, model, keys
+):
+    """Done when 2 (EV9): an arm whose model has no entry in bench.prices is
+    refused, with its key on hand so the price is the only reason. Once the
+    model has an entry the arm registers, the entry copied onto it."""
+    ev, _ = _setup(tmp_path, monkeypatch, keys=keys)
+    prices = _prices()
+    monkeypatch.delitem(prices.PRICES, prices.price_key(provider, model), raising=False)
+    arm = f"a1={provider}:{model}"
+
+    code, text = _call(ev, _register_argv(arm), capsys)
+    assert not _ok(code), f"register accepted a {provider} arm with no price"
+    assert "price" in text.lower()
+    assert ledger.read() == []
+
+    price = _price(monkeypatch, provider, model)
+    reg = _register(ev, capsys, arm)
+    assert reg["arms"] == [_arm("a1", provider, model, price=price)]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"source": None},
+        {"source": "  "},
+        {"checked": None},
+        {"checked": ""},
+    ],
+    ids=["no source", "a blank source", "no date", "a blank date"],
+)
+def test_register_refuses_a_price_that_names_no_source_or_date(
+    tmp_path, monkeypatch, capsys, change
+):
+    """A number that was not measured is not claimed: a price entry that
+    doesn't say which page it was read from, or on which day, is refused. The
+    same entry with both registers."""
+    ev, _ = _setup(tmp_path, monkeypatch, keys="ANTHROPIC_API_KEY=sk-ant-test\n")
+    entry = {k: v for k, v in {**TEST_PRICE, **change}.items() if v is not None}
+    _price(monkeypatch, "claude", OPUS, entry)
+    arm = f"a1=claude:{OPUS}"
+
+    code, _ = _call(ev, _register_argv(arm), capsys)
+    assert not _ok(code), f"register accepted a price with {change}"
+    assert ledger.read() == []
+
+    price = _price(monkeypatch, "claude", OPUS)
+    reg = _register(ev, capsys, arm)
+    assert reg["arms"][0]["price"] == price
+
+
+@pytest.mark.parametrize(
+    "bad, good",
+    [
+        (("-0.01", "0"), ("0", "0")),
+        (("nan", "0.25"), ("1.0", "0.25")),
+        (("inf", "0.25"), ("1.0", "0.25")),
+        (("1.0", "-0.01"), ("1.0", "0")),
+        (("1.0", "nan"), ("1.0", "0.25")),
+        (("1.0", "inf"), ("1.0", "1.0")),
+        (("0.5", "0.75"), ("0.5", "0.5")),
+    ],
+    ids=[
+        "a negative budget",
+        "a NaN budget",
+        "an infinite budget",
+        "a negative cap",
+        "a NaN cap",
+        "an infinite cap",
+        "a cap above the budget",
+    ],
+)
+def test_register_refuses_a_budget_or_cap_that_is_not_a_finite_amount(
+    tmp_path, monkeypatch, capsys, bad, good
+):
+    """No cost is greater than NaN or infinity, so a NaN or infinite cap never
+    trips; a negative one is not an amount; a per-case cap above the budget
+    can't hold. Each is refused, and the nearby amount registers: $0 for
+    both on faux, and a cap equal to the budget."""
+    ev, _ = _setup(tmp_path, monkeypatch)
+    budget, per_case = bad
+    argv = _register_argv("a1=faux:m", budget=budget, per_case=per_case)
+    try:
+        code, _ = _call(ev, argv, capsys)
+    except ValueError as exc:
+        pytest.fail(f"register raised {type(exc).__name__} rather than refusing")
+    assert not _ok(code), (
+        f"register accepted --budget-usd {budget} --per-case-usd {per_case}"
+    )
+    assert ledger.read() == []
+
+    budget, per_case = good
+    reg = _register(ev, capsys, "a1=faux:m", budget=budget, per_case=per_case)
+    assert (reg["budget_usd"], reg["per_case_usd"]) == (float(budget), float(per_case))
+
+
+def test_register_dry_prints_the_worst_case_and_appends_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """Done when 5, scout call 3 (ED5): `register --dry` prints the worst case,
+    cases x k x arms x the per-case cap, says a case can overshoot its cap by
+    one call, and quotes the cost per case an earlier priced result measured
+    on the same suite and model. It appends nothing.
+
+    3 cases x k=3 x 2 arms x $0.40 = $7.20. The ledger holds an earlier result
+    on the suite and model at $0.25 a case, one on another model at $0.75 and
+    one on another suite at $0.61; only $0.25 is quoted."""
+    keys = "ANTHROPIC_API_KEY=sk-ant-test\nDEEPSEEK_API_KEY=sk-test\n"
+    ev, _ = _setup(tmp_path, monkeypatch, keys=keys, cases=CASES)
+    for provider, model, suite, cost in (
+        ("claude", OPUS, SUITE, 0.25),
+        ("deepseek", "deepseek-v4-pro", SUITE, 0.75),
+        ("claude", OPUS, "agent-other-suite", 0.61),
+    ):
+        price = _price(monkeypatch, provider, model)
+        arm = _arm("a1", provider, model, price=price)
+        reg = _ledger_registered(48, type_="experiment", arms=[arm], suite=suite)
+        _ledger_result(reg, cost=cost)
+    before = ledger.read()
+
+    arms = (f"a1=claude:{OPUS}", f"a2=claude:{OPUS}")
+    argv = _register_argv(*arms, budget=9.0, per_case=0.4, extra=["--dry"])
+    code, text = _call(ev, argv, capsys)
+    assert _ok(code), f"register --dry was refused: {text}"
+    assert ledger.read() == before, "a dry run appended a row"
+    assert "7.2" in text, "the worst case, 3 x 3 x 2 x $0.40, is not printed"
+    assert "one call" in text.lower(), "the one-call overshoot is not stated"
+    assert "0.25" in text, "the cost measured earlier on this suite and model"
+    assert "0.75" not in text, "a cost measured on another model was quoted"
+    assert "0.61" not in text, "a cost measured on another suite was quoted"
 
 
 @pytest.mark.parametrize(
@@ -728,7 +959,8 @@ def test_run_appends_a_result_row_naming_its_registration(
     tmp_path, monkeypatch, capsys
 ):
     """Done when 2: one result row, on the registration's suite hash and k,
-    every case run k times per arm, nothing spent under faux."""
+    every case run k times per arm, nothing spent under faux: each case's
+    cost is faux's known 0.0 (EV9), not unknown."""
     run = _run_split(tmp_path, monkeypatch, capsys)
     ev, reg, result, log = run.ev, run.reg, run.result, run.log
 
@@ -762,7 +994,7 @@ def test_run_appends_a_result_row_naming_its_registration(
         "repair_f1": None,
         "calls": 2,
         "new_work_tokens": 3000,
-        "cost_usd": None,
+        "cost_usd": 0.0,
         "wall_s": 28.0,
     }
 
@@ -793,13 +1025,13 @@ def test_arm_metrics_equal_consistency_on_the_same_rows(tmp_path, monkeypatch, c
 def test_wall_time_quantiles_are_right_on_a_hand_checked_list(
     tmp_path, monkeypatch, capsys
 ):
-    """Done when 2: p50 and p95 by ledger.quantiles over every run of the arm;
-    cost is null until prices exist (EV9), and says so."""
+    """Done when 2: p50 and p95 by ledger.quantiles over every run of the arm.
+    Cost too (EV9): faux bills nothing, so 0.0 on all nine a1 runs, the one
+    whose telemetry was unread included."""
     result = _run_split(tmp_path, monkeypatch, capsys).result
     a1 = result["arms"]["a1"]
     assert a1["wall_s"] == pytest.approx({"p50": 20.0, "p95": 196.52})
-    assert a1["cost_usd"] is None
-    assert a1["cost_usd_reason"]
+    assert a1["cost_usd"] == {"p50": 0.0, "p95": 0.0}
 
 
 def test_false_backed_is_null_with_the_suites_reason(tmp_path, monkeypatch, capsys):
@@ -989,6 +1221,251 @@ def test_served_models_count_the_runs_whose_telemetry_was_unread(
     assert "unknown" in a1 and "1 run" in a1
 
 
+# --- run: what it spends (EV9, #72) -------------------------------------------
+
+
+def test_run_hands_each_case_the_registered_per_case_cap(tmp_path, monkeypatch, capsys):
+    """Step 3: every case runs under the registration's per-case cap, which
+    agent_run's spend guard reads off the namespace."""
+    ev, _ = _setup(tmp_path, monkeypatch, cases=ONE)
+    log = _fake_run_case(monkeypatch, _solved_row)
+    reg = _register(ev, capsys, "a1=faux:m", budget=2.0, per_case=0.35)
+    _run(ev, capsys, reg)
+    caps = [getattr(call["args"], "per_case_usd", None) for call in log]
+    assert caps == [0.35] * 3
+
+
+# One priced arm, three cases, k=3: (status, f1, calls, wall, served, cost).
+# Every spend is read: an unread one stops the run (decision 1 on #72), which
+# test_a_run_stops_at_the_first_case_whose_spend_is_unread pins. Costs,
+# sorted: 0, 0, 0, 0.0123, 0.0209, 0.0297, 0.0388, 0.0412, 0.0571.
+# Hand-checked, inclusive method: p50 at 4 = 0.0209; p95 at 7.6 = 0.0412 +
+# 0.6 * 0.0159 = 0.05074. Model cases (tx-dates-mixed, tx-near-dups): 0.0123,
+# 0.0209, 0.0297, 0.0388, 0.0412, 0.0571, so p50 at 2.5 = 0.0297 + 0.5 *
+# 0.0091 = 0.03425 and p95 at 4.75 = 0.0412 + 0.75 * 0.0159 = 0.053125.
+# Spent: the sum, 0.2.
+COST_TABLE = {
+    "tx-whitespace": [("ok", 1.0, 0, 4.0 + i, (), 0.0) for i in range(3)],
+    "tx-dates-mixed": [
+        ("ok", 1.0, 4, 20.0, ("m",), 0.0412),
+        ("no_cleaned_output", None, 3, 28.0, ("m",), 0.0388),
+        ("ok", 1.0, 5, 33.5, ("m",), 0.0571),
+    ],
+    "tx-near-dups": [
+        ("ok", 0.5, 2, 18.0, ("m",), 0.0123),
+        ("no_cleaned_output", None, 3, 22.0, ("m",), 0.0297),
+        ("ok", 1.0, 2, 19.0, ("m",), 0.0209),
+    ],
+}
+
+
+def _cost_row(model, name, i):
+    return _row(name, *COST_TABLE[name][i][:5], cost=COST_TABLE[name][i][5])
+
+
+def test_each_case_costs_what_it_cost_and_the_arm_gets_p50_and_p95(
+    tmp_path, monkeypatch, capsys
+):
+    """EV9: each case outcome keeps what its run cost, the arm reports p50 and
+    p95 by ledger.quantiles over its runs, again over its model cases, and
+    spent_usd is the sum."""
+    ev, _ = _setup(tmp_path, monkeypatch, cases=CASES)
+    _fake_run_case(monkeypatch, _cost_row)
+    reg = _register(ev, capsys, "a1=faux:m")
+    result, _ = _run(ev, capsys, reg)
+
+    by_key = {(c["case"], c["run"]): c["cost_usd"] for c in result["cases"]}
+    assert by_key[("tx-whitespace", 1)] == 0.0
+    assert by_key[("tx-dates-mixed", 3)] == 0.0571
+    assert by_key[("tx-near-dups", 2)] == 0.0297
+    a1 = result["arms"]["a1"]
+    assert a1["cost_usd"] == pytest.approx({"p50": 0.0209, "p95": 0.05074})
+    assert a1["model_cases"]["cost_usd"] == pytest.approx(
+        {"p50": 0.03425, "p95": 0.053125}
+    )
+    assert result["spent_usd"] == pytest.approx(0.2)
+    assert result["budget_hit"] is False
+
+
+@pytest.mark.parametrize(
+    "budget, ran", [(0.6, 2), (10.0, 18)], ids=["room for two", "room for all"]
+)
+def test_a_run_stops_before_a_case_that_could_cross_its_budget(
+    tmp_path, monkeypatch, capsys, budget, ran
+):
+    """Done when 4: each case costs $0.20 under a $0.25 cap. Before each case
+    the run checks spent + cap against the budget: with $0.60, two cases run
+    ($0.40 spent) and 0.40 + 0.25 > 0.60 stops it before the third. The result
+    says budget_hit and lists every case not run; arms run one after another,
+    so a2 never starts, and it is still in the result (check_locks lock 2),
+    its cost null with a reason. With $10 every case runs."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=CASES)
+
+    def priced(model, name, i):
+        return _row(name, "ok", 1.0, 3, 25.0, (model,), cost=0.2)
+
+    log = _fake_run_case(monkeypatch, priced)
+    reg = _register(ev, capsys, "a1=faux:m1", "a2=faux:m2", budget=budget)
+    _, text = _call(ev, ["run", "--registered", reg["row_id"]], capsys)
+    results = _results_of(reg)
+    assert len(results) == 1, f"no result was written: {text}"
+    (result,) = results
+
+    assert len(log) == ran, "the run did not stop before the case that could cross"
+    every = [(a, n, r) for a in ("a1", "a2") for r in (1, 2, 3) for n in CASES]
+    done = sorted((c["arm"], c["case"], c["run"]) for c in result["cases"])
+    assert done == sorted(every[:ran])
+    not_run = result.get("cases_not_run", [])
+    assert sorted((c["arm"], c["case"], c["run"]) for c in not_run) == sorted(
+        every[ran:]
+    )
+    assert result["spent_usd"] == pytest.approx(0.2 * ran)
+    assert result["budget_hit"] is (ran < len(every))
+    assert sorted(result["arms"]) == ["a1", "a2"]
+    if ran < len(every):
+        assert "budget" in text.lower()
+        a2 = result["arms"]["a2"]
+        assert a2["cost_usd"] is None
+        assert a2["cost_usd_reason"]
+
+    _commit(root, "ledger: an eval")
+    assert _check_locks().check(str(root)) == []
+
+
+@pytest.mark.parametrize(
+    "budget", [0.55, 10.0], ids=["the cap would let one more run", "room for all"]
+)
+def test_a_run_stops_at_the_first_case_whose_spend_is_unread(
+    tmp_path, monkeypatch, capsys, budget
+):
+    """Decision 1 on #72: a priced case whose spend can't be read could have
+    spent anything up to its cap plus a call, so the run stops there, however
+    much budget is left. The first case (a1, tx-whitespace, run 1) is unread;
+    a second would cost $0.10 under a $0.25 cap. Only the first ran: every
+    later case is not run and budget_hit is set. Nothing known was spent, so
+    spent_usd is 0.0, with spent_usd_unread 1 beside it, and the arm counts
+    its unread run (cost_usd_unread 1) under a null cost with a reason. With
+    $0.55, charging the unread case the full cap ($0.25) would still have run
+    the second case; with $10 it would have run them all."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=CASES)
+
+    def first_unread(model, name, i):
+        if (model, name, i) == ("m1", "tx-whitespace", 0):
+            status = "aborted: per-case budget (spend unread)"
+            return _row(name, status, None, 3, 22.0, (model,), cost=None)
+        return _row(name, "ok", 1.0, 3, 25.0, (model,), cost=0.1)
+
+    log = _fake_run_case(monkeypatch, first_unread)
+    reg = _register(ev, capsys, "a1=faux:m1", "a2=faux:m2", budget=budget)
+    _, text = _call(ev, ["run", "--registered", reg["row_id"]], capsys)
+    results = _results_of(reg)
+    assert len(results) == 1, f"no result was written: {text}"
+    (result,) = results
+
+    assert len(log) == 1, "the run went on past a case whose spend was unread"
+    assert [c["cost_usd"] for c in result["cases"]] == [None], "unread is not 0"
+    every = [(a, n, r) for a in ("a1", "a2") for r in (1, 2, 3) for n in CASES]
+    not_run = result.get("cases_not_run", [])
+    assert sorted((c["arm"], c["case"], c["run"]) for c in not_run) == sorted(every[1:])
+    assert result["budget_hit"] is True
+    assert result["spent_usd"] == 0.0
+    assert result.get("spent_usd_unread") == 1
+    a1 = result["arms"]["a1"]
+    assert a1.get("cost_usd_unread") == 1
+    assert a1["cost_usd"] is None
+    assert a1["cost_usd_reason"]
+
+    _commit(root, "ledger: an eval")
+    assert _check_locks().check(str(root)) == []
+
+
+def test_an_aa_pair_cut_by_the_budget_gets_no_noise_floor(
+    tmp_path, monkeypatch, capsys
+):
+    """Two arms on one config are an A/A pair, but once the budget stops the
+    run in a2 the two ran unequal numbers of runs (a1 all 9, a2 3), so their
+    pass@1 spread is not a noise floor: null, with a reason. Each case costs
+    $0.20 under a $0.25 cap and a $2.60 budget: before the 13th case $2.40 is
+    spent and 2.40 + 0.25 > 2.60. An A/A pair that ran every case still gets
+    one (test_two_arms_with_one_config_get_a_noise_floor)."""
+    ev, _ = _setup(tmp_path, monkeypatch, cases=CASES)
+
+    def priced(model, name, i):
+        return _row(name, "ok", 1.0, 3, 25.0, (model,), cost=0.2)
+
+    log = _fake_run_case(monkeypatch, priced)
+    reg = _register(ev, capsys, "a1=faux:m", "a2=faux:m", budget=2.6)
+    _, text = _call(ev, ["run", "--registered", reg["row_id"]], capsys)
+    results = _results_of(reg)
+    assert len(results) == 1, f"no result was written: {text}"
+    (result,) = results
+
+    assert len(log) == 12, "the budget did not cut the run inside a2"
+    assert result["budget_hit"] is True
+    assert result["noise_floor"] is None, "unequal runs were read as a noise floor"
+    assert result["noise_floor_reason"]
+
+
+def _json_under(top: Path) -> tuple[list, str]:
+    """Every JSON document in a .json or .jsonl file under `top`, and all
+    their text."""
+    docs, texts = [], []
+    for path in sorted(top.rglob("*")):
+        if path.suffix not in (".json", ".jsonl") or not path.is_file():
+            continue
+        text = path.read_text()
+        texts.append(text)
+        if path.suffix == ".json":
+            docs.append(json.loads(text))
+        else:
+            docs += [json.loads(line) for line in text.splitlines() if line.strip()]
+    return docs, "\n".join(texts)
+
+
+def _walk(node):
+    yield node
+    children = node.values() if isinstance(node, dict) else node
+    if isinstance(node, (dict, list)):
+        for child in children:
+            yield from _walk(child)
+
+
+def test_a_case_that_raises_keeps_the_rows_run_and_says_what_was_spent(
+    tmp_path, monkeypatch, capsys
+):
+    """#71's note and scout call 4: a case that raises still writes no result
+    row, but once runs cost money the rows already run are not thrown away.
+    tx-whitespace ($0.50) and tx-dates-mixed ($0.25) finish, tx-near-dups
+    raises: the rows run and the $0.75 spent are kept under the run's
+    bench/results/eval/<row id>/, and the refusal says what was spent. The
+    exception's text (it can quote data) reaches neither."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=CASES)
+    reg = _register(ev, capsys, "a1=faux:m", budget=3.0, per_case=0.6)
+    costs = {"tx-whitespace": 0.5, "tx-dates-mixed": 0.25}
+
+    def case(entry, args):
+        name = entry["name"]
+        if name == "tx-near-dups":
+            raise KeyError(f"acct {LEAKED_VALUE}")
+        return _row(name, "ok", 1.0, 4, 20.0, ("m",), cost=costs[name])
+
+    monkeypatch.setattr(agent_run, "_run_case", case)
+    code, text = _call(ev, ["run", "--registered", reg["row_id"]], capsys)
+    assert not _ok(code), "a run whose case raised exited 0"
+    assert "raised KeyError" in text
+    assert ledger.rows(kind="result") == []
+    assert "0.75" in text, "the refusal does not say what was spent"
+    assert LEAKED_VALUE not in text, "the exception's text was printed"
+
+    docs, kept = _json_under(_eval_dir(root, reg))
+    nodes = [n for doc in docs for n in _walk(doc)]
+    named = {n.get("case") or n.get("name") for n in nodes if isinstance(n, dict)}
+    assert {"tx-whitespace", "tx-dates-mixed"} <= named, "the rows run were not kept"
+    numbers = [n for n in nodes if isinstance(n, float)]
+    assert any(n == pytest.approx(0.75) for n in numbers), "the spend was not kept"
+    assert LEAKED_VALUE not in kept, "the exception's text was kept"
+
+
 # --- run: what it refuses -----------------------------------------------------
 
 
@@ -1070,20 +1547,104 @@ def test_run_refuses_code_committed_since_registering_outside_the_ledger(
         assert ledger.rows(kind="result") == []
 
 
-def test_run_refuses_any_arm_that_is_not_faux(tmp_path, monkeypatch, capsys):
-    """B1: no arm can spend money before a cap exists, so run refuses a
-    registration holding any non-faux arm, before any case runs."""
+def _tripwire(messages, model=None):
+    """llm.generate for a test that must make no model call."""
+    raise AssertionError("a model call was made")
+
+
+def test_run_refuses_an_unpriced_arm_and_runs_a_priced_one(
+    tmp_path, monkeypatch, capsys
+):
+    """EV9 lifts B1: a non-faux arm runs once its model has a price, since the
+    caps now bound what it spends. An arm with no price (a registration
+    appended without register, so nothing refused it) is still refused before
+    any case runs. _run_case is faked and generate is a tripwire, so no call
+    is made."""
     ev, _ = _setup(
         tmp_path, monkeypatch, keys="ANTHROPIC_API_KEY=sk-ant-test\n", cases=ONE
     )
+    monkeypatch.setattr(llm, "generate", _tripwire)
     log = _fake_run_case(monkeypatch, _solved_row)
-    reg = _register(ev, capsys, "a1=faux:m", "a2=claude:claude-opus-5-5")
+    entries = ev.SUITES[SUITE]["splits"]["dev"]
+    unpriced = _ledger_registered(
+        71,
+        arms=[_arm("a1", "claude", OPUS)],
+        suite_hash=ledger.suite_hash(entries, ev.SUITES[SUITE]["files"]),
+        budget_usd=1.0,
+        per_case_usd=0.25,
+    )
 
-    code, text = _call(ev, ["run", "--registered", reg["row_id"]], capsys)
-    assert not _ok(code), "run accepted a claude arm"
-    assert EV9_REFUSAL in text
+    code, text = _call(ev, ["run", "--registered", unpriced["row_id"]], capsys)
+    assert not _ok(code), "run accepted an arm with no price"
+    assert "price" in text.lower()
     assert log == []
     assert ledger.rows(kind="result") == []
+
+    _price(monkeypatch, "claude", OPUS)
+    reg = _register(ev, capsys, "a1=faux:m", f"a2=claude:{OPUS}")
+    result, _ = _run(ev, capsys, reg)
+    assert sorted(result["arms"]) == ["a1", "a2"]
+    assert sorted({c["provider"] for c in log}) == ["claude", "faux"]
+
+
+def _raw_registered(issue, ev, budget, per_case):
+    """A registration on the cut suite written straight into the ledger file,
+    past ledger.append (which refuses NaN), as a hand edit or an older writer
+    could leave it."""
+    entries = ev.SUITES[SUITE]["splits"]["dev"]
+    row = ledger.new_row(
+        "registered",
+        issue,
+        type="code",
+        suite=SUITE,
+        split="dev",
+        arms=[_arm("a1", "faux", "m", price=_prices().PRICES["faux"])],
+        k=3,
+        hypothesis=HYPOTHESIS,
+        primary="pass_at_1",
+        guards=["aborted"],
+        rule=RULE,
+        budget_usd=budget,
+        per_case_usd=per_case,
+        fingerprints=ledger.fingerprints(),
+        suite_hash=ledger.suite_hash(entries, ev.SUITES[SUITE]["files"]),
+    )
+    with open(ledger.LEDGER, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, sort_keys=True) + "\n")
+    return row
+
+
+@pytest.mark.parametrize(
+    "budget, per_case",
+    [
+        (1.0, -1.0),
+        (1.0, float("nan")),
+        (1.0, True),
+        (0.5, 0.75),
+    ],
+    ids=["a negative cap", "a NaN cap", "True as a cap", "a cap above the budget"],
+)
+def test_run_checks_the_registered_caps_again_before_any_case(
+    tmp_path, monkeypatch, capsys, budget, per_case
+):
+    """A registration register never checked (appended by hand, or NaN
+    written past ledger.append) is refused by run before any case runs and
+    writes no result: no cost is greater than NaN, -1 is not an amount, True
+    is not one either though it compares as 1, and a cap above the budget
+    can't hold. The same registration with sane caps runs."""
+    ev, _ = _setup(tmp_path, monkeypatch, cases=ONE)
+    log = _fake_run_case(monkeypatch, _solved_row)
+    bad = _raw_registered(71, ev, budget, per_case)
+
+    code, _ = _call(ev, ["run", "--registered", bad["row_id"]], capsys)
+    assert not _ok(code), f"run accepted --per-case-usd {per_case!r}"
+    assert log == [], "a case ran under caps register would have refused"
+    assert ledger.rows(kind="result") == []
+
+    sane = _raw_registered(71, ev, 1.0, 0.25)
+    result, _ = _run(ev, capsys, sane)
+    assert len(log) == 3
+    assert result["budget_hit"] is False
 
 
 @pytest.mark.parametrize("how", ["made beforehand", "a second run"])
@@ -1193,6 +1754,93 @@ def test_decide_refuses_a_malformed_decision(tmp_path, monkeypatch, capsys, flag
     code, _ = _call(ev, [*argv, "--note", NOTE], capsys)
     assert not _ok(code), f"decide accepted {flags}"
     assert ledger.rows(kind="decision") == []
+
+
+@pytest.mark.parametrize(
+    "type_, part, path",
+    [
+        ("behaviour", "prompt", "src/crivo/prompts.py"),
+        ("behaviour", "referee", "src/crivo/verify.py"),
+        ("behaviour", "scorer", "bench/score.py"),
+        (None, "prompt", "src/crivo/prompts.py"),
+    ],
+    ids=["behaviour, prompt", "behaviour, referee", "behaviour, scorer", "untyped"],
+)
+def test_decide_adopted_refuses_a_result_whose_hashes_moved(
+    tmp_path, monkeypatch, capsys, type_, part, path
+):
+    """#71's note and scout call 5: check_locks' lock 3 holds an adopted
+    decision on a behaviour (or untyped) registration to the prompt, referee
+    and scorer files of the commit that lands it, and the ledger is
+    append-only, so a decision row that breaks it leaves dev red for good.
+    decide --adopted refuses one whose hash moved since the result, naming
+    what moved. Dropping that result is still accepted, and so is adopting a
+    code registration's result on the same moved file (lock 3 exempts it)."""
+    ev, root = _setup(tmp_path, monkeypatch)
+    result = _ledger_result(_ledger_registered(48, type_=type_))
+    exempt = _ledger_result(_ledger_registered(49, type_="code"))
+    with open(root / path, "a", encoding="utf-8") as fh:
+        fh.write("\n# changed after the result\n")
+    _commit(root, f"change {path}")
+
+    argv = ["decide", "--result", result["row_id"], "--adopted", "--note", NOTE]
+    code, text = _call(ev, argv, capsys)
+    assert not _ok(code), f"decide adopted a result whose {part} hash moved"
+    assert part in text.lower()
+    assert ledger.rows(kind="decision") == []
+
+    for row, flag in ((result, "--dropped"), (exempt, "--adopted")):
+        argv = ["decide", "--result", row["row_id"], flag, "--note", NOTE]
+        code, text = _call(ev, argv, capsys)
+        assert _ok(code), f"decide {flag} was refused: {text}"
+    decided = [(d["result"], d["decision"]) for d in ledger.rows(kind="decision")]
+    assert decided == [(result["row_id"], "dropped"), (exempt["row_id"], "adopted")]
+
+
+@pytest.mark.parametrize(
+    "how, refused",
+    [
+        ("moved at HEAD, the tree holds the result's bytes", True),
+        ("the tree drifted from HEAD", True),
+        ("an unrelated tracked file is dirty", False),
+    ],
+    ids=["moved at HEAD", "tree drift", "unrelated file dirty"],
+)
+def test_decide_adopted_reads_the_files_committed_at_head(
+    tmp_path, monkeypatch, capsys, how, refused
+):
+    """Decision 3 on #72: lock 3 hashes the files committed with the decision
+    line, never the working tree. So prompts.py moved at HEAD is refused even
+    when the working tree has the result's bytes back, and a working tree
+    that drifts from HEAD is refused too (committing it would move the hash).
+    An unmoved behaviour result is still adopted while an unrelated tracked
+    file (loop.py) is dirty, and the decision passes check_locks once
+    committed."""
+    ev, root = _setup(tmp_path, monkeypatch)
+    result = _ledger_result(_ledger_registered(48, type_="behaviour"))
+    prompts = root / "src" / "crivo" / "prompts.py"
+    measured = prompts.read_bytes()
+    if how.startswith("moved at HEAD"):
+        prompts.write_bytes(measured + b"\n# changed after the result\n")
+        _commit(root, "change prompts.py")
+        prompts.write_bytes(measured)
+    elif how.startswith("the tree drifted"):
+        prompts.write_bytes(measured + b"\n# an uncommitted edit\n")
+    else:
+        with open(root / "src" / "crivo" / "loop.py", "a", encoding="utf-8") as fh:
+            fh.write("\n# an uncommitted edit\n")
+
+    argv = ["decide", "--result", result["row_id"], "--adopted", "--note", NOTE]
+    code, text = _call(ev, argv, capsys)
+    if refused:
+        assert not _ok(code), f"decide adopted a result when {how}"
+        assert "prompt" in text.lower()
+        assert ledger.rows(kind="decision") == []
+    else:
+        assert _ok(code), f"decide was refused when {how}: {text}"
+        assert [d["decision"] for d in ledger.rows(kind="decision")] == ["adopted"]
+        _commit(root, "ledger: adopted")
+        assert _check_locks().check(str(root)) == []
 
 
 # --- the ledger's locks ------------------------------------------------------
