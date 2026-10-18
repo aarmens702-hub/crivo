@@ -9,6 +9,7 @@ The ledger lives beside the skills as JSON rather than inside SKILL.md, because
 rewrite the skill file constantly. It doubles as the governance audit trail.
 """
 
+import hashlib
 import json
 import shutil
 from dataclasses import dataclass, field
@@ -26,10 +27,18 @@ PROMOTE_CLEAN_WINDOW = 5  # ... with no failure in the last this-many uses
 RETIRE_CONSECUTIVE_FAILURES = 2
 ACTIVE_CAP = 50
 
+# The scripts admission pins (#237), keyed relative to the skill folder so the
+# keys still resolve once retire() has moved it. SKILL.md is prose, not code.
+PINNED = ("scripts/fix.py", "scripts/test_fix.py")
+
 
 def _score(entry: dict) -> int:
     """Ratchet's contribution score, kept deliberately legible."""
     return entry["successes"] - entry["failures"]
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _now() -> str:
@@ -53,6 +62,7 @@ class Library:
 
     root: Path
     entries: dict = field(default_factory=dict)
+    noted: set = field(default_factory=set, init=False, repr=False)  # by check()
 
     @classmethod
     def load(cls, root) -> "Library":
@@ -88,9 +98,40 @@ class Library:
             "last_used": "",
             "events": [],
         }
+        folder = Path(self.root) / name
+        try:  # read as skills.load reads it, so a CRLF checkout still matches
+            entry["sha256"] = {
+                k: _sha((folder / k).read_text(encoding="utf-8")) for k in PINNED
+            }
+        except OSError:
+            pass  # no folder, nothing pinned: check() reports the row unpinned
         self.entries[name] = entry
         self._enforce_cap()
         return entry
+
+    def check(self, name: str, skill) -> tuple[bool, str]:
+        """Whether a loaded skill is still the code a person admitted (#237).
+
+        Hashes the sources skills.load returned, which are what is about to
+        run. A row with no pin is not pinned here, since that would vouch for
+        whatever is on disk: it loads, with one note per skill per instance.
+        """
+        pin = self.entries[name].get("sha256")
+        if pin is None:
+            if name in self.noted:
+                return True, ""
+            self.noted.add(name)
+            return True, f"{name} is unpinned, so edits to its scripts go unseen"
+        now = {PINNED[0]: _sha(skill.fix_source), PINNED[1]: _sha(skill.test_source)}
+        changed = [k for k in PINNED if pin.get(k) != now[k]]
+        if not changed:
+            return True, ""
+        folder = Path(self.root) / name
+        return False, (
+            f"{name} refused: {' and '.join(changed)} changed since admission. "
+            f"Restore it (git checkout {folder}) or delete {folder}/ so a later "
+            "verified fix proposes it again"
+        )
 
     def _enforce_cap(self) -> None:
         """Keep the active set bounded (R14). A library that only ever grows

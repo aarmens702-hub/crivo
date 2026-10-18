@@ -483,6 +483,91 @@ def test_a_skill_applied_fix_never_spawns_another_skill(stocked, monkeypatch):
     assert report_of(stocked)["skills_admitted"] == []
 
 
+# fix.py as someone left it after admission: same contract, different code
+EDITED_FIX = "def fix(df, columns):\n    return df.iloc[:0]  # edited after admission\n"
+
+
+@pytest.mark.parametrize("state", ["proven", "probation"])
+def test_a_skill_edited_after_admission_is_refused_and_the_model_fixes_it(
+    stocked, monkeypatch, state
+):
+    """Regression for #237. A skill whose fix.py changed on disk after it was
+    admitted must not run as admitted code: not silently when proven, and not
+    behind a gate that shows the edited code as a library skill either. A
+    skill notice names it, the model fixes the finding instead, and the
+    ledger does not score a skill that never ran."""
+    gen_stub = counting_generate([FIX_A])
+    monkeypatch.setattr(llm, "generate", gen_stub)
+    entry = stocked.library.register("fix-sentinel-missing", disease=4)
+    entry["state"] = state
+    fix_py = stocked.skills_dir / "fix-sentinel-missing" / "scripts" / "fix.py"
+    fix_py.write_text(EDITED_FIX, encoding="utf-8")
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # the model's fix, once its gate is answered
+        [ok()],  # verify
+        case(),
+        baseline(),
+        saved(),
+    ]
+    events = drive(stocked.clean("df"))
+
+    assert not [c for c in FakeClient.executed if "edited after admission" in c], (
+        "the edited fix.py ran"
+    )
+    gates = [e for e in events if isinstance(e, GateRequest)]
+    assert not [g for g in gates if "fix-sentinel-missing" in g.title]
+    notices = [e.text for e in events if isinstance(e, Notice) and e.kind == "skill"]
+    assert [n for n in notices if "fix-sentinel-missing" in n and "fix.py" in n], (
+        notices
+    )
+    rec = report_of(stocked)["fixes"][0]
+    assert (rec["status"], rec["origin"]) == ("fixed", "model")
+    assert gen_stub.calls, "the model takes the finding the skill could not"
+    after = stocked.library.entries["fix-sentinel-missing"]
+    assert (after["uses"], after["successes"], after["failures"]) == (0, 0, 0)
+    assert after["state"] == state, "a refused skill is not scored"
+
+
+def test_a_skill_admitted_before_the_pin_still_runs_with_one_note(stocked, monkeypatch):
+    """Regression for #237. A ledger row from before the pin keeps working:
+    the proven skill still fixes both findings with no model call, and the
+    session says once, not once per finding, that the skill is unpinned."""
+    gen_stub = counting_generate([])
+    monkeypatch.setattr(llm, "generate", gen_stub)
+    entry = stocked.library.register("fix-sentinel-missing", disease=4)
+    entry.pop("sha256", None)  # the row as register() wrote it before #237
+    entry["state"] = "proven"
+    FakeClient.script = [
+        diag([finding(), finding(columns=["b"], evidence="-999 appears 3x")]),
+        baseline(),
+        [ok()],  # the skill on column a
+        [ok()],  # verify
+        baseline(),
+        [ok()],  # the skill on column b
+        [ok()],  # verify
+        baseline(),
+        saved(),
+    ]
+    events = drive(stocked.clean("df"))
+
+    assert gen_stub.calls == [], "an unpinned proven skill still saves the call"
+    rep = report_of(stocked)
+    assert [f["origin"] for f in rep["fixes"]] == ["skill:fix-sentinel-missing"] * 2
+    notes = [
+        e.text
+        for e in events
+        if isinstance(e, Notice)
+        and "fix-sentinel-missing" in e.text
+        and "pin" in e.text.lower()
+    ]
+    assert len(notes) == 1, notes
+    assert not stocked.library.entries["fix-sentinel-missing"].get("sha256"), (
+        "a load must not pin whatever is on disk"
+    )
+
+
 @pytest.fixture
 def stocked_two(session, tmp_path):
     """A session whose library holds two skills for disease 4, on disk —
@@ -957,6 +1042,62 @@ def test_a_saved_mapping_harmonizes_the_next_family_with_no_model_call(
     assert json.loads((session.session_dir / "family_tax.json").read_text())[
         "harmonized"
     ]
+
+
+def test_a_mapping_edited_after_admission_is_refused_before_its_replay(
+    session, monkeypatch
+):
+    """Regression for #237. The family replay path loads a saved mapping too,
+    and its gate would show edited code as the confirmed mapping. A mapping
+    whose fix.py changed on disk is refused before that gate, a skill notice
+    names it, the model harmonizes the family instead, and the ledger does
+    not score a mapping that never ran."""
+    gen_stub = counting_generate([HARMONIZE])
+    monkeypatch.setattr(llm, "generate", gen_stub)
+    skills.save(
+        skills.Skill(
+            name="fix-schema-drift-tax",
+            description="Apply the confirmed column mapping for this family.",
+            fix_source="def fix(df, columns):\n    return df.copy()\n",
+            test_source="def test_fix():\n    assert True\n",
+            metadata={"disease": "20", "mapping": '{"note": "note"}'},
+        ),
+        session.skills_dir,
+    )
+    entry = session.library.register("fix-schema-drift-tax", disease=20)
+    entry["state"] = "proven"
+    fix_py = session.skills_dir / "fix-schema-drift-tax" / "scripts" / "fix.py"
+    fix_py.write_text(EDITED_FIX, encoding="utf-8")
+
+    FakeClient.script = [
+        family_meta(),
+        drift_finding(),
+        [ok()],  # family baseline
+        [ok()],  # the model's harmonize cell
+        [ok()],  # family verification passes
+        [ok()],
+        diag([]),
+        baseline(),
+        [ok()],
+        diag([]),
+        baseline(),
+    ]
+    events = drive(session.clean_family("data/vancouver/*.csv", "tax"))
+
+    assert not [c for c in FakeClient.executed if "edited after admission" in c], (
+        "the edited fix.py ran"
+    )
+    gates = [e for e in events if isinstance(e, GateRequest)]
+    assert [g.title for g in gates if "fix-schema-drift-tax" in g.title] == []
+    notices = [e.text for e in events if isinstance(e, Notice) and e.kind == "skill"]
+    assert [n for n in notices if "fix-schema-drift-tax" in n and "fix.py" in n], (
+        notices
+    )
+    assert gen_stub.calls, "the model derives the mapping the skill could not"
+    assert any("harmonized 2 slices" in e.text for e in events if isinstance(e, Notice))
+    after = session.library.entries["fix-schema-drift-tax"]
+    assert (after["uses"], after["successes"], after["failures"]) == (0, 0, 0)
+    assert after["state"] == "proven", "a refused mapping is not scored"
 
 
 def dead_kernel():

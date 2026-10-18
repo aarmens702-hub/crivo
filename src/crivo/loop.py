@@ -1116,6 +1116,11 @@ class Session:
                 skill = skills.load(self.skills_dir / entry["name"])
             except (OSError, ValueError):
                 continue
+            ok, note = self.library.check(entry["name"], skill)
+            if note:
+                yield Notice("skill", note)
+            if not ok:
+                continue  # edited since admission (#237): not run, not scored
             code = (
                 f"{skill.fix_source}\n"
                 f"{name} = {{k: fix(v, []) for k, v in {name}.items()}}\n"
@@ -1786,6 +1791,11 @@ class Session:
                     "skill", f"{entry['name']} is unreadable ({exc}) — skipping"
                 )
                 continue
+            ok, note = self.library.check(entry["name"], skill)
+            if note:
+                yield Notice("skill", note)
+            if not ok:
+                continue  # edited since admission (#237): not run, not scored
 
             code = verify.skill_apply_cell(var, skill.fix_source, finding["columns"])
             silent = unattended(entry, finding["grade"])
