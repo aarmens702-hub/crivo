@@ -1024,3 +1024,736 @@ def test_two_different_cap_values_do_not_share_an_arm_name() -> None:
     assert arm(wall_cap=1_200_000.0, max_events=agent_run.DEFAULT_MAX_EVENTS) != arm(
         wall_cap=1_200_001.0, max_events=agent_run.DEFAULT_MAX_EVENTS
     )
+
+
+# --- recording a run (EV2, #65) ---------------------------------------------
+
+
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _recorder():
+    """The recorder under test, looked up so that a missing one fails on this
+    assertion rather than on an AttributeError."""
+    record = getattr(agent_run, "_recording_generate", None)
+    assert callable(record), "agent_run._recording_generate does not exist"
+    return record
+
+
+def _record_args(record_dir, **knobs):
+    """The default arm recording into `record_dir`, as `main` hands it over:
+    the cassette directory and the run tag ride on the namespace."""
+    import argparse
+
+    base = {
+        "docker": False,
+        "max_events": agent_run.DEFAULT_MAX_EVENTS,
+        "wall_cap": agent_run.DEFAULT_WALL_CAP,
+        "human_gates": "skip",
+        "policies": "none",
+        "autonomy": None,
+        "policy_records": [],
+        "record": str(record_dir),
+        "run_tag": "",
+    }
+    return argparse.Namespace(**{**base, **knobs})
+
+
+def _recorded_fake_session(tmp_path, monkeypatch, clean, kernel=None):
+    """The FakeSession pattern with the two things recording touches: a kernel
+    client whose `execute` gets wrapped, and a session_dir. `clean(session)`
+    is the body of the CLEAN flow; `kernel(code)` yields what a cell returns.
+    Returns the sessions made and the client class, so a test can check that
+    the client's own execute is back."""
+    import pandas as pd
+
+    from crivo.kernel.client import ExecResult
+
+    def ok(code):
+        yield ExecResult(status="ok", exec_count=1)
+
+    made: list = []
+
+    class FakeClient:
+        def execute(self, code, timeout_s=120):
+            yield from (kernel or ok)(code)
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            self.session_dir = tmp_path / "sess"
+            self.client = FakeClient()
+            made.append(self)
+
+        def load(self, path, name):
+            pass
+
+        def clean(self, var):
+            return clean(self)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("crivo.loop.Session", FakeSession)
+    # an export as it arrives: ids with leading zeros, a padded id, a sentinel
+    df = pd.DataFrame(
+        {"acct": ["00417", " 00982", "N/A"], "amount": ["1,204.50", "-999", "88.10"]}
+    )
+    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
+    return made, FakeClient
+
+
+@pytest.mark.parametrize("provider", ["faux", "claude"])
+def test_recording_generate_keeps_the_whole_raw_reply_the_loop_drains(
+    monkeypatch, provider
+):
+    """EV2: a cassette holds what the model sent, not what the loop kept. The
+    loop drops heartbeats, joins a cell split across chunks and cuts the reply
+    at `</execute>`, but it drains the stream to its end, so the recorder sees
+    every chunk and keeps the whole text, invented output included. Every
+    chunk still reaches the loop unchanged, the heartbeat too. The call is
+    fingerprinted, never stored: the messages carry the dataset profile."""
+    import json
+
+    from crivo import llm
+
+    monkeypatch.setenv("CRIVO_PROVIDER", provider)
+    chunks = [
+        "",  # a reasoning heartbeat
+        "<execute>\ntotal = df['amount'].str.replace(',', '')",
+        ".astype(float).sum()\nprint(total)\n</execute>",
+        "\nOutput: 48213.07\n",  # invented past the cell
+    ]
+    received = []
+
+    def provider_stream(messages, model=None):
+        received.append(messages)
+        yield from chunks
+
+    messages = [
+        {"role": "system", "content": "You are crivo's cleaning analyst."},
+        {"role": "system", "content": "Fix one finding per cell."},
+        {
+            "role": "user",
+            "content": "<dataset variable='df'>\nbranch: São Paulo, Zürich\n</dataset>",
+        },
+    ]
+    calls: list = []
+    generate = _recorder()(provider_stream, calls)
+
+    assert list(generate(messages)) == chunks, "the loop must get every chunk as sent"
+    assert received == [messages]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["reply"] == "".join(chunks)
+    assert call["complete"] is True
+    assert call.get("error") is None
+    assert call["i"] == 0
+    assert call["n_messages"] == 3
+    assert call["messages_sha256"] == _sha(
+        json.dumps(messages, sort_keys=True, ensure_ascii=False)
+    )
+    assert call["system_sha256"] == _sha(
+        "You are crivo's cleaning analyst.\nFix one finding per cell."
+    )
+    assert call["model"] == llm.model_name()
+    params = llm.model_info()
+    if provider == "claude":
+        params = {**params, "max_tokens": llm.CLAUDE_MAX_TOKENS}
+    assert call["params"] == params
+    assert isinstance(call["dur_s"], (int, float)) and call["dur_s"] >= 0
+
+    # the next call through the same recorder is the case's second
+    list(generate(messages[2:]))
+    assert [c["i"] for c in calls] == [0, 1]
+
+
+def test_recording_generate_records_a_failed_call_and_re_raises_it():
+    """EV2: a call that raises is recorded with its error, and the provider's
+    own exception still reaches the loop, which decides what a failed call
+    means. What arrived before the failure is kept."""
+    boom = TimeoutError("gave up after 240s of silence")
+
+    def provider_stream(messages, model=None):
+        yield ""
+        yield "<execute>\ndf['acct'] = "
+        raise boom
+
+    calls: list = []
+    generate = _recorder()(provider_stream, calls)
+    seen = []
+    with pytest.raises(TimeoutError) as caught:
+        for chunk in generate([{"role": "user", "content": "fix d06 on acct"}]):
+            seen.append(chunk)  # noqa: PERF402 — keeps the chunks before the raise
+
+    assert caught.value is boom, "the caller must get the provider's own exception"
+    assert seen == ["", "<execute>\ndf['acct'] = "]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["error"] == {
+        "type": "TimeoutError",
+        "message": "gave up after 240s of silence",
+    }
+    assert call["complete"] is False
+    assert call["reply"] == "<execute>\ndf['acct'] = "
+    assert isinstance(call["dur_s"], (int, float)) and call["dur_s"] >= 0
+
+
+def test_a_stream_closed_mid_reply_is_incomplete_and_not_an_error():
+    """The other side of the error case. A cap ends the turn with
+    `gen.close()`, which reaches the recorder as GeneratorExit mid-stream.
+    That is the bench stopping the run, not the model failing: the call is
+    recorded incomplete with no error, and the close goes through."""
+
+    def provider_stream(messages, model=None):
+        yield "<execute>\nprint(df.shape)"
+        yield "\n</execute>"
+        yield "\nOutput: (250, 9)\n"
+
+    calls: list = []
+    stream = _recorder()(provider_stream, calls)([{"role": "user", "content": "q"}])
+    assert next(stream) == "<execute>\nprint(df.shape)"
+    stream.close()
+
+    assert len(calls) == 1
+    assert calls[0]["complete"] is False
+    assert calls[0].get("error") is None, "closing the stream is not a model error"
+    assert calls[0]["reply"] == "<execute>\nprint(df.shape)"
+
+
+def test_a_marker_in_the_messages_appears_nowhere_in_the_cassette(
+    tmp_path, monkeypatch
+):
+    """EV2: the messages carry the dataset profile, so a cassette keeps only
+    their fingerprints. Kernel output holds data values, so the cell, what it
+    printed and what it returned are kept as digests, and an errored cell
+    keeps only its exception class: its error text is not stored at all. The
+    digests are of the real text, so a replay can compare against them."""
+    import json
+
+    from crivo import llm
+    from crivo.events import StreamText
+    from crivo.kernel.client import ExecResult, StreamOut
+
+    marker = "MRK-5f1c9e"
+    messages = [
+        {"role": "system", "content": f"You are crivo's cleaning analyst. {marker}"},
+        {
+            "role": "user",
+            "content": (
+                f"<dataset variable='df'>\nacct: '00417', ' 00982', 'N/A' {marker}\n"
+                "</dataset>"
+            ),
+        },
+    ]
+    reply = "<execute>\ndf['acct'] = df['acct'].str.strip()\n</execute>"
+    fix_cell = f"df['acct'] = df['acct'].str.strip()  # {marker}"
+    check_cell = f"df.loc[df['acct'] == '{marker}']"
+    stdout = f"{marker} 00417\n"
+    value = f"'{marker}'"
+
+    def provider_stream(msgs, model=None):
+        yield ""
+        yield reply
+
+    def kernel(code):
+        if code == fix_cell:
+            yield StreamOut("stdout", stdout)
+            yield ExecResult(status="ok", value=value, exec_count=3)
+        else:
+            yield ExecResult(
+                status="error",
+                error={
+                    "ename": "KeyError",
+                    "evalue": f"'{marker}'",
+                    "traceback": [f"KeyError: '{marker}'"],
+                },
+                exec_count=4,
+            )
+
+    def clean(session):
+        text = "".join(llm.generate(messages))
+        list(session.client.execute(fix_cell))
+        list(session.client.execute(check_cell))
+        yield StreamText("model", text)
+
+    monkeypatch.setattr(llm, "generate", provider_stream)
+    _recorded_fake_session(tmp_path, monkeypatch, clean, kernel=kernel)
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+
+    agent_run._run_case(
+        {"name": "acct_case", "diseases": [6]},
+        _record_args(rec_dir, autonomy="careful", run_tag=".r2"),
+    )
+
+    out = rec_dir / "acct_case.careful.r2.json"
+    written = sorted(p.name for p in rec_dir.iterdir())
+    assert out.exists(), f"no cassette at DIR/<name><suffix><tag>.json: {written}"
+    text = out.read_text()
+    leaked = marker in text
+    assert not leaked, "message, cell or kernel text reached the cassette"
+    cassette = json.loads(text)
+    assert cassette["schema_version"] == 1
+
+    assert len(cassette["calls"]) == 1
+    call = cassette["calls"][0]
+    assert call["reply"] == reply, "the reply itself is the one thing kept whole"
+    assert call["messages_sha256"] == _sha(
+        json.dumps(messages, sort_keys=True, ensure_ascii=False)
+    )
+    assert call["system_sha256"] == _sha(messages[0]["content"])
+    assert call["n_messages"] == 2
+
+    assert len(cassette["execs"]) == 2
+    fixed, failed = cassette["execs"]
+    assert fixed["code_sha256"] == _sha(fix_cell)
+    assert fixed["status"] == "ok"
+    assert fixed["value_sha256"] == _sha(value)
+    assert fixed["stream_sha256"] == _sha(stdout)
+    assert fixed["exec_count"] == 3
+    assert fixed.get("ename") is None
+    assert failed["code_sha256"] == _sha(check_cell)
+    assert failed["status"] == "error"
+    assert failed["ename"] == "KeyError"
+    assert failed["value_sha256"] is None, "no value, so nothing to digest"
+    assert failed["exec_count"] == 4
+
+
+def test_recording_a_smoke_case_the_deterministic_path_solves(tmp_path, monkeypatch):
+    """EV2 on a real subprocess kernel. tx-whitespace is solved by the
+    registered whitespace fixer behind one plain gate, so under the faux
+    provider no model call is made (one would raise on the empty faux queue,
+    and be recorded). The cassette has no calls, a digest for every cell the
+    kernel ran, in order, and the case's outcome; afterwards generate and the
+    session's execute are the originals again."""
+    import hashlib
+    import json
+    import subprocess
+    from pathlib import Path
+
+    import pandas as pd
+
+    from bench import corpus, truth
+    from crivo import llm, loop, prompts
+    from crivo.kernel.client import KernelClient
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
+    sessions: list = []
+
+    class KeptSession(loop.Session):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            sessions.append(self)
+
+    monkeypatch.setattr(loop, "Session", KeptSession)
+    entry = next(e for e in corpus.SMOKE if e["name"] == "tx-whitespace")
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+    real_generate = llm.generate
+
+    row = agent_run._run_case(entry, _record_args(rec_dir))
+
+    assert row["status"] == "ok"
+    assert row["calls"]["count"] == 0, "tx-whitespace now needs the model: pick another"
+    out = rec_dir / "tx-whitespace.json"
+    assert out.exists(), "no cassette written for the recorded case"
+    cassette = json.loads(out.read_text())
+    session = sessions[0]
+    session_dir = Path(session.session_dir)
+
+    assert cassette["calls"] == []
+    assert cassette["execs"], "the kernel ran cells, so the cassette has digests"
+    assert cassette["outcome"]["status"] == "ok"
+
+    # every cell in this case goes through the transcript (no restart, no
+    # preview, no snapshot), so the digests line up with its exec events
+    events = [json.loads(line) for line in (session_dir / "transcript.jsonl").open()]
+    logged = [ev for ev in events if ev.get("kind") == "exec"]
+    expected = [
+        (
+            _sha(ev["code"]),
+            ev["status"],
+            None if ev["value"] is None else _sha(ev["value"]),
+            ev["exec_count"],
+        )
+        for ev in logged
+    ]
+    got = [
+        (e["code_sha256"], e["status"], e["value_sha256"], e["exec_count"])
+        for e in cassette["execs"]
+    ]
+    assert got == expected
+    assert all("stream_sha256" in e for e in cassette["execs"])
+
+    _, dirty, _ = corpus.build(entry)
+    assert cassette["source"] == {
+        "kind": "corpus",
+        "entry": json.loads(json.dumps(entry)),
+        "dirty_sha256": truth.frame_sha256(dirty),
+    }
+    assert cassette["arm"] == {
+        "autonomy": "careful",
+        "human_gates": "skip",
+        "policies": "none",
+        "docker": False,
+        "max_events": agent_run.DEFAULT_MAX_EVENTS,
+        "wall_cap": agent_run.DEFAULT_WALL_CAP,
+        "suffix": "",
+    }
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert set(cassette["crivo"]) == {"commit", "dirty", "prompts_sha256"}
+    assert cassette["crivo"]["commit"] == head
+    assert cassette["crivo"]["prompts_sha256"] == (
+        hashlib.sha256(Path(prompts.__file__).read_bytes()).hexdigest()
+    )
+
+    outcome = cassette["outcome"]
+    cleaned = pd.read_parquet(session_dir / "cleaned" / "df.parquet")
+    assert outcome["events"] == row["events"]
+    assert outcome["gates"] == ["run"], "one plain gate, run"
+    # (disease, columns, grade, status, attempts): d06 on txn_id, fixed by the
+    # registered fixer with no model attempt
+    assert outcome["records"] == [[6, ["txn_id"], "AUTO", "fixed", 0]]
+    assert outcome["cleaned_sha256"] == truth.frame_sha256(cleaned)
+    assert outcome["scores"] == json.loads(json.dumps(row["scores"]))
+    report = max((session_dir / "clean_reports").glob("r*.json"))
+    evidence = [
+        f["finding"]["evidence"] for f in json.loads(report.read_text())["fixes"]
+    ]
+    flat = json.dumps(cassette, ensure_ascii=False)
+    leaked = any(ev in flat for ev in evidence)
+    assert not leaked, "a finding's evidence (it quotes sample values) was recorded"
+
+    assert llm.generate is real_generate, "the recorder outlived the case"
+    assert session.client.execute.__func__ is KernelClient.execute, (
+        "the wrapped execute outlived the case"
+    )
+
+
+@pytest.mark.parametrize("where", ["model_call", "after_cell"])
+def test_run_case_puts_generate_and_execute_back_after_a_case_that_raises(
+    tmp_path, monkeypatch, where
+):
+    """EV2: the recorders are swapped in for the case and taken out in a
+    finally, so a case that raises (the model call itself, or the flow after
+    a cell ran) leaves the next case, and the test suite, the real generate
+    and the client's own execute. The case is still written down."""
+    import json
+
+    from crivo import llm
+    from crivo.events import StreamText
+
+    def provider_stream(messages, model=None):
+        yield ""
+        raise TimeoutError("gave up after 240s of silence")
+
+    seen = {}
+
+    def clean(session):
+        seen["generate"] = llm.generate
+        seen["execute"] = session.client.execute
+        list(session.client.execute("df['acct'] = df['acct'].str.strip()"))
+        if where == "model_call":
+            "".join(llm.generate([{"role": "user", "content": "fix d06 on acct"}]))
+        else:
+            raise KeyError("acct")
+        yield StreamText("stdout", "unreached")
+
+    monkeypatch.setattr(llm, "generate", provider_stream)
+    made, client_cls = _recorded_fake_session(tmp_path, monkeypatch, clean)
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+
+    row = agent_run._run_case(
+        {"name": "raise_case", "diseases": [6]}, _record_args(rec_dir)
+    )
+
+    assert row["status"].startswith("error: "), "the case was meant to raise"
+    assert seen["generate"] is not provider_stream, "the case ran with no recorder"
+    assert getattr(seen["execute"], "__func__", None) is not client_cls.execute, (
+        "the cells ran unrecorded"
+    )
+    assert llm.generate is provider_stream, "the recorder outlived a case that raised"
+    assert made[0].client.execute.__func__ is client_cls.execute, (
+        "the wrapped execute outlived a case that raised"
+    )
+    out = rec_dir / "raise_case.json"
+    assert out.exists(), "a case that raised is still recorded"
+    cassette = json.loads(out.read_text())
+    assert cassette["outcome"]["status"] == row["status"]
+    assert len(cassette["execs"]) == 1
+    errors = [c["error"]["type"] for c in cassette["calls"]]
+    assert errors == (["TimeoutError"] if where == "model_call" else [])
+
+
+def test_a_case_whose_session_never_starts_leaves_the_next_case_the_real_generate(
+    tmp_path, monkeypatch
+):
+    """EV2: when Session() raises (a kernel that will not start) the inner
+    finally never runs, so the generate swap has to be undone by the outer
+    one. A recorder left behind would sit under the next case's recorder, and
+    every later call would also land in a dead case's list."""
+    import json
+
+    import crivo.loop
+    from crivo import llm
+    from crivo.events import StreamText
+
+    def provider_stream(messages, model=None):
+        yield "<answer>acct is clean</answer>"
+
+    def clean(session):
+        "".join(llm.generate([{"role": "user", "content": "fix d06 on acct"}]))
+        yield StreamText("stdout", "done")
+
+    monkeypatch.setattr(llm, "generate", provider_stream)
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    working = crivo.loop.Session
+
+    class NoKernel:
+        def __init__(self, **kwargs):
+            raise RuntimeError("kernel did not answer hello within 60s")
+
+    monkeypatch.setattr(crivo.loop, "Session", NoKernel)
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+    try:
+        agent_run._run_case(
+            {"name": "dead_case", "diseases": [6]}, _record_args(rec_dir)
+        )
+    except RuntimeError:
+        pass  # whether a Session that cannot start propagates is not this test's
+    assert llm.generate is provider_stream, (
+        "the recorder outlived a case whose Session never started"
+    )
+
+    monkeypatch.setattr(crivo.loop, "Session", working)
+    agent_run._run_case({"name": "next_case", "diseases": [6]}, _record_args(rec_dir))
+    out = rec_dir / "next_case.json"
+    assert out.exists(), "the case after it is recorded"
+    assert len(json.loads(out.read_text())["calls"]) == 1
+    assert llm.generate is provider_stream
+
+
+def test_main_hands_each_case_the_record_dir_and_its_run_tag(tmp_path, monkeypatch):
+    """EV2: `--record DIR` reaches `_run_case` on the namespace, beside the run
+    tag that names a repeated run's file, so each repeat writes its own
+    cassette (DIR/<name><suffix><tag>.json) rather than overwriting the
+    first."""
+    from pathlib import Path
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
+    entry = {"name": "rec_case", "diseases": [6]}
+    monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
+    seen: list = []
+
+    def fake_run(entry, args):
+        seen.append((getattr(args, "record", None), getattr(args, "run_tag", None)))
+        return {
+            "name": entry["name"],
+            "status": "ok",
+            "wall_secs": 0.1,
+            "scores": {"repair": {"f1": 1.0}},
+        }
+
+    monkeypatch.setattr(agent_run, "_run_case", fake_run)
+    rec_dir = tmp_path / "cassettes"
+    try:
+        agent_run.main(["--sample", "1", "--repeat", "2", "--record", str(rec_dir)])
+    except SystemExit as exc:
+        pytest.fail(f"main refused --record: exit {exc.code}")
+
+    assert [Path(d) if d else d for d, _ in seen] == [rec_dir, rec_dir]
+    assert [tag for _, tag in seen] == [".r1", ".r2"]
+
+
+@pytest.mark.parametrize(
+    "max_events,wall_cap,started_s_ago,counted",
+    [
+        (5, 60.0, 0.0, 6),  # the sixth event tripped the event cap
+        (5, 1.0, 10.0, 1),  # the first event found the wall cap already spent
+    ],
+)
+def test_an_aborted_case_counts_the_event_that_tripped_the_cap(
+    max_events, wall_cap, started_s_ago, counted
+):
+    """EV2: CaseAborted carries the count `_drive` had reached when a cap
+    fired, the event that tripped it included, so a cassette can say how far
+    an aborted case got."""
+    import time
+
+    def endless():
+        while True:
+            yield "event"
+
+    with pytest.raises(agent_run.CaseAborted) as caught:
+        agent_run._drive(
+            endless(),
+            max_events=max_events,
+            wall_cap=wall_cap,
+            t0=time.monotonic() - started_s_ago,
+        )
+    assert caught.value.events == counted
+
+
+def test_a_case_aborted_without_a_count_says_unknown_not_zero():
+    """A CaseAborted raised without a count does not know how many events
+    ran. 0 would claim that none did."""
+    assert agent_run.CaseAborted("wall cap 300s hit").events is None
+
+
+def test_a_recorded_case_cut_by_the_event_cap_records_the_count_at_the_abort(
+    tmp_path, monkeypatch
+):
+    """EV2: an aborted case never returns from `_drive`, so the row has no
+    event count and keeps none (recording changes nothing in the row). The
+    cassette takes the count from the abort: max_events + 1, the event that
+    tripped the cap included."""
+    import json
+
+    from crivo.events import StreamText
+
+    def clean(session):
+        while True:
+            yield StreamText("stdout", ".")
+
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+
+    row = agent_run._run_case(
+        {"name": "cap_case", "diseases": [6]}, _record_args(rec_dir, max_events=3)
+    )
+
+    assert row["status"].startswith("aborted: event cap")
+    assert "events" not in row, "the row stays as it was"
+    out = rec_dir / "cap_case.max-events-3.json"
+    assert out.exists(), "an aborted case is still recorded"
+    outcome = json.loads(out.read_text())["outcome"]
+    assert outcome["status"] == row["status"]
+    assert outcome["events"] == 4
+
+
+def test_a_cells_stream_digest_is_the_text_the_loop_hands_the_model(
+    tmp_path, monkeypatch
+):
+    """EV2: the loop folds a display it does not save as an image into the
+    cell's text as `[display] <payload>`, in order with the stream
+    (`Session._exec_events`). A dropped image is folded in the same way. A
+    saved PNG is kept out, since its payload is a tmp path that differs on
+    every run. The digest is of that same text, so a replay compares what
+    the model was shown. The display text itself never reaches the cassette."""
+    import json
+
+    from crivo.events import StreamText
+    from crivo.kernel.client import DisplayItem, ExecResult, StreamOut
+
+    png = str(tmp_path / "sess" / "artifacts" / "img-1.png")
+
+    def kernel(code):
+        yield StreamOut("stdout", "out\n")
+        yield DisplayItem("text/html", "<b>DISPLAY-MARK</b>")
+        yield DisplayItem("image/png", png)
+        yield DisplayItem("image/png", "(dropped: 2048 bytes)", True)
+        yield StreamOut("stdout", "more\n")
+        yield ExecResult(status="ok", exec_count=2)
+
+    def clean(session):
+        list(session.client.execute("df.head()"))
+        yield StreamText("stdout", "done")
+
+    _recorded_fake_session(tmp_path, monkeypatch, clean, kernel=kernel)
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+
+    agent_run._run_case({"name": "show_case", "diseases": [6]}, _record_args(rec_dir))
+
+    out = rec_dir / "show_case.json"
+    assert out.exists(), "no cassette written"
+    text = out.read_text()
+    execs = json.loads(text)["execs"]
+    assert len(execs) == 1
+    shown = "out\n[display] <b>DISPLAY-MARK</b>[display] (dropped: 2048 bytes)more\n"
+    assert execs[0]["stream_sha256"] == _sha(shown)
+    leaked = "DISPLAY-MARK" in text or png in text
+    assert not leaked, "display text or an image path reached the cassette"
+
+
+def test_cassettes_written_into_the_checkout_do_not_mark_it_dirty(
+    tmp_path, monkeypatch
+):
+    """EV2: `crivo.dirty` says whether the code that recorded had changes.
+    Cassettes are written into the checkout (EV16 commits them under tests/),
+    so once the first is on disk, that untracked file must not mark the next
+    recording dirty. A change to a tracked file still does."""
+    import json
+    import subprocess
+
+    from crivo.events import StreamText
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "loop.py").write_text("STEP = 1\n")
+
+    def git(*args):
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=bench@example.invalid",
+                "-c",
+                "user.name=bench",
+                "-c",
+                "commit.gpgsign=false",
+                *args,
+            ],
+            cwd=checkout,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    git("init", "-q")
+    git("add", "loop.py")
+    git("commit", "-qm", "base")
+    head = git("rev-parse", "HEAD").strip()
+
+    real_run = subprocess.run
+
+    def run_in_checkout(cmd, *args, **kwargs):
+        # the stamp's git calls read this tmp checkout, not crivo's own
+        if list(cmd)[:1] == ["git"]:
+            kwargs["cwd"] = str(checkout)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_in_checkout)
+    monkeypatch.chdir(checkout)
+
+    def clean(session):
+        yield StreamText("stdout", "done")
+
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    rec_dir = checkout / "tests" / "cassettes"
+    rec_dir.mkdir(parents=True)
+
+    def stamp(name):
+        agent_run._run_case({"name": name, "diseases": [6]}, _record_args(rec_dir))
+        return json.loads((rec_dir / f"{name}.json").read_text())["crivo"]
+
+    first = stamp("first_case")
+    assert first["commit"] == head, "the stamp did not read the tmp checkout"
+    assert first["dirty"] is False
+    assert stamp("second_case")["dirty"] is False, (
+        "an untracked cassette is not a code change"
+    )
+
+    (checkout / "loop.py").write_text("STEP = 2\n")
+    assert stamp("third_case")["dirty"] is True, "a changed tracked file is one"

@@ -13,10 +13,12 @@ run (R6).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
 import shutil
+import subprocess
 import sys
 import time
 from datetime import UTC, datetime
@@ -26,6 +28,7 @@ import pandas as pd
 
 from bench import corpus
 from bench.score import score_end_to_end
+from bench.truth import frame_sha256
 from crivo import llm
 from crivo.autoclean import FIXERS
 from crivo.policy import PolicyRecord
@@ -41,7 +44,16 @@ DEFAULT_WALL_CAP = 300.0
 
 
 class CaseAborted(Exception):
-    """A cap fired; the case is recorded and the run moves on (R4)."""
+    """A cap fired; the case is recorded and the run moves on (R4).
+
+    `events` is the count `_drive` had reached when the cap fired: every
+    event the flow yielded, the one that tripped the cap included (it was
+    counted, never answered). None when the raiser gave no count: 0 would
+    claim no event ran. A cassette records it; the row does not."""
+
+    def __init__(self, message: str, events: int | None = None):
+        super().__init__(message)
+        self.events = events
 
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
@@ -87,10 +99,10 @@ def _drive(
             events += 1
             if events > max_events:
                 gen.close()
-                raise CaseAborted(f"event cap {max_events} hit")
+                raise CaseAborted(f"event cap {max_events} hit", events)
             if time.monotonic() - t0 > wall_cap:
                 gen.close()
-                raise CaseAborted(f"wall cap {wall_cap:.0f}s hit")
+                raise CaseAborted(f"wall cap {wall_cap:.0f}s hit", events)
             answer = None
             if isinstance(event, GateRequest):
                 approved = human_gates == "approve" and not event.title.startswith(
@@ -269,6 +281,198 @@ def _arm_suffix(args: argparse.Namespace) -> str:
     return "".join(f".{part}" for part in parts)
 
 
+# --- recording a run (EV2) --------------------------------------------------
+# A cassette keeps what a replay needs. The messages (they carry the dataset
+# profile) and kernel output (it carries data values) are kept as digests
+# only. Three things are kept as text and can quote values the model saw:
+# the model's raw replies, outcome.status and calls[].error.message. So a
+# cassette is not clean by construction: the scan in #66 is the gate that
+# refuses one holding rows.
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _call_model(model: str | None) -> tuple:
+    """The model and params a call goes out with. A misconfigured provider
+    makes model_name() raise; that error is generate's to raise, from the
+    same place as without a recorder, so here it reads as unknown."""
+    try:
+        params = llm.model_info()
+        name = model or llm.model_name()
+    except Exception:  # noqa: BLE001 — the recorder must not raise first
+        return model, None
+    if params.get("provider") == "claude":
+        params = {**params, "max_tokens": llm.CLAUDE_MAX_TOKENS}
+    return name, params
+
+
+def _recording_generate(orig, calls: list):
+    """`orig` (llm.generate) with a recorder in front. Every chunk reaches the
+    caller unchanged, heartbeats too; the call's record is appended when it
+    starts, so a call that never finishes is still in `calls`. The loop
+    drains a stream to its end, so `reply` is the whole raw text, past any
+    `</execute>` cut. A stream closed mid-reply (a cap's `gen.close()`) is
+    incomplete, not an error: GeneratorExit is not an Exception."""
+
+    def generate(messages, model=None):
+        messages = list(messages)  # listed once, and this same list passed on
+        name, params = _call_model(model)
+        system = "\n".join(
+            str(m.get("content", "")) for m in messages if m.get("role") == "system"
+        )
+        call = {
+            "i": len(calls),
+            "messages_sha256": _sha256(
+                json.dumps(messages, sort_keys=True, ensure_ascii=False, default=str)
+            ),
+            "system_sha256": _sha256(system),
+            "n_messages": len(messages),
+            "model": name,
+            "params": params,
+            "reply": "",
+            "complete": False,
+            "error": None,
+            "dur_s": None,
+        }
+        calls.append(call)
+        parts: list = []
+        t0 = time.monotonic()
+        try:
+            stream = orig(messages) if model is None else orig(messages, model)
+            for chunk in stream:
+                if chunk:
+                    parts.append(chunk)
+                yield chunk
+            call["complete"] = True
+        except Exception as exc:
+            call["error"] = {"type": type(exc).__name__, "message": str(exc)}
+            raise
+        finally:
+            call["reply"] = "".join(parts)
+            call["dur_s"] = round(time.monotonic() - t0, 3)
+
+    return generate
+
+
+def _recording_execute(orig, execs: list):
+    """`orig` (a client's bound execute) with a recorder in front: per cell,
+    digests of the code, the value and the cell's text, plus the status, the
+    exception class and the exec count. Never the text itself. The cell's
+    text is what Session._exec_events hands the model: the StreamOut text
+    with every display folded in as `[display] <payload>`, in order, except a
+    saved (not dropped) image/png, whose payload is a tmp path that differs
+    on every run."""
+    from crivo.kernel.client import DisplayItem, ExecResult, StreamOut
+
+    def execute(code, *args, **kwargs):
+        cell = {
+            "code_sha256": _sha256(code),
+            "status": None,
+            "ename": None,
+            "value_sha256": None,
+            "stream_sha256": None,
+            "exec_count": None,
+        }
+        execs.append(cell)
+        stream: list = []
+        try:
+            for ev in orig(code, *args, **kwargs):
+                if isinstance(ev, StreamOut):
+                    stream.append(ev.text)
+                elif isinstance(ev, DisplayItem):
+                    if ev.mime != "image/png" or ev.dropped:
+                        stream.append(f"[display] {ev.payload}")
+                elif isinstance(ev, ExecResult):
+                    cell["status"] = ev.status
+                    cell["exec_count"] = ev.exec_count
+                    if ev.value is not None:
+                        cell["value_sha256"] = _sha256(ev.value)
+                    if ev.status == "error":
+                        cell["ename"] = (ev.error or {}).get("ename")
+                yield ev
+        finally:
+            cell["stream_sha256"] = _sha256("".join(stream))
+
+    return execute
+
+
+def _fix_records(session_dir) -> list | None:
+    """(disease, columns, grade, status, attempts) per fix in the newest
+    clean report, never the finding's evidence (it quotes sample values).
+    None when no report was written or it cannot be read."""
+    reports = list((Path(session_dir) / "clean_reports").glob("r*.json"))
+    if not reports:
+        return None
+    try:
+        report = json.loads(max(reports).read_text())
+    except (OSError, ValueError):
+        return None
+    records = []
+    for fix in report.get("fixes") or []:
+        finding = fix.get("finding") or {}
+        records.append(
+            [
+                finding.get("disease"),
+                finding.get("columns"),
+                finding.get("grade"),
+                fix.get("status"),
+                fix.get("attempts"),
+            ]
+        )
+    return records
+
+
+def _crivo_stamp(record_dir: Path) -> dict:
+    """Which crivo recorded: the commit, whether the tree had changes, and a
+    digest of the prompts the model was given. Without git, commit and dirty
+    are None. The record dir is left out of the dirty check, so a cassette
+    written earlier in the run never marks the next one dirty; a new
+    untracked source file still does."""
+    from crivo import prompts
+
+    root = Path(__file__).resolve().parent.parent
+
+    def git(*cmd: str) -> str:
+        return subprocess.run(
+            ["git", *cmd], cwd=root, capture_output=True, text=True, check=True
+        ).stdout
+
+    try:
+        commit = git("rev-parse", "HEAD").strip()
+        top = Path(git("rev-parse", "--show-toplevel").strip()).resolve()
+        spec = [":/"]
+        try:
+            inside = Path(record_dir).resolve().relative_to(top)
+        except ValueError:
+            inside = None  # outside the checkout, so git status never lists it
+        if inside is not None and inside.parts:
+            spec.append(f":(top,exclude){inside.as_posix()}")
+        dirty = bool(git("status", "--porcelain", "--", *spec).strip())
+    except (OSError, subprocess.SubprocessError):
+        commit = dirty = None
+    prompts_sha = hashlib.sha256(Path(prompts.__file__).read_bytes()).hexdigest()
+    return {"commit": commit, "dirty": dirty, "prompts_sha256": prompts_sha}
+
+
+def _write_cassette(path: Path, entry: dict, dirty, arm: dict, calls, execs, outcome):
+    cassette = {
+        "schema_version": 1,
+        "source": {
+            "kind": "corpus",
+            "entry": entry,
+            "dirty_sha256": frame_sha256(dirty),
+        },
+        "arm": arm,
+        "crivo": _crivo_stamp(path.parent),
+        "calls": calls,
+        "execs": execs,
+        "outcome": outcome,
+    }
+    path.write_text(json.dumps(cassette, indent=2, default=str))
+
+
 def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     from crivo.loop import Session
 
@@ -308,7 +512,17 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     tele_path.unlink(missing_ok=True)  # stale spans must not count in this run
     prev_tele = os.environ.get("CRIVO_TELEMETRY")
     os.environ["CRIVO_TELEMETRY"] = str(tele_path)
+    # EV2: with --record, every model call and every cell of this case is
+    # recorded. The swaps are undone in a finally, a case that raises included
+    record = getattr(args, "record", None)
+    calls: list = []
+    execs: list = []
+    cleaned = None
+    abort_events = None
+    real_generate = llm.generate
     try:
+        if record:
+            llm.generate = _recording_generate(real_generate, calls)
         session = Session(
             workspace=str(work / "ws"),
             data_dir=str(work / "data"),
@@ -319,6 +533,12 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
             policies=getattr(args, "policy_records", None),
             autonomy=autonomy,
         )
+        if record:
+            # on the instance: restart() keeps this client, so every cell of
+            # the case goes through it
+            client = session.client
+            real_execute = client.execute
+            client.execute = _recording_execute(real_execute, execs)
         try:
             session.load(str(dirty_path), "df")
             row["events"] = _drive(
@@ -337,11 +557,16 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
                 row["status"] = "no_cleaned_output"
         except CaseAborted as exc:
             row["status"] = f"aborted: {exc}"
+            abort_events = exc.events
         except Exception as exc:  # noqa: BLE001 — one broken case must not kill the run (R4)
             row["status"] = f"error: {type(exc).__name__}: {exc}"
         finally:
+            if record:
+                client.execute = real_execute
             session.close()
     finally:
+        if record:
+            llm.generate = real_generate
         # restore, never leak: the next case (and the test suite) must see
         # the environment it started with
         if prev_tele is None:
@@ -351,6 +576,34 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     row["calls"] = _call_stats(tele_path)
     row["gates"] = {"run": gates.count("run"), "skip": gates.count("skip")}
     row["wall_secs"] = round(time.monotonic() - t0, 1)
+    if record:
+        arm = {
+            "autonomy": autonomy,
+            "human_gates": human_gates,
+            "policies": row["policies"],
+            "docker": args.docker,
+            "max_events": args.max_events,
+            "wall_cap": args.wall_cap,
+            "suffix": suffix,
+        }
+        outcome = {
+            "status": row["status"],
+            "events": row.get("events", abort_events),
+            "gates": gates,
+            "records": _fix_records(session.session_dir),
+            "cleaned_sha256": None if cleaned is None else frame_sha256(cleaned),
+            "scores": row.get("scores"),
+        }
+        tag = getattr(args, "run_tag", "") or ""
+        _write_cassette(
+            Path(record) / f"{name}{suffix}{tag}.json",
+            entry,
+            dirty,
+            arm,
+            calls,
+            execs,
+            outcome,
+        )
     return row
 
 
@@ -413,6 +666,14 @@ def main(argv: list[str] | None = None) -> int:
         help="run each case N times and report pass^k consistency (A4); "
         "N model runs per case, so this is a paid choice",
     )
+    parser.add_argument(
+        "--record",
+        metavar="DIR",
+        default=None,
+        help="write one cassette per case to DIR (EV2): each model reply, a "
+        "fingerprint of each call, digests of each cell's result, the outcome. "
+        "A case already on disk is skipped unless --force, so it is not recorded",
+    )
     args = parser.parse_args(argv)
     if args.autonomy and args.human_gates == "approve":
         # An autonomy arm is measured with HUMAN gates skipped. `approve` runs
@@ -440,6 +701,8 @@ def main(argv: list[str] | None = None) -> int:
     _load_dotenv()
     _require_key()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    if args.record:
+        Path(args.record).mkdir(parents=True, exist_ok=True)
 
     entries = corpus.full_corpus() if args.full else list(corpus.SMOKE)
     picked = random.Random(args.seed).sample(entries, min(args.sample, len(entries)))
@@ -460,6 +723,7 @@ def main(argv: list[str] | None = None) -> int:
                 rows.append(json.loads(out.read_text()))
                 print(f"{entry['name']}{tag}: already on disk, skipped (R5)")
                 continue
+            args.run_tag = tag  # names this run's cassette, as it names `out`
             row = _run_case(entry, args)
             if repeat > 1:
                 row["run"] = run_i + 1
