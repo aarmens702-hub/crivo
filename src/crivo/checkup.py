@@ -85,8 +85,8 @@ def load(path, **kwargs) -> pd.DataFrame:
     A directory with no parquet parts is refused, not read as an empty table.
     """
     # this is a door, not a detail: `crivo diagnose` (keyless, aimed at a
-    # stranger's file) and ingest.load_url both reach pandas through here with
-    # nothing else standing between those bytes and the expansion
+    # stranger's file) reaches pandas through here with nothing else standing
+    # between those bytes and the expansion
     from crivo.readers.files import guard_compressed, read_file
 
     path = Path(path)

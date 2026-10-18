@@ -457,11 +457,11 @@ def test_a_call_that_never_finishes_thinking_is_abandoned(monkeypatch):
 
 
 def test_a_remote_frame_becomes_a_lineage_entry_when_it_appears(session):
-    """R12: load_url stamps the frame in-kernel; the registry carries that
-    stamp up, and the session records it like a load — so cards, reports, and
-    /why ground remote data without a /load ever happening. A re-fetch to new
-    content is a second entry (both kept); a re-stamp of the same content is
-    not a duplicate."""
+    """R12: readers.remote.read_url stamps the frame in-kernel; the registry
+    carries that stamp up, and the session records it like a load — so cards,
+    reports, and /why ground remote data without a /load ever happening. A
+    re-fetch to new content is a second entry (both kept); a re-stamp of the
+    same content is not a duplicate."""
     remote = {
         "uri": "https://example.org/feed.csv",
         "fetched_at": "2026-08-14T21:00:00+00:00",

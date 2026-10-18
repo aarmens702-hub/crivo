@@ -8,7 +8,7 @@ Every signature below is copied from the source. Shapes marked "seen" were captu
 
 | Name | Signature | Returns |
 |---|---|---|
-| `read` | `read(source, **kwargs)` | `DataFrame`. Local path (csv, tsv, txt, parquet file or folder, xlsx, xls, json, jsonl, ndjson, feather, orc, dta, sas7bdat, optionally .gz/.zip/.bz2/.xz), a sqlite file (`query=`), a DBAPI connection or SQLAlchemy URL, or an http(s) URL (`records_path=`). `format="fwf"` for fixed width. Missing tokens such as `"N/A"` stay strings. A skipped CSV preamble is stamped on `frame.attrs["preamble_rows"]`. |
+| `read` | `read(source, **kwargs)` | `DataFrame`. Local path (csv, tsv, txt, parquet file or folder, xlsx, xls, json, jsonl, ndjson, feather, orc, dta, sas7bdat, optionally .gz/.zip/.bz2/.xz), a sqlite file (`query=`), a DBAPI connection or SQLAlchemy URL, or an http(s) URL (`records_path=`). `format="fwf"` for fixed width. Missing tokens such as `"N/A"` stay strings. A skipped CSV preamble is stamped on `frame.attrs["preamble_rows"]`. A frame read from an http(s) URL carries `attrs["remote"] = {uri, fetched_at, sha256, rows, columns}`. Other URL schemes (`file://`, `ftp://`, ...) raise `ValueError`, and a redirect to one raises `RuntimeError`; cloud storage (`s3://`, `gs://`, ...) is not built yet and raises `NotImplementedError`. |
 | `read_sql` | `read_sql(query: str, connection)` | `DataFrame`, via `pandas.read_sql`. |
 | `write` | `write(frame, path, **kwargs)` | `Path`. Extensions: .csv .parquet/.pq .xlsx .json .jsonl/.ndjson .feather .orc; anything else raises `ValueError`. Parents are created. |
 | `load_example` | `load_example()` | `DataFrame`, 60 rows x 5 columns (`customer`, `region`, `revenue`, `units`, `note`), same every call. Planted: d01, d04, d06, d07, d09. |

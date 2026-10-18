@@ -31,9 +31,25 @@ def _analyst_registry_json():
         _entry = {"name": _name, "type": type(_val).__name__}
         _remote = getattr(_val, "attrs", {})
         if isinstance(_remote, dict) and isinstance(_remote.get("remote"), dict):
-            # R12: a frame load_url stamped must ground in lineage, so the
-            # stamp rides the registry up to the host
-            _entry["remote"] = _remote["remote"]
+            # R12: a frame read from a URL grounds in lineage, so its stamp
+            # rides the registry up, but only while the frame still has the
+            # fetched rows and columns. A same-shape derivative (a copy, a
+            # sort, a cast, cleaned values) still carries it; the Stage 1
+            # registry rebuild owns that gap
+            _stamp = _remote["remote"]
+            try:
+                _same = "rows" not in _stamp or len(_val) == _stamp["rows"]
+            except TypeError:
+                _same = False
+            if "columns" in _stamp:
+                _cols = getattr(_val, "columns", None)  # a Series has none
+                _same = (
+                    _same
+                    and _cols is not None
+                    and ([str(_c) for _c in _cols] == _stamp["columns"])
+                )
+            if _same:
+                _entry["remote"] = _stamp
         _shape = getattr(_val, "shape", None)
         if _shape is not None:
             _entry["shape"] = list(_shape)

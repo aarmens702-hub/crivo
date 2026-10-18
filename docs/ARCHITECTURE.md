@@ -33,7 +33,7 @@ crivo has two halves. The **library** (`crivo.read`, `diagnose`, `clean` and the
 - `card.py`: the answer card; checks are lifted by AST from cells that ran ok (every assert in such a cell counts, including ones in branches that did not run: T25, Stage 0b). `report.py`: the per-run clean report.
 - `skills.py`: SKILL.md packaging. `library.py`: the skill ledger, probation, promotion and retirement.
 - `provenance.py`: the provenance DAG behind `/why`. `transcript.py`: the append-only JSONL transcript it reads.
-- `snapshot.py`: namespace snapshots so verified fixes survive a kernel death. `ingest.py`: `load_url` as a gated kernel function. `fingerprint.py`: frame digests. `telemetry.py`: optional JSONL telemetry.
+- `snapshot.py`: namespace snapshots so verified fixes survive a kernel death. `fingerprint.py`: frame digests. `telemetry.py`: optional JSONL telemetry.
 - `kernel/`: `client.py` (host side, protocol v1, env allowlist), `supervisor.py` (drives the IPython kernel), `bootstrap.py` (the kernel start cell).
 
 **Repo**

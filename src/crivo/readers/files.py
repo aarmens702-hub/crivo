@@ -196,8 +196,8 @@ def guard_compressed(p: Path) -> None:
     """Run the bomb guard when this path is a compressed format, else nothing.
 
     The entry point other modules use, so every door that opens a file holds
-    the same guard: checkup.load is reached by `crivo diagnose` and by
-    ingest.load_url with no other check between a stranger's bytes and pandas.
+    the same guard: checkup.load is reached by `crivo diagnose` with no other
+    check between a stranger's bytes and pandas.
     """
     suffix = p.suffix.lower()
     if suffix in _COMPRESSION:

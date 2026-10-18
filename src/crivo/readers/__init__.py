@@ -85,6 +85,11 @@ def read(source, *, query=None, **kwargs):
         from crivo.readers import sql
 
         return sql.read_sql(source, query=query, **kwargs)
+    if scheme:
+        raise ValueError(
+            f"crivo.read does not read {scheme}:// URLs: pass a local path, an "
+            "http(s) URL or a database URL"
+        )
     from crivo.readers import files
 
     return files.read_file(source, **kwargs)

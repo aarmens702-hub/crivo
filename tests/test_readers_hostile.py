@@ -278,7 +278,7 @@ def test_a_compression_suffix_with_no_inner_one_is_named_unreadable(tmp_path):
 def test_the_keyless_diagnose_path_refuses_a_bomb_too(tmp_path):
     """read_file was guarded and checkup.load was not, so `crivo diagnose` —
     the free, keyless report a stranger points at a file — expanded the whole
-    bomb. ingest.load_url comes through the same door."""
+    bomb."""
     import bz2
 
     from crivo import checkup
