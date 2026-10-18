@@ -47,7 +47,7 @@
 - **Core batch for Aarmen:** #27 and #31 are ready now (each passes its review); #13, #25, #26 after the restart. Each diff with its tradeoffs.
 - **Decided 2026-10-17 (recorded on the issues):** #25 clean lists every finding left after its fixes in needs_review; #19 CleanSummary.__repr__ masks a deferred reason; #20 True vs 1 is not a change; #37, #39, #30 MCP description changes ship unmeasured (behaviour type, no eval tooling yet). Aarmen asked to work autonomously: take the recommended option, record it, hold only core diffs.
 - **Follow-ups filed (not Stage A):** #44 to #48; #49 export path check after an escaped break; #50 Action/MCP format list; #51 headless clean can run a model-written d09 row deletion unasked (core, Aarmen picks the shape); #52 headless fixes recorded `unattended: false`; #53 the key file is searched from crivo's install dir, not the cwd; #54 headless clean exits 0 when it never ran.
-- **Changelog fragments:** `/ship` writes `changes/<n>.<kind>.md`. #3, #6, #7, #11 shipped before the rule and have none; add them before the next `/promote`.
+- **Changelog fragments:** `/ship` writes `changes/<n>.<kind>.md`. #6, #7 and #11 were backfilled; #3 is maintainer-facing and has none.
 
 ## What we've learned
 - **The bench measures variance, not coverage.** Wave 1.5's regressions scored perfectly clean because the smoke corpus contains none of the shapes involved. A change that handles a new shape needs a corpus case, or the bench can't see it.
