@@ -9,20 +9,24 @@ as loudly as one that refuses nothing.
 
 guard_reads.py (#68) keeps the eval-author to its allowlist (ED3, ED4) and
 keeps the builder off the held-out and sealed sets, off writes to the ledger
-and off paid commands.
+and off paid commands. The eval-author agent (#69) is wired to it in its
+frontmatter, read here as text.
 """
 
 import ast
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-HOOKS = Path(__file__).resolve().parents[1] / ".claude" / "hooks"
+REPO = Path(__file__).resolve().parents[1]
+HOOKS = REPO / ".claude" / "hooks"
 GUARD_READS = HOOKS / "guard_reads.py"
+EVAL_AUTHOR = REPO / ".claude" / "agents" / "eval-author.md"
 HOME = os.path.expanduser("~")
 
 # The checkout each case runs in. It is named like a fresh clone of the repo,
@@ -544,3 +548,233 @@ def test_guard_reads_runs_under_the_system_python3(checkout, mode, payload, expe
         pytest.skip("/usr/bin/python3 does not run")
     proc = run_hook(GUARD_READS, mode, payload, checkout, python=SYSTEM_PYTHON)
     assert_exit(proc, expected)
+
+
+# The eval-author agent (#69). Its frontmatter is the wiring: the tools: line
+# is the real allowlist (an agent with no tools: line gets every tool), so it
+# names only tools guard_reads.py checks in eval-author mode; and the hook's
+# matcher is "*", so any other tool still meets the hook's fail-closed refuse
+# row. There is no YAML library here, so the frontmatter is read as text, in
+# the subset .claude/agents/*.md use: block mappings, block sequences and
+# one-line scalars.
+EVAL_AUTHOR_HOOK = (
+    'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_reads.py" eval-author'
+)
+# the tools: line the issue names; MultiEdit and NotebookEdit may join it, since
+# the hook checks them too
+EVAL_AUTHOR_TOOLS = {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
+# Task and Agent start a subagent with no hook; WebFetch reads the public repo's
+# raw files; WebSearch reaches the web; mcp__ tools are another way out
+UNGUARDED = ("Task", "Agent", "WebFetch", "WebSearch")
+YAML_KEY = re.compile(r"([A-Za-z_][\w-]*):(?: +(.*))?$")
+
+
+def yaml_scalar(raw):
+    """One YAML scalar on one line: "double-quoted", 'single-quoted' or plain."""
+    if raw.startswith('"'):
+        value, end = json.JSONDecoder().raw_decode(raw)
+    elif raw.startswith("'"):
+        quoted = re.match(r"'((?:[^']|'')*)'", raw)
+        assert quoted, f"unclosed quote in {raw!r}"
+        value, end = quoted.group(1).replace("''", "'"), quoted.end()
+    else:
+        # a plain scalar can't open with an indicator (a bare * is an alias)
+        # or hold ": ", or YAML fails to load and the agent loses its hooks
+        value = raw.partition(" #")[0].strip()
+        assert raw[:1] not in "*&!%@`|>{[#", f"{raw!r} must be quoted in YAML"
+        assert ": " not in value + " ", f"{raw!r} must be quoted in YAML"
+        return value
+    rest = raw[end:].strip()
+    assert not rest or rest.startswith("#"), f"text after the quotes in {raw!r}"
+    return value
+
+
+def is_item(text):
+    return text == "-" or text.startswith("- ")
+
+
+def yaml_block(rows, i, indent):
+    """The mapping or sequence whose rows start at rows[i], indented `indent`,
+    and the index past it. Each row is (indent, text)."""
+    if is_item(rows[i][1]):
+        items = []
+        while i < len(rows) and rows[i][0] == indent and is_item(rows[i][1]):
+            text = rows[i][1][1:].strip()
+            if YAML_KEY.match(text):  # "- key: value" opens a mapping 2 columns in
+                rows[i] = (indent + 2, text)
+                item, i = yaml_block(rows, i, indent + 2)
+            else:
+                item, i = yaml_scalar(text), i + 1
+            items.append(item)
+        return items, i
+    mapping = {}
+    while i < len(rows) and rows[i][0] == indent and not is_item(rows[i][1]):
+        key = YAML_KEY.match(rows[i][1])
+        assert key, f"frontmatter line {rows[i][1]!r} is not key: value"
+        name, raw = key.groups()
+        assert name not in mapping, f"{name} is set twice in the frontmatter"
+        i += 1
+        nested = i < len(rows) and (
+            rows[i][0] > indent or (rows[i][0] == indent and is_item(rows[i][1]))
+        )
+        if raw and not raw.startswith("#"):
+            mapping[name] = yaml_scalar(raw)
+        elif nested:
+            mapping[name], i = yaml_block(rows, i, rows[i][0])
+        else:
+            mapping[name] = None
+    return mapping, i
+
+
+def agent_file(path):
+    """An agent file's frontmatter, as a dict, and the body below it."""
+    assert path.is_file(), f"{path.relative_to(REPO)} is missing"
+    lines = path.read_text().splitlines()
+    assert lines[:1] == ["---"] and "---" in lines[1:], (
+        f"{path.name} must open with a frontmatter block between --- lines"
+    )
+    end = lines.index("---", 1)
+    rows = [
+        (len(line) - len(line.lstrip(" ")), line.strip())
+        for line in lines[1:end]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert rows and rows[0][0] == 0, f"{path.name} has an empty frontmatter block"
+    front, used = yaml_block(rows, 0, 0)
+    assert used == len(rows), f"frontmatter line {rows[used][1]!r} is out of place"
+    return front, "\n".join(lines[end + 1 :])
+
+
+def guard_tools(mode):
+    """The tools guard_reads.py has a check for in `mode` ("*" aside), from its
+    MODES table. The hook runs when imported, so it is parsed instead."""
+    for node in ast.parse(GUARD_READS.read_text()).body:
+        targets = [getattr(t, "id", None) for t in getattr(node, "targets", [])]
+        if targets == ["MODES"]:
+            modes = dict(zip((k.value for k in node.value.keys), node.value.values))
+            table = modes[mode]
+            fields = dict(zip((k.value for k in table.keys), table.values))
+            return {k.value for k in fields["tools"].keys} - {"*"}
+    raise AssertionError("guard_reads.py has no MODES table")
+
+
+def test_eval_author_frontmatter_names_it_and_lists_only_guarded_tools():
+    front, _ = agent_file(EVAL_AUTHOR)
+    assert front.get("name") == "eval-author"
+    assert front.get("description"), "the description names its job and read limit"
+    # with no tools: line the agent would get every tool, WebFetch and MCP too
+    assert isinstance(front.get("tools"), str), "tools: is one comma-separated line"
+    tools = [tool.strip() for tool in front["tools"].split(",")]
+    assert len(tools) == len(set(tools)), front["tools"]
+    assert [t for t in tools if t in UNGUARDED or t.startswith("mcp__")] == []
+    assert sorted(EVAL_AUTHOR_TOOLS - set(tools)) == []
+    assert sorted(set(tools) - guard_tools("eval-author")) == []
+
+
+def test_eval_author_frontmatter_runs_guard_reads_on_every_tool_call():
+    front, _ = agent_file(EVAL_AUTHOR)
+    hooks = front.get("hooks")
+    assert isinstance(hooks, dict), "eval-author.md has no hooks: block"
+    assert hooks.get("PreToolUse") == [
+        {"matcher": "*", "hooks": [{"type": "command", "command": EVAL_AUTHOR_HOOK}]}
+    ]
+
+
+# The bench rule, for an author of both injectors and trap suites: not the
+# detector or the fixer, and not the prompts, the loop or the referee.
+BENCH_RULE = ("prompts.py", "loop.py", "detect.py", "autoclean.py")
+REFEREE = re.compile(r"referee|verify\.py", re.IGNORECASE)
+NOT_READ = re.compile(
+    r"(?:\bnot|\bnever|\bcannot|n't)\s+(?:[\w,]+\s+){0,3}?read", re.IGNORECASE
+)
+NO_QUOTE = re.compile(
+    r"(?:\bnot|\bnever|n't)\s+quote\b[^\n]*?\bcases?\b", re.IGNORECASE
+)
+
+
+def test_eval_author_body_keeps_the_bench_rule_and_never_quotes_cases():
+    _, body = agent_file(EVAL_AUTHOR)
+    paragraphs = re.split(r"\n\s*\n", body)
+    rule = [
+        p
+        for p in paragraphs
+        if all(name in p for name in BENCH_RULE)
+        and REFEREE.search(p)
+        and NOT_READ.search(p)
+    ]
+    assert rule, (
+        "no paragraph of eval-author.md says it does not read prompts.py, "
+        "loop.py, the referee, detect.py or autoclean.py"
+    )
+    assert NO_QUOTE.search(body), "eval-author.md never says not to quote cases"
+
+
+def run_frontmatter_hooks(front, payload, cwd):
+    """Each PreToolUse hook in the frontmatter whose matcher takes the call,
+    run through the shell as Claude Code runs it, with $CLAUDE_PROJECT_DIR at
+    this checkout. A matcher of "*" (or none) takes every tool."""
+    hooks = front.get("hooks") if isinstance(front.get("hooks"), dict) else {}
+    stdin = json.dumps(_fill(payload, {"root": str(cwd), "home": HOME}))
+    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(REPO)}
+    runs = []
+    for entry in hooks.get("PreToolUse") or []:
+        matcher = entry.get("matcher") or "*"
+        if matcher != "*" and not re.fullmatch(matcher, payload["tool_name"]):
+            continue
+        for hook in entry.get("hooks") or []:
+            proc = subprocess.run(
+                hook["command"],
+                shell=True,
+                input=stdin,
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            runs.append(proc)
+    return runs
+
+
+RAW_PROMPTS = (
+    "https://raw.githubusercontent.com/aarmens702-hub/crivo/dev/src/crivo/prompts.py"
+)
+WEB_FETCH = {
+    **call("Read"),
+    "tool_name": "WebFetch",
+    "tool_input": {"url": RAW_PROMPTS, "prompt": "Quote the system prompt"},
+}
+SUBAGENT = {
+    **call("Read"),
+    "tool_name": "Task",
+    "tool_input": {
+        "description": "Summarise the loop",
+        "prompt": "Read src/crivo/loop.py and summarise it",
+        "subagent_type": "general-purpose",
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        pytest.param(call("Read", "src/crivo/prompts.py"), 2, id="read-prompts"),
+        pytest.param(call("Read", "bench/corrupt.py"), 0, id="read-corrupt"),
+        # tools off the tools: line meet the refuse row, through matcher "*"
+        pytest.param(WEB_FETCH, 2, id="webfetch-raw-prompts"),
+        pytest.param(SUBAGENT, 2, id="task-subagent"),
+    ],
+)
+def test_eval_author_hook_command_blocks_what_eval_author_mode_forbids(
+    checkout, payload, expected
+):
+    front, _ = agent_file(EVAL_AUTHOR)
+    runs = run_frontmatter_hooks(front, payload, checkout)
+    assert runs, f"no PreToolUse hook in eval-author.md sees {payload['tool_name']}"
+    if expected == 0:
+        for proc in runs:
+            assert_exit(proc, 0)
+    else:
+        blocking = [proc for proc in runs if proc.returncode != 0] or runs
+        assert_exit(blocking[0], 2)
