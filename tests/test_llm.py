@@ -8,7 +8,9 @@ import inspect
 import json
 import os
 import re
+import threading
 import time
+from email.utils import formatdate
 from types import SimpleNamespace
 
 import pytest
@@ -176,6 +178,277 @@ def fake_claude_client(stream, calls=None):
         return stream
 
     return SimpleNamespace(messages=SimpleNamespace(create=create))
+
+
+def install_openai_create(monkeypatch, create):
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    monkeypatch.setattr(llm, "_get_client", lambda: client)
+
+
+def install_claude_create(monkeypatch, create):
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    monkeypatch.setattr(llm, "_get_claude_client", lambda: client)
+
+
+class ProviderError(RuntimeError):
+    def __init__(self, status_code, headers=None, message="provider request failed"):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response = SimpleNamespace(headers=headers or {})
+
+
+def test_provider_clients_disable_sdk_retries(monkeypatch):
+    import anthropic
+
+    openai_calls: list[dict] = []
+    claude_calls: list[dict] = []
+
+    def fake_openai(**kwargs):
+        openai_calls.append(kwargs)
+        return SimpleNamespace()
+
+    def fake_anthropic(**kwargs):
+        claude_calls.append(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(llm, "OpenAI", fake_openai)
+    monkeypatch.setattr(anthropic, "Anthropic", fake_anthropic)
+    monkeypatch.setattr(llm, "_client", None)
+    monkeypatch.setattr(llm, "_openai_client", None)
+    monkeypatch.setattr(llm, "_claude_client", None)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("CRIVO_BASE_URL", "http://localhost/v1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    llm._get_client()
+    llm._get_openai_client()
+    llm._get_claude_client()
+
+    assert [call["max_retries"] for call in openai_calls] == [0, 0]
+    assert [call["max_retries"] for call in claude_calls] == [0]
+
+
+def test_retry_after_accepts_milliseconds_seconds_and_http_dates(monkeypatch):
+    monkeypatch.setattr(llm.time, "time", lambda: 1_000_000.0)
+
+    assert (
+        llm._retry_after_seconds(
+            ProviderError(429, {"retry-after-ms": "500", "Retry-After": "5"})
+        )
+        == 0.5
+    )
+    assert llm._retry_after_seconds(
+        ProviderError(503, {"Retry-After": formatdate(1_000_003, usegmt=True)})
+    ) == pytest.approx(3.0)
+
+
+def test_rate_limited_create_retries_after_the_server_delay(monkeypatch):
+    monkeypatch.setenv("CRIVO_PROVIDER", "deepseek")
+    calls: list[int] = []
+    delays: list[float] = []
+
+    def create(**_):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ProviderError(429, {"Retry-After": "2"})
+        return iter([chunk(content="done")])
+
+    def skip_wait(delay_s, _started_at, _call_budget, _retry_stats=None):
+        delays.append(delay_s)
+        return iter(())
+
+    install_openai_create(monkeypatch, create)
+    monkeypatch.setattr(llm, "_wait_before_retry", skip_wait)
+
+    assert list(llm.generate([{"role": "user", "content": "hi"}])) == ["done"]
+    assert calls == [1, 1]
+    assert delays == [2.0]
+
+
+def test_retry_stats_include_attempts_and_actual_total_wait(tmp_path, monkeypatch):
+    """Regression for #117. Retry telemetry records the calls and wait."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "deepseek")
+    monkeypatch.setenv("CRIVO_TELEMETRY", str(tmp_path / "trace.jsonl"))
+    calls: list[int] = []
+
+    def create(**_):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ProviderError(429, {"Retry-After": "0.02"})
+        return iter([chunk(content="done")])
+
+    monkeypatch.setattr(
+        llm,
+        "_get_client",
+        lambda: SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        ),
+    )
+
+    chunks = list(llm.generate([{"role": "user", "content": "hi"}]))
+    assert chunks[-1] == "done"
+    assert chunks[:-1] and set(chunks[:-1]) == {""}
+    attrs = _call_attrs(tmp_path / "trace.jsonl")
+    assert attrs["crivo.retry.attempts"] == 1
+    assert 0 < attrs["crivo.retry.wait_s"] < 1
+    assert len(calls) == 2
+
+
+def test_default_backoff_stops_after_three_provider_attempts(monkeypatch):
+    monkeypatch.setenv("CRIVO_PROVIDER", "deepseek")
+    calls: list[int] = []
+    delays: list[float] = []
+
+    def create(**_):
+        calls.append(1)
+        raise ProviderError(503)
+
+    def skip_wait(delay_s, _started_at, _call_budget, _retry_stats=None):
+        delays.append(delay_s)
+        return iter(())
+
+    install_openai_create(monkeypatch, create)
+    monkeypatch.setattr(llm, "_wait_before_retry", skip_wait)
+
+    with pytest.raises(ProviderError):
+        list(llm.generate([{"role": "user", "content": "hi"}]))
+
+    assert len(calls) == 3
+    assert delays == [1, 2]
+
+
+def test_connection_errors_retry_but_context_overflow_does_not(monkeypatch):
+    monkeypatch.setenv("CRIVO_PROVIDER", "deepseek")
+    monkeypatch.setattr(llm, "_wait_before_retry", lambda *_: iter(()))
+    calls: list[int] = []
+
+    def connection_then_success(**_):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionError("connection reset")
+        return iter([chunk(content="ok")])
+
+    install_openai_create(monkeypatch, connection_then_success)
+    assert list(llm.generate([{"role": "user", "content": "hi"}])) == ["ok"]
+    assert len(calls) == 2
+
+    overflow_calls: list[int] = []
+
+    def overflow(**_):
+        overflow_calls.append(1)
+        raise ProviderError(500, message="maximum context length exceeded")
+
+    install_openai_create(monkeypatch, overflow)
+    with pytest.raises(ProviderError, match="maximum context length"):
+        list(llm.generate([{"role": "user", "content": "hi"}]))
+    assert len(overflow_calls) == 1
+
+
+def test_anthropic_connection_error_retries_before_stream(monkeypatch):
+    import anthropic
+    import httpx2
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    monkeypatch.setattr(llm, "_wait_before_retry", lambda *_: iter(()))
+    error = anthropic.APIConnectionError(
+        request=httpx2.Request("GET", "https://api.anthropic.com")
+    )
+    calls: list[int] = []
+
+    def create(**_):
+        calls.append(1)
+        if len(calls) == 1:
+            raise error
+        return iter(())
+
+    install_claude_create(monkeypatch, create)
+
+    assert list(llm.generate([{"role": "user", "content": "hi"}])) == []
+    assert len(calls) == 2
+
+
+def test_anthropic_overloaded_error_retries_before_stream(monkeypatch):
+    import anthropic
+    import httpx2
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    monkeypatch.setattr(llm, "_wait_before_retry", lambda *_: iter(()))
+    request = httpx2.Request("POST", "https://api.anthropic.com")
+    error = anthropic.OverloadedError(
+        message="overloaded",
+        response=httpx2.Response(529, request=request),
+        body={"type": "overloaded_error"},
+    )
+    calls: list[int] = []
+
+    def create(**_):
+        calls.append(1)
+        if len(calls) == 1:
+            raise error
+        return iter(())
+
+    install_claude_create(monkeypatch, create)
+
+    assert list(llm.generate([{"role": "user", "content": "hi"}])) == []
+    assert len(calls) == 2
+
+
+def test_retry_after_longer_than_remaining_budget_fails_without_waiting(monkeypatch):
+    monkeypatch.setenv("CRIVO_PROVIDER", "deepseek")
+    monkeypatch.setattr(llm, "MAX_CALL_S", 0.05)
+    calls: list[int] = []
+
+    def create(**_):
+        calls.append(1)
+        raise ProviderError(429, {"Retry-After": "2"})
+
+    install_openai_create(monkeypatch, create)
+    with pytest.raises(TimeoutError, match="2s exceeds remaining call budget"):
+        list(llm.generate([{"role": "user", "content": "hi"}]))
+    assert len(calls) == 1
+
+
+def test_cancel_interrupts_a_provider_retry_wait(monkeypatch):
+    monkeypatch.setenv("CRIVO_PROVIDER", "deepseek")
+    calls: list[int] = []
+
+    def create(**_):
+        calls.append(1)
+        raise ProviderError(429, {"Retry-After": "2"})
+
+    install_openai_create(monkeypatch, create)
+    timer = threading.Timer(0.02, llm.request_cancel)
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(llm.CallCancelled):
+            list(llm.generate([{"role": "user", "content": "hi"}]))
+    finally:
+        timer.join()
+    assert time.monotonic() - started < 0.5
+    assert len(calls) == 1
+
+
+def test_stream_failure_after_first_chunk_is_not_replayed(monkeypatch):
+    monkeypatch.setenv("CRIVO_PROVIDER", "deepseek")
+    calls: list[int] = []
+
+    def broken_stream():
+        yield chunk(content="first")
+        raise ConnectionError("connection closed")
+
+    def create(**_):
+        calls.append(1)
+        return broken_stream()
+
+    install_openai_create(monkeypatch, create)
+    reply = llm.generate([{"role": "user", "content": "hi"}])
+    assert next(reply) == "first"
+    with pytest.raises(ConnectionError, match="connection closed"):
+        next(reply)
+    assert len(calls) == 1
 
 
 def test_the_provider_switch_selects_claude_behind_the_same_seam(monkeypatch):

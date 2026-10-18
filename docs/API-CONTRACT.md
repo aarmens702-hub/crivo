@@ -164,7 +164,7 @@ One JSON object per line. The host writes requests to the supervisor's stdin; ev
 | `CRIVO_MODEL` | `deepseek-v4-pro`, or `claude-opus-5-5` for claude | overrides the model; required for openai |
 | `CRIVO_API_KEY` | `local-no-key` | key sent to the openai provider |
 | `CRIVO_STALL_S` | 90 | seconds with no stream bytes before a call is dead |
-| `CRIVO_MAX_CALL_S` | 420 | cap on one model call, in seconds |
+| `CRIVO_MAX_CALL_S` | 420 | cap on one model call, including provider retry waits, in seconds |
 | `CRIVO_HTTP_TIMEOUT_S` | 30 | `crivo.read` http timeout |
 | `CRIVO_HTTP_MAX_BYTES` | 536870912 (512 MiB) | http body cap for `crivo.read` |
 | `CRIVO_WORKSPACE` | `workspace` | session workspace for `crivo.ask` and the MCP server |
