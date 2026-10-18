@@ -78,6 +78,8 @@ dataframe — 60 rows × 5 columns
         safe to fix automatically · confidence 1.00
 
   checked and clean: 2-3, 5, 8, 10-19, 21-26
+  (25 signals run on every file; absence is a checked
+   claim here, not a silence)
 ```
 
 ```python
