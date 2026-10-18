@@ -28,7 +28,7 @@ crivo has two halves. The **library** (`crivo.read`, `diagnose`, `clean` and the
 - `loop.py`: `Session`. QUERY turns (`run_turn`), CLEAN runs (`clean`, `clean_family`), gates, repair-by-observation.
 - `prompts.py`: the system prompt and the tag contract the loop parses. `llm.py`: the `generate()` seam (deepseek, claude, openai, faux).
 - `profile.py`: the kernel-side profiler that produces what the model sees instead of rows.
-- `verify.py`: kernel cells for baseline, per-fix verification, revert, and skill admission. `diff.py`: renders a fix's consequence at the gate.
+- `verify.py`: kernel cells for baseline, per-fix verification, revert, and skill admission. `diff.py`: renders a fix's consequence at the gate; a QUERY cell or a model-written fix gets no preview, because it never runs before approval (#84).
 - `router.py`, `policy.py`, `plan.py`: grade routing, approval policies and the three autonomy levels, the plan-first artifact.
 - `card.py`: the answer card; checks are lifted by AST from cells that ran ok (every assert in such a cell counts, including ones in branches that did not run: T25, Stage 0b). `report.py`: the per-run clean report.
 - `skills.py`: SKILL.md packaging. `library.py`: the skill ledger, probation, promotion and retirement.

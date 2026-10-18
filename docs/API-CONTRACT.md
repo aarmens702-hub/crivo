@@ -140,7 +140,7 @@ Drivers consume `SessionLike`: `load(path, name=None)`, `run_turn(question)`, `c
 | `Notice` | `kind, text` | `None` |
 | `CardReady` | `card` (has `to_markdown()`) | terminal for the turn |
 
-`grade` is empty for QUERY cells, `HUMAN` for skill admissions. Notice kinds in use today: `autoclean, autonomy, cap, compaction, error, family, fix, intent, kernel_died, llm_error, nudge, plan, restart_offer, skill, skip`. A driver must render an unknown kind as text.
+`grade` is empty for QUERY cells, `HUMAN` for skill admissions. With previews on, a QUERY cell or a model-written fix carries `preview="(no preview: model-written code runs only after you say yes)"` and nothing of it runs before the gate is answered. A proposed skill's admission checks and effect preview still run before the admission gate is answered (#85). Notice kinds in use today: `autoclean, autonomy, cap, compaction, error, family, fix, intent, kernel_died, llm_error, nudge, plan, restart_offer, skill, skip`. A driver must render an unknown kind as text.
 
 ## Kernel supervisor protocol (`kernel/`, protocol v1)
 One JSON object per line. The host writes requests to the supervisor's stdin; every event on stdout carries the request `id`; stderr is diagnostics only.

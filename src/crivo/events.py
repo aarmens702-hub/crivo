@@ -23,7 +23,8 @@ class GateRequest:
     iteration: int
     title: str = ""
     # R3: the rendered consequence of running this cell on a sampled scratch
-    # copy — empty when previews are off or the preview itself failed loudly
+    # copy, except a QUERY cell or a model fix, which never runs before
+    # approval and gets a "no preview" line (#84). Empty when previews are off
     preview: str = ""
     # the finding's grade (AUTO/GATE/HUMAN), so a headless driver can apply
     # the human's pre-authorisation instead of deciding on their behalf;

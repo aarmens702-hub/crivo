@@ -400,8 +400,7 @@ class Session:
                 break
 
             iters += 1
-            frames = [e["name"] for e in self._registry if e.get("type") == "DataFrame"]
-            pv = yield from self._preview(frames, body)
+            pv = yield from self._preview([], body, model_written=True)
             # self.autonomy is deliberately not consulted here: it is a posture
             # over the clean flows, and a QUERY cell runs when this gate
             # approves it, at report-only like anywhere else (see __init__).
@@ -785,15 +784,21 @@ class Session:
             list((self.session_dir / "clean_reports").glob("r*.json"))
         )
 
-    def _preview(self, names, cell_source: str):
+    def _preview(self, names, cell_source: str, *, model_written: bool):
         """R3: consequence before consent, on sampled scratch copies inside
         the kernel. Best effort at both layers — a preview that cannot run
         degrades the gate to code-only with a reason, never blocks it."""
         if not self.preview:
             return ""
-        # the screen runs first: a preview executes model code BEFORE the
-        # human approves it, and the scratch copy protects only the data —
-        # anything reaching the process, files, or network waits for the gate
+        # #84: with model_written=True (the QUERY cell, the model's fix) the
+        # cell never runs before its gate is approved; the scratch copy
+        # protects only the data.
+        if model_written:
+            return "(no preview: model-written code runs only after you say yes)"
+        # the other callers are screened first: an admitted skill, the
+        # admission gate's proposed skill (already run by _admit, #85) and a
+        # deterministic fixer, whose crivo import stops it at the screen today,
+        # so of crivo's own code only an admitted skill reaches a preview
         reason = verify.preview_screen(cell_source)
         if reason:
             return f"(preview skipped: {reason})"
@@ -1336,7 +1341,7 @@ class Session:
                 continue
 
             attempts += 1
-            pv = yield from self._preview(var, body)
+            pv = yield from self._preview(var, body, model_written=True)
             decision = yield GateRequest(
                 body, attempts, title=title, preview=pv, grade=finding["grade"]
             )
@@ -1643,7 +1648,7 @@ class Session:
             decision_note = f"policy:{verdict['policy_id']}"
             evs.append(self.transcript.append("gate", action="run", note=decision_note))
         else:
-            pv = yield from self._preview(var, code)
+            pv = yield from self._preview(var, code, model_written=False)
             decision = yield GateRequest(
                 code, 1, title=title, preview=pv, grade=finding["grade"]
             )
@@ -1789,7 +1794,7 @@ class Session:
             )
 
             if not silent:
-                pv = yield from self._preview(var, code)
+                pv = yield from self._preview(var, code, model_written=False)
                 decision = yield GateRequest(
                     code, 1, title=title, preview=pv, grade=finding["grade"]
                 )
@@ -1998,7 +2003,11 @@ class Session:
                         f"_case_preview = fix(_case_preview, "
                         f"{finding.get('columns', [])!r})\n"
                     )
-                    effect = yield from self._preview(["_case_preview"], apply_src)
+                    # _admit already ran this code before the gate (#85), so
+                    # its preview adds no new exposure
+                    effect = yield from self._preview(
+                        ["_case_preview"], apply_src, model_written=False
+                    )
             decision = yield GateRequest(
                 source_view,
                 1,
