@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 
 def main() -> int:
     load_dotenv()
-    # import-light and keyless: governance pulls in crivo.policy and the
-    # standard library only, so --diagnose still costs no model and no key
-    from crivo.governance import AUTONOMY_LEVELS
+    # import-light and keyless: crivo.policy pulls in the standard library
+    # only, so --diagnose still costs no model and no key
+    from crivo.policy import AUTONOMY_LEVELS
 
     parser = argparse.ArgumentParser(prog="crivo")
     parser.add_argument(

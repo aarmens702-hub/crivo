@@ -24,18 +24,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from crivo.policy import PolicyRecord
+from crivo.policy import AUTONOMY_LEVELS, PolicyRecord
 
 _TOP_LEVEL_KEYS = frozenset({"policies", "judge", "routing", "autonomy"})
 _DEFAULT_JUDGE = {"enabled": False, "sample_rate": 0.0, "rubric": ""}
 _DEFAULT_ROUTING = {"escalate_after_fail": True}
-
-# The three named autonomy postures (specs/2026-09-05-autonomy-default-*.md):
-# "autonomous" decides the AUTO findings that carry a registered deterministic
-# fixer without showing a gate, "careful" gates them for a person, "report-only"
-# diagnoses and stops. The list is closed: an unrecognised level raises rather
-# than falling back, so a typo cannot quietly pick a posture.
-AUTONOMY_LEVELS = ("autonomous", "careful", "report-only")
 _DEFAULT_AUTONOMY = "autonomous"
 
 

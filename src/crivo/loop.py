@@ -26,9 +26,9 @@ from crivo.events import (
     Notice,
     StreamText,
 )
-from crivo.governance import AUTONOMY_LEVELS
 from crivo.kernel.client import DisplayItem, KernelClient, StreamOut
 from crivo.library import Library, unattended
+from crivo.policy import AUTONOMY_LEVELS
 from crivo.report import CleanReport
 from crivo.transcript import Transcript
 
