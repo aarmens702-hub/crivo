@@ -128,9 +128,3 @@ def _type_digest(label: str, values: pd.Series | pd.Index) -> bytes:
     digest = hashlib.sha256(label.encode())
     digest.update(b"".join(names))
     return digest.digest()
-
-
-def unchanged(before_fp: str, after: pd.DataFrame) -> bool:
-    """True when `after` still matches the pre-fix fingerprint `before_fp`,
-    so the loop counts a failed attempt instead of re-running the check."""
-    return frame_fingerprint(after) == before_fp

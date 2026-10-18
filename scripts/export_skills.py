@@ -122,10 +122,6 @@ class ExportReport:
     def refused(self) -> list[str]:
         return [r.name for r in self.results if r.selected and not r.ok]
 
-    @property
-    def skipped(self) -> list[str]:
-        return [r.name for r in self.results if not r.selected]
-
 
 def _discover(skills_root: Path) -> list[tuple[str, Path, bool]]:
     """(name, folder, is_retired_location) for every candidate skill folder."""

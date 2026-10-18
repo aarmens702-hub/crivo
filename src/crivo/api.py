@@ -19,7 +19,7 @@ import pandas as pd
 
 from crivo import checkup as _checkup
 from crivo.autoclean import CleanSummary, clean
-from crivo.detect import SINGLE_FRAME, detect_all
+from crivo.detect import detect_all
 
 __all__ = [
     "CleanSummary",
@@ -385,6 +385,3 @@ def write(frame: pd.DataFrame, path, **kwargs) -> Path:
             ".csv .parquet .xlsx .json .jsonl .feather .orc"
         )
     return p
-
-
-SIGNALS = len(SINGLE_FRAME)  # how many checks diagnose runs on every file

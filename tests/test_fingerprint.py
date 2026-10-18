@@ -11,7 +11,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from crivo.fingerprint import frame_fingerprint, unchanged
+from crivo.fingerprint import frame_fingerprint
 
 
 def _frame() -> pd.DataFrame:
@@ -88,8 +88,8 @@ def test_unchanged_spots_a_noop_fix() -> None:
     real = _frame()
     real.loc[0, "c"] = "fixed"
 
-    assert unchanged(before, noop)
-    assert not unchanged(before, real)
+    assert frame_fingerprint(noop) == before
+    assert frame_fingerprint(real) != before
 
 
 def test_100k_rows_fingerprint_well_under_a_second() -> None:
@@ -124,7 +124,6 @@ def test_object_cell_string_and_int_differ() -> None:
 
     assert before.loc[0, "x"] != after.loc[0, "x"]  # "1" is not 1
     assert frame_fingerprint(before) != frame_fingerprint(after)
-    assert not unchanged(frame_fingerprint(before), after)
 
 
 def test_object_cell_string_and_bool_differ() -> None:
@@ -144,7 +143,6 @@ def test_object_cells_of_equal_type_still_fingerprint_equal() -> None:
 
     assert first == frame_fingerprint(_mixed())
     assert first == frame_fingerprint(_mixed().copy(deep=True))
-    assert unchanged(first, _mixed())
 
 
 def test_object_index_string_and_int_differ() -> None:

@@ -20,10 +20,6 @@ def _path() -> str:
     return os.environ.get("CRIVO_TELEMETRY") or ""
 
 
-def enabled() -> bool:
-    return bool(_path())
-
-
 def emit(name: str, dur_s: float | None = None, **attrs) -> None:
     path = _path()
     if not path:

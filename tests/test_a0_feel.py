@@ -37,13 +37,14 @@ def test_cancel_between_calls_is_a_noop():
     assert list(llm._watched(iter(["fine"]), lambda item: item)) == ["fine"]
 
 
-def test_telemetry_disabled_is_noop(monkeypatch):
+def test_telemetry_disabled_is_noop(tmp_path, monkeypatch):
     monkeypatch.delenv("CRIVO_TELEMETRY", raising=False)
+    monkeypatch.chdir(tmp_path)
     from crivo import telemetry
 
     with telemetry.span("gen_ai.client.call", probe=1):
         pass  # must not raise, must not write anywhere
-    assert not telemetry.enabled()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_telemetry_span_writes_jsonl(tmp_path, monkeypatch):
