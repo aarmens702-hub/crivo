@@ -29,7 +29,7 @@ crivo has two halves. The **library** (`crivo.read`, `diagnose`, `clean` and the
 - `prompts.py`: the system prompt and the tag contract the loop parses. `llm.py`: the `generate()` seam (deepseek, claude, openai, faux).
 - `profile.py`: the kernel-side profiler that produces what the model sees instead of rows.
 - `verify.py`: kernel cells for baseline, per-fix verification, revert, and skill admission. `diff.py`: renders a fix's consequence at the gate.
-- `router.py`, `policy.py`, `plan.py`, `governance.py`: grade routing, approval policies, the plan-first artifact, the governance file.
+- `router.py`, `policy.py`, `plan.py`: grade routing, approval policies and the three autonomy levels, the plan-first artifact.
 - `card.py`: the answer card; checks are lifted by AST from cells that ran ok (every assert in such a cell counts, including ones in branches that did not run: T25, Stage 0b). `report.py`: the per-run clean report.
 - `skills.py`: SKILL.md packaging. `library.py`: the skill ledger, probation, promotion and retirement.
 - `provenance.py`: the provenance DAG behind `/why`. `transcript.py`: the append-only JSONL transcript it reads.

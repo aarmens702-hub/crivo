@@ -1053,10 +1053,10 @@ def test_a_caller_armed_policy_still_outranks_an_in_session_plan(tmp_path, monke
     happen ("the seed is only planted when the caller passed none of their
     own"), which is a statement about the seed and not about the ordering.
 
-    A LOG_ONLY shadow-week record is the shape docs/governance.example.json
-    ships, and its whole purpose is that nothing applies unattended. One
-    in-session answer must not override an operator posture: the plan record
-    goes ahead of the SEED and behind anything the caller armed."""
+    The armed record is a LOG_ONLY shadow-week record, and its whole purpose
+    is that nothing applies unattended. One in-session answer must not
+    override an operator posture: the plan record goes ahead of the SEED and
+    behind anything the caller armed."""
     monkeypatch.setenv("CRIVO_PLAN_FIRST", "on")
     monkeypatch.setattr(llm, "generate", gen([]))
     armed = policy.PolicyRecord(

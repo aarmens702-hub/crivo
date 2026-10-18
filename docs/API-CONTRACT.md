@@ -151,15 +151,6 @@ One JSON object per line. The host writes requests to the supervisor's stdin; ev
 - Caps: a value is cut at 8 KiB, a stream at 64 KiB (head and tail kept, with a marker).
 - The kernel's environment is an allowlist (`KERNEL_ENV_PASSTHROUGH`, plus `DOCKER_ENV_PASSTHROUGH` with `--docker`); provider keys are never passed in.
 
-## Governance file (`governance.py`, `docs/governance.example.json`)
-Top-level keys, and only these (anything else raises): `policies`, `judge`, `routing`, `autonomy`.
-- `policies`: list of `{id, disease_ids, approver, expires, mode}`; `expires` is an ISO date (the last live day), `mode` is `ENFORCE` or `LOG_ONLY`, unknown disease ids raise.
-- `judge`: `{enabled: false, sample_rate: 0.0, rubric: ""}` by default; `sample_rate` must be in [0, 1].
-- `routing`: `{escalate_after_fail: true}` by default.
-- `autonomy`: one of `autonomous, careful, report-only`, default `autonomous`.
-
-`load_governance` validates the file, but no runtime code reads it yet. The live autonomy control is the `--autonomy` flag.
-
 ## Environment variables
 
 | Variable | Default | What it does |

@@ -118,9 +118,9 @@ def test_the_factory_is_pure_and_hands_back_a_fresh_list_each_call():
 
 # --- where the three levels live (#31) ----------------------------------------
 #
-# The levels moved out of crivo.governance, which no runtime code reads, into
-# crivo.policy beside the approval code they configure, so #32 can delete the
-# governance module without touching anything live.
+# The levels moved out of crivo.governance, which no runtime code read, into
+# crivo.policy beside the approval code they configure (#31), and #32 deleted
+# the governance module.
 
 
 def _policy_levels():
@@ -140,15 +140,6 @@ def test_autonomy_levels_are_the_three_named_postures():
     everything, decide nothing. It is named in crivo.policy, beside the
     approval code it configures (#31)."""
     assert _policy_levels() == ("autonomous", "careful", "report-only")
-
-
-def test_governance_reexports_the_policy_tuple_until_it_is_deleted():
-    """governance.py imports the levels back from crivo.policy, so the two
-    names are one object, not two copies that can drift apart. #32 deletes
-    this test together with the governance module."""
-    from crivo import governance, policy
-
-    assert governance.AUTONOMY_LEVELS is getattr(policy, "AUTONOMY_LEVELS", None)
 
 
 def _run_fresh(code: str, cwd) -> subprocess.CompletedProcess:
@@ -175,7 +166,7 @@ def test_importing_the_levels_pulls_in_neither_governance_nor_a_core_module(
     tmp_path,
 ):
     """The CLI reads the levels before its keyless --diagnose path, so the
-    import must stay light: no governance module (which #32 deletes) and none
+    import must stay light: no governance module (deleted in #32) and none
     of the reserved core modules tests/test_import_isolation.py names."""
     from tests.test_import_isolation import RESERVED
 
@@ -190,17 +181,26 @@ def test_importing_the_levels_pulls_in_neither_governance_nor_a_core_module(
     assert json.loads(proc.stdout.splitlines()[-1]) == []
 
 
-# The CLI and the loop must keep working once #32 deletes crivo.governance, so
-# the tests below run them with that module blocked from import. The names are
-# spelled out because parametrize needs them at collection, before any import
-# can be tried; test_autonomy_levels_are_the_three_named_postures pins them to
-# crivo.policy.
+# The CLI and the loop must work without crivo.governance (deleted in #32), so
+# the tests below run them with that name blocked from import, which catches
+# the CLI or the loop importing it again. The names are spelled out because
+# parametrize needs them at collection, before any import can be tried;
+# test_autonomy_levels_are_the_three_named_postures pins them to crivo.policy.
 NAMED_LEVELS = ("autonomous", "careful", "report-only")
+
+
+def test_the_governance_module_is_not_shipped():
+    """#32: the governance module looked like a control and nothing read it,
+    so it is gone. A copy that came back, even one nothing imports, would ship
+    in the package again; this fails on it."""
+    import importlib.util
+
+    assert importlib.util.find_spec("crivo.governance") is None
 
 
 @pytest.fixture
 def no_governance(monkeypatch):
-    """crivo.governance as if #32 had deleted it: any import of it raises."""
+    """crivo.governance blocked from import (#32 deleted it): any import raises."""
     monkeypatch.setitem(sys.modules, "crivo.governance", None)
 
 
