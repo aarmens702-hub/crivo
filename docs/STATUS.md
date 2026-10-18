@@ -2,7 +2,7 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Claude Code's own memory lives on one laptop only, so anything worth keeping goes here. Update it at the end of each session (Claude: do it as part of wrapping up).
 
-*Last updated: 2026-10-17 (late), Mac session.*
+*Last updated: 2026-10-17 (night), Mac session.*
 
 ## Where things are
 - **The repo is `github.com/aarmens702-hub/crivo`** (renamed from `analyst-agent` on 2026-10-14; the old URLs redirect). MIT. Not on PyPI yet.
@@ -17,7 +17,8 @@
 
 | Stage | What | State |
 |---|---|---|
-| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **Done on `dev`:** 39 of 39 shipped 2026-10-17; reaches `main` at the next `/promote` |
+| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **Done:** 39 of 39, on `main` as v0.2.0 (2026-10-17) |
+| Eval tooling | Record and replay, the eval ledger, `/eval`, the eval-author and `guard_reads`, `check_locks` and `leak_scan` in CI, gates by work type. 20 issues, #64 to #83 (`specs/2026-10-17-eval-tooling.md`) | **Filed 2026-10-17; next.** ED5, ED7, ED8 owed |
 | 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | After A |
 | 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, charts and descriptive analysis, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
 | 2 | Two tracks in parallel. 2a the analyst toolkit: statistics, drivers, segments and cohorts, forecasting, anomalies, dashboards. 2b learning: System 1 as the loop's first filter, skills, the glossary, saved answers, `crivo verify`, the nightly skill loop | |
@@ -27,7 +28,13 @@
 
 25 owner decisions are listed in the plan with the stage each is needed by.
 
-### Stage A, done 2026-10-17: pick up here
+### Next, 2026-10-17 (night): pick up here
+- **Stage A is on `main`:** `/qa-pass` on a fresh install of `dev` passed 41 of 42 unpaid cases (BENCH-01's stale line fixed in #61; AN-07 and AN-08 skipped, paid), then `/promote` merged PR #62 and tagged **v0.2.0**. The README's Action example pins `@v0.2.0`.
+- **The eval tooling is filed** as #64 to #83 (EV1 to EV20), from the proposal Aarmen approved on 2026-10-17. ED1 to ED4 and ED6 were taken as recommended (recorded on the issues); ED5 (paid budget), ED7 (where sealed sets live) and ED8 (plan rule 10) are Aarmen's. EV1 (#64) is core.
+- **Stage 0 is being drafted** into a WRAP spec and issues (`specs/2026-10-17-stage-0-foundation.md`).
+- **Small follow-up:** #63 (the README sample report omits its last two lines).
+
+### Stage A, done 2026-10-17
 - **All 39 shipped to `dev` and closed:** #3, #6 to #43. The last six (#13, #19, #21, #25, #26, #33) landed in the late session once a restart cleared tdd-guard. Aarmen gave the core yes for #13, #25 and #26 in session. CI green on every push.
 - **Next:** `/promote` to move Stage A to `main` (the demo story now reads `2 left for review` on the example: d09, and d15 outliers once revenue is numeric), then Stage 0.
 - **Bench moves this session:** #26 raised smoke detect micro-F1 0.728 to 0.761 and survived 0.673 to 0.696 (`units-numeric-sentinels`). #25 added `tx-case-spelling` (written by an author who did not read detect.py or autoclean.py) and raised repair F1 0.854 to 0.899 and survived 0.683 to 0.717 on the same 31 cases.
