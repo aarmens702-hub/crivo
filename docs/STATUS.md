@@ -17,7 +17,7 @@
 
 | Stage | What | State |
 |---|---|---|
-| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **In progress:** 30 of 39 shipped; paused 2026-10-17 for a session restart and the core batch |
+| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **In progress:** 33 of 39 shipped; the last six need a fresh session (tdd-guard) and a core review for #13, #25, #26 |
 | 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | After A |
 | 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, charts and descriptive analysis, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
 | 2 | Two tracks in parallel. 2a the analyst toolkit: statistics, drivers, segments and cohorts, forecasting, anomalies, dashboards. 2b learning: System 1 as the loop's first filter, skills, the glossary, saved answers, `crivo verify`, the nightly skill loop | |
@@ -28,23 +28,20 @@
 25 owner decisions are listed in the plan with the stage each is needed by.
 
 ### Stage A, paused 2026-10-17 (night): pick up here
-- **Shipped to `dev` and closed (30 of 39):** #3, #6 to #12, #14 to #18, #20, #22 to #24, #28 to #30, #34 to #43. `v0.1.0` is tagged on `main`. CI green on every push checked.
+- **Shipped to `dev` and closed (33 of 39):** #3, #6 to #12, #14 to #18, #20, #22 to #24, #27 to #32, #34 to #43. #27 and #31 carry Aarmen's core yes (2026-10-17). `v0.1.0` is tagged on `main`. CI green on every push checked.
 - **Why the pause:** tdd-guard was turned off in `~/.claude/settings.json`, but a running session keeps the hooks it loaded at start. It judges each edit against a stale `.claude/tdd-guard/data/test.json` and blocks new logic. A fresh session doesn't load it. If it still fires, check `"tdd-guard@tdd-guard": false` in `~/.claude/settings.json`. Nobody routed around it.
-- **The nine left, all in `.worktrees/<n>` on this Mac.** `.worktrees/_handoff/README.md` is the index: each issue's state, the saved edit or patch, and the next step.
+- **The six left, all in `.worktrees/<n>` on this Mac.** `.worktrees/_handoff/README.md` is the index: each issue's state, the saved edit or patch, and the next step.
 
 | Issue | State | Next |
 |---|---|---|
-| #27 skills multiline (core) | committed on its branch, rebased, suite green, reviewed SHIP IT | Aarmen's yes on the skills.py diff, then push |
 | #13 Claude path (core) | built except 3 llm.py hunks | apply `_handoff/13-apply_blocked.py` pairs with Edit; review; core gate |
 | #19 clean card masking | built except 1 api.py edit | apply `_handoff/19-api-edit.md`; review; ship |
 | #21 cross_column masking | tests red | apply `_handoff/21-crosscol.patch` with Edit; review; ship |
 | #25 d07 refusal + leftovers (core) | 4 tests red | build from `_handoff/25-plan.md`; bench; review; core gate |
 | #26 d04 `-999` (core) | 8 tests red | apply `_handoff/26-d04.patch` after #25; README/QA from real output; bench; core gate |
-| #31 autonomy levels out of governance (core: one loop.py import) | committed on its branch, rebased, suite green, reviewed SHIP IT | Aarmen's yes on the loop.py line, then push |
-| #32 delete governance | committed, stacked on #31, reviewed, suite green | push right after #31 |
 | #33 retire ingest | text edits done, ingest.py removed (staged) | apply `_handoff/33-blocked-edits.md`; review; ship |
 
-- **Core batch for Aarmen:** #27 and #31 are ready now (each passes its review); #13, #25, #26 after the restart. Each diff with its tradeoffs.
+- **Core batch for Aarmen after the restart:** #13, #25, #26, each diff with its tradeoffs.
 - **Decided 2026-10-17 (recorded on the issues):** #25 clean lists every finding left after its fixes in needs_review; #19 CleanSummary.__repr__ masks a deferred reason; #20 True vs 1 is not a change; #37, #39, #30 MCP description changes ship unmeasured (behaviour type, no eval tooling yet). Aarmen asked to work autonomously: take the recommended option, record it, hold only core diffs.
 - **Follow-ups filed (not Stage A):** #44 to #48; #49 export path check after an escaped break; #50 Action/MCP format list; #51 headless clean can run a model-written d09 row deletion unasked (core, Aarmen picks the shape); #52 headless fixes recorded `unattended: false`; #53 the key file is searched from crivo's install dir, not the cwd; #54 headless clean exits 0 when it never ran.
 - **Changelog fragments:** `/ship` writes `changes/<n>.<kind>.md`. #6, #7 and #11 were backfilled; #3 is maintainer-facing and has none.
