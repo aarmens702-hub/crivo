@@ -11,6 +11,10 @@ guard_reads.py (#68) keeps the eval-author to its allowlist (ED3, ED4) and
 keeps the builder off the held-out and sealed sets, off writes to the ledger
 and off paid commands. The eval-author agent (#69) is wired to it in its
 frontmatter, read here as text.
+
+The agent files (#70) wire it: the builder and the test-writer run it in
+builder mode beside their guard_tests.py entry, and the scout, builder and
+test-writer prompts carry the issue's type, its eval and their eval limits.
 """
 
 import ast
@@ -778,3 +782,109 @@ def test_eval_author_hook_command_blocks_what_eval_author_mode_forbids(
     else:
         blocking = [proc for proc in runs if proc.returncode != 0] or runs
         assert_exit(blocking[0], 2)
+
+
+# The agent files (#70).
+AGENTS = HOOKS.parent / "agents"
+
+
+def agent_text(agent):
+    path = AGENTS / agent
+    assert path.is_file(), f"{path} is missing"
+    return path.read_text()
+
+
+def frontmatter_hooks(agent):
+    """The frontmatter lines from the top-level `hooks:` key to the closing
+    `---`, indentation kept."""
+    lines = agent_text(agent).splitlines()
+    assert lines[0] == "---", f"{agent} has no frontmatter"
+    assert "---" in lines[1:], f"{agent}'s frontmatter is never closed"
+    front = lines[1 : lines.index("---", 1)]
+    assert "hooks:" in front, f"{agent}'s frontmatter has no top-level hooks: key"
+    return front[front.index("hooks:") :]
+
+
+# Pinned whole, so a mis-indented entry, a renamed key, a third entry or a
+# changed guard_tests.py line fails. guard_tests.py stays first and as it was;
+# guard_reads.py runs in builder mode on every tool ("*", as its docstring
+# says to wire it).
+FRONTMATTER_HOOKS = """\
+hooks:
+  PreToolUse:
+    - matcher: "Edit|Write|MultiEdit"
+      hooks:
+        - type: command
+          command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_tests.py" {mode}
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_reads.py" builder
+"""
+
+
+@pytest.mark.parametrize(
+    ("agent", "guard_tests_mode"),
+    [("builder.md", "no-tests"), ("test-writer.md", "only-tests")],
+)
+def test_builder_and_test_writer_run_guard_reads_beside_guard_tests(
+    agent, guard_tests_mode
+):
+    expected = FRONTMATTER_HOOKS.format(mode=guard_tests_mode).splitlines()
+    assert frontmatter_hooks(agent) == expected
+
+
+def change_map():
+    """The lines of the change-map block in scout.md."""
+    blocks = re.findall(r"```\n(.*?)```", agent_text("scout.md"), re.DOTALL)
+    maps = [block for block in blocks if block.startswith("CHANGE MAP:")]
+    assert len(maps) == 1, f"scout.md has {len(maps)} change-map blocks"
+    return maps[0].splitlines()
+
+
+@pytest.mark.parametrize("label", ["Type:", "Eval:"])
+def test_scout_change_map_has_a_type_and_an_eval_line(label):
+    labels = [line.split(":", 1)[0] + ":" for line in change_map()]
+    assert label in labels
+
+
+def paragraphs(agent):
+    """An agent file's body, one lower-cased string per paragraph, bullet or
+    numbered step, with line wraps joined and markdown emphasis dropped."""
+    body = agent_text(agent).split("\n---\n", 1)[1]
+    units = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        starts = not stripped or stripped.startswith(("-", "*", "#", "```"))
+        if starts or re.match(r"\d+\.", stripped) or not units:
+            units.append(stripped)
+        else:
+            units[-1] += " " + stripped
+    return [re.sub(r"[*`]", "", unit).strip().lower() for unit in units if unit]
+
+
+# (agent, what the paragraph is about, what that paragraph must also say)
+EVAL_LIMITS = [
+    pytest.param(
+        "builder.md", r"\bpaid commands?\b", [r"\bnever\b"], id="builder-never-paid"
+    ),
+    pytest.param(
+        "builder.md",
+        r"\b(2|two) eval runs\b",
+        [r"\bissue\b", r"\bstops?\b"],
+        id="builder-stops-after-2-eval-runs",
+    ),
+    pytest.param(
+        "test-writer.md",
+        r"\btests/replay\.py\b",
+        [r"\bcassette", r"\bbehaviou?r\b"],
+        id="test-writer-cassette-through-replay",
+    ),
+]
+
+
+@pytest.mark.parametrize(("agent", "topic", "musts"), EVAL_LIMITS)
+def test_agent_prompt_states_its_eval_limit(agent, topic, musts):
+    about = [unit for unit in paragraphs(agent) if re.search(topic, unit)]
+    saying = [unit for unit in about if all(re.search(m, unit) for m in musts)]
+    assert saying != [], f"{agent}: no paragraph on {topic} says {musts}"

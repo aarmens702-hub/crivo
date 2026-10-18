@@ -16,6 +16,8 @@ You get: an issue's text (Goal, Files, Steps, Done when, Out of scope) and the w
 
 ```
 CHANGE MAP: issue #<n>
+Type:        <code, behaviour, eval or experiment, from the issue>
+Eval:        <the suite and split from the issue's Measurement, or "none">
 Edit:        <path>: <what and why> (one line each)
 Create:      <path>: <why> (or "none")
 Contract:    <interfaces used, or "none">
