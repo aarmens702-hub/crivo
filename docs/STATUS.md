@@ -2,7 +2,7 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Claude Code's own memory lives on one laptop only, so anything worth keeping goes here. Update it at the end of each session (Claude: do it as part of wrapping up).
 
-*Last updated: 2026-10-17 (evening), Mac session.*
+*Last updated: 2026-10-17 (night), Mac session.*
 
 ## Where things are
 - **The repo is `github.com/aarmens702-hub/crivo`** (renamed from `analyst-agent` on 2026-10-14; the old URLs redirect). MIT. Not on PyPI yet.
@@ -17,7 +17,7 @@
 
 | Stage | What | State |
 |---|---|---|
-| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **In progress:** 17 of 39 shipped; paused 2026-10-17 for a session restart |
+| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **In progress:** 30 of 39 shipped; paused 2026-10-17 for a session restart and the core batch |
 | 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | After A |
 | 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, charts and descriptive analysis, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
 | 2 | Two tracks in parallel. 2a the analyst toolkit: statistics, drivers, segments and cohorts, forecasting, anomalies, dashboards. 2b learning: System 1 as the loop's first filter, skills, the glossary, saved answers, `crivo verify`, the nightly skill loop | |
@@ -27,25 +27,26 @@
 
 25 owner decisions are listed in the plan with the stage each is needed by.
 
-### Stage A, paused 2026-10-17 (evening): pick up here
-- **Shipped to `dev` and closed (17 of 39):** #3, #6, #7, #8, #9, #10, #11, #12, #14, #15, #16, #17, #18, #22, #23, #24, #28. `v0.1.0` is tagged on `main` and released. CI was green on every push checked. Follow-up bugs #44 to #48 are filed (not Stage A scope).
-- **Why the pause:** tdd-guard was turned off in `~/.claude/settings.json` (Aarmen, 2026-10-17), but a running session keeps the hooks it loaded at start, so it kept blocking builders. A fresh session has no guard. If it still fires, check `~/.claude/settings.json` has `"tdd-guard@tdd-guard": false`.
-- **In progress.** Uncommitted work sits in each worktree (`.worktrees/<n>`, this Mac only). Tested patches that the guard blocked are in `.worktrees/_handoff/` (git-ignored). Resume each at the step named:
+### Stage A, paused 2026-10-17 (night): pick up here
+- **Shipped to `dev` and closed (30 of 39):** #3, #6 to #12, #14 to #18, #20, #22 to #24, #28 to #30, #34 to #43. `v0.1.0` is tagged on `main`. CI green on every push checked.
+- **Why the pause:** tdd-guard was turned off in `~/.claude/settings.json`, but a running session keeps the hooks it loaded at start. It judges each edit against a stale `.claude/tdd-guard/data/test.json` and blocks new logic. A fresh session doesn't load it. If it still fires, check `"tdd-guard@tdd-guard": false` in `~/.claude/settings.json`. Nobody routed around it.
+- **The nine left, all in `.worktrees/<n>` on this Mac.** `.worktrees/_handoff/README.md` is the index: each issue's state, the saved edit or patch, and the next step.
 
-| Issue | State | Next step |
+| Issue | State | Next |
 |---|---|---|
-| #13 Claude path (core) | Tests written (6 failing); constants, cancel move, `_watched` fallback, card footer, contract applied | Apply `_handoff/13-apply_blocked.py` (3 llm.py hunks: model_info claude branch; drop temperature, add output_config effort + adaptive thinking; `_claude_usage`), run the 4 test files and the suite, review, core gate. Every Claude call fails on anthropic 1.x until this lands. |
-| #21 cross_column masking | Tests written (2 failing); contract edited | `git apply ../_handoff/21-crosscol.patch` in the worktree, run tests, review, ship. |
-| #26 d04 `-999` (core) | Tests written (8 failing); detect.py hygiene applied | `git apply ../_handoff/26-d04.patch`; update README d04 line to `6/60 values are missing-data tokens ('-999', 'N/A') masquerading as data`, QA LIB-02 (drop Fails today) and LIB-05 (first example row 6 '-999'); suite; bench before/after (measured on a scratch copy: detect uF1 0.728 -> 0.761, survived 0.673 -> 0.696; units-numeric-sentinels d04 recall 0 -> 1.0; tx-sentinels unchanged); review; core gate. |
-| #25 d07 refusal (core) | Built; review FIX | Test-writer: a fix that clears its own grade by creating a different-grade residual is refused; test_invariants adds the visibility half (a left-over finding must be in needs_review). Builder: autoclean keeps a fix only if the other-grade residual was there before the fix; reword the two docstrings. Re-review, core gate. Bench can't show this (needs an independent spelling-variant corpus case). |
-| #20 reconcile masking | Built; review FIX | Test-writer: dtype pins (tz-aware, categorical, Int64 vs NaN, string NA, bool vs 1/0) and the over-claiming test docstring. Builder: say the receipt catches a wrong changed count (not a count-preserving swap), rename the badge to "receipt: verified". Re-review, ship. |
-| #34 main fallback | Built (2 tests pass, suite green) | Review, ship. |
-| #27 skill multiline (core) | Tests written (13 failing) | Builder (single-pass `_unscalar`, standard escapes), review, core gate. The issue's Done-when 4 command is wrong (`skills.load` takes the folder). |
-| #33 retire ingest | Tests written (7 failing) | Builder (read_url stamps lineage, refuses non-web schemes incl. redirects, kernel guard with getattr, delete ingest.py), review, ship. |
-| #19 clean card masking | Scouted | Tests then build. Decisions taken: clip but don't mask header names in d18 renames; pass the deferred `reason` through `redact_text`. |
+| #27 skills multiline (core) | committed on its branch, rebased, suite green, reviewed SHIP IT | Aarmen's yes on the skills.py diff, then push |
+| #13 Claude path (core) | built except 3 llm.py hunks | apply `_handoff/13-apply_blocked.py` pairs with Edit; review; core gate |
+| #19 clean card masking | built except 1 api.py edit | apply `_handoff/19-api-edit.md`; review; ship |
+| #21 cross_column masking | tests red | apply `_handoff/21-crosscol.patch` with Edit; review; ship |
+| #25 d07 refusal + leftovers (core) | 4 tests red | build from `_handoff/25-plan.md`; bench; review; core gate |
+| #26 d04 `-999` (core) | 8 tests red | apply `_handoff/26-d04.patch` after #25; README/QA from real output; bench; core gate |
+| #31 autonomy levels out of governance (core: one loop.py import) | 1 test written | rerun the test-writer (one test per edit), build, core gate |
+| #32 delete governance | not started | after #31 |
+| #33 retire ingest | text edits done, ingest.py removed (staged) | apply `_handoff/33-blocked-edits.md`; review; ship |
 
-- **Not started (13):** #29, #30, #31, #32, #35 (retirements; #29 -> #30 order, #31 -> #32), #36 to #43 (docs and cleanup). Shared-file order is in the Stage A spec.
-- **Follow-ups to put to Aarmen** (found in reviews, not filed): tests that call `main()` without stubbing `load_dotenv` can load the real key file (python-dotenv searches upward from `__main__.py`); masking replaces non-PII literals in flagged evidence (`'N/A'`, column names) and drops padding from whitespace samples; `scripts/export_skills.py` path check misses a path after an escaped separator once #27 lands; an independent spelling-variant corpus case for d07 (eval type); rowdiff misses changes in int64 above 2**53 next to floats; `prompts.py` still says both-tag replies are bounced (behaviour type).
+- **Core batch for Aarmen, one sitting:** #27, #13, #25, #26, #31. Each diff with its tradeoffs.
+- **Decided 2026-10-17 (recorded on the issues):** #25 clean lists every finding left after its fixes in needs_review; #19 CleanSummary.__repr__ masks a deferred reason; #20 True vs 1 is not a change; #37, #39, #30 MCP description changes ship unmeasured (behaviour type, no eval tooling yet). Aarmen asked to work autonomously: take the recommended option, record it, hold only core diffs.
+- **Follow-ups filed (not Stage A):** #44 to #48; #49 export path check after an escaped break; #50 Action/MCP format list; #51 headless clean can run a model-written d09 row deletion unasked (core, Aarmen picks the shape); #52 headless fixes recorded `unattended: false`; #53 the key file is searched from crivo's install dir, not the cwd; #54 headless clean exits 0 when it never ran.
 - **Changelog fragments:** `/ship` writes `changes/<n>.<kind>.md`. #3, #6, #7, #11 shipped before the rule and have none; add them before the next `/promote`.
 
 ## What we've learned
