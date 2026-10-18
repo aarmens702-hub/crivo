@@ -19,7 +19,7 @@
 |---|---|---|
 | A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **Done:** 39 of 39, on `main` as v0.2.0 (2026-10-17) |
 | Eval tooling | Record and replay, the eval ledger, `/eval`, the eval-author and `guard_reads`, `check_locks` and `leak_scan` in CI, gates by work type. 20 issues, #64 to #83 (`specs/2026-10-17-eval-tooling.md`) | **Filed 2026-10-17; next.** ED5, ED7, ED8 owed |
-| 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | After A |
+| 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | **Filed 2026-10-17:** `specs/2026-10-17-stage-0-foundation.md`, 162 rows: #86 to #232 plus 15 open issues folded in. 72 rows wait on 38 owner decisions. After the eval tooling |
 | 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, charts and descriptive analysis, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
 | 2 | Two tracks in parallel. 2a the analyst toolkit: statistics, drivers, segments and cohorts, forecasting, anomalies, dashboards. 2b learning: System 1 as the loop's first filter, skills, the glossary, saved answers, `crivo verify`, the nightly skill loop | |
 | 3 | Backed SQL and scale: databases, pushdown, SQL checks, relational and temporal checks | |
@@ -31,7 +31,9 @@
 ### Next, 2026-10-17 (night): pick up here
 - **Stage A is on `main`:** `/qa-pass` on a fresh install of `dev` passed 41 of 42 unpaid cases (BENCH-01's stale line fixed in #61; AN-07 and AN-08 skipped, paid), then `/promote` merged PR #62 and tagged **v0.2.0**. The README's Action example pins `@v0.2.0`.
 - **The eval tooling is filed** as #64 to #83 (EV1 to EV20), from the proposal Aarmen approved on 2026-10-17. ED1 to ED4 and ED6 were taken as recommended (recorded on the issues); ED5 (paid budget), ED7 (where sealed sets live) and ED8 (plan rule 10) are Aarmen's. EV1 (#64) is core.
-- **Stage 0 is being drafted** into a WRAP spec and issues (`specs/2026-10-17-stage-0-foundation.md`).
+- **Stage 0 is filed** (`specs/2026-10-17-stage-0-foundation.md`): 162 rows, #86 to #232 plus a Stage 0 comment on #44 to #47, #51 to #59, #84 and #85. 51 core rows in 18 review sittings; 72 rows blocked on 38 owner decisions (grouped in five sittings in the spec). The spec's estimate: about three months at Stage A's pace, with a split into two sub-gates offered.
+- **Eval tooling in progress:** #65 (`--record`) and #67 (the ledger) shipped; #64 (served model, core) and #84 (no model code runs in a preview before approval, core) wait for Aarmen's yes; #68 (guard_reads) in its review fix round; #66 and #74 started.
+- **Security bugs found 2026-10-17:** #84 (fixed on its branch, core) and #85 (a proposed skill runs before its admission gate; needs Aarmen's pick).
 - **Small follow-up:** #63 (the README sample report omits its last two lines).
 
 ### Stage A, done 2026-10-17
