@@ -1,6 +1,6 @@
 """Arc W3/H3: the perf budget — a regression net, not a benchmark. Measured
 2026-09-03 on the dev machine: detect_all over 300k transaction rows in 2.6s
-with all 26 signals. The bar is 5x that, so a future detector that silently
+with all 25 single-file signals. The bar is 5x that, so a future detector that silently
 turns diagnose() quadratic fails here before it ships, while CI machine
 noise never does."""
 

@@ -1,5 +1,7 @@
 # Publishing runbook — crivo
 
+> **Superseded as sequencing by `specs/2026-10-14-the-plan.md` (2026-10-17).** PyPI publishing is Stage 5, with trusted publishing (decision D22). Keep this file for its build and check commands only.
+
 Updated 2026-08-31 after the rename and the MIT license landing. The old
 blocker (license) is resolved; nothing blocks a publish except doing it.
 Publishing also *locks the name*: `crivo` on PyPI is first-come, and it is
@@ -14,9 +16,7 @@ only provisionally ours until 0.1.0 is uploaded.
 
 Still Aarmen's, before or right after publish:
 
-- [ ] Rename the GitHub repo: Settings > General > Repository name > `crivo`.
-      GitHub redirects the old URLs. Then update `[project.urls]` in
-      `pyproject.toml` and the README install line + CI badge path.
+- [x] Rename the GitHub repo to `crivo` (done 2026-10-14; `[project.urls]` and the README updated).
 
 ## 1. Version
 

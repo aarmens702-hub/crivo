@@ -175,7 +175,7 @@ differing columns at all. Both halves now hold.
 
 ## What it does not do
 
-- It does not fix everything. Two of the twenty-two diseases — cross-field
+- It does not fix everything. Two of the twenty-six diseases — cross-field
   contradictions and statistical outliers — are **indicators**: detected,
   evidenced, and never auto-fixed, because a spike in a wildfire dataset is
   real data, not an error.
@@ -186,8 +186,10 @@ differing columns at all. Both halves now hold.
 
 ## Measured, not asserted
 
-- Detection runs all 21 single-file signals on a 150,000 × 80 frame in **9.5
-  seconds**, worst case (a frame where every text column is dirty three ways).
+- Detection runs every single-file signal over 300,000 transaction rows in
+  **2.6 seconds** on the author's machine (2026-09-03).
+  `tests/test_perf_budget.py` fails if it takes more than 15 seconds, about
+  six times that.
 - A live cleaning run on Raha beers scored **P=0.99, R=0.78, F1=0.87** against
   the benchmark's ground truth. The recall gap is fully accounted for: 693
   cells from a fix deliberately skipped at the gate, and 254 from the two

@@ -37,7 +37,7 @@ crivo has two halves. The **library** (`crivo.read`, `diagnose`, `clean` and the
 - `kernel/`: `client.py` (host side, protocol v1, env allowlist), `supervisor.py` (drives the IPython kernel), `bootstrap.py` (the kernel start cell).
 
 **Repo**
-- `tests/`: the keyless suite (`conftest.py` quarantines provider keys). `bench/`: the Proving Ground (injectors, truth, scorer, runner, `RESULTS.md`). `skills/`: admitted skills and `ledger.json`. `scripts/`: dataset fetchers and one-off tools. `specs/`: a design spec per phase. `docs/`: these docs. `docker/`: the sandbox image.
+- `tests/`: the keyless suite (`conftest.py` quarantines provider keys). `bench/`: the Proving Ground (injectors, truth, scorer, runner, `RESULTS.md`). `skills/`: admitted skill folders. The ledger (`skills/ledger.json`) is local and git-ignored until the Stage 2 rebuild commits it. `scripts/`: dataset fetchers and one-off tools. `specs/`: a design spec per phase. `docs/`: these docs. `docker/`: the sandbox image.
 
 ## Data flow
 ```
@@ -77,7 +77,7 @@ CLEAN:    Session.clean(var) -> detect_all in kernel -> router.route per finding
 - **Verify or revert.** Detector re-run, row invariant and untouched-column hashes, or the frame is restored (`specs/2026-08-11-p1-clean-mode-design.md`).
 - **The detector is the verifier** (`detect_one`), so the two cannot drift (`detect.py`).
 - **Skill admission is test-gated and human-gated**, with probation, promotion and retirement (`specs/2026-08-12-p2-skill-harness-design.md`).
-- **Recursion is capped at depth 1** (p0 spec).
+- **Skills never breed skills.** Only a fix the model wrote can be offered as a skill; a fix a skill produced never is (`loop._skill_pass`). crivo makes no recursive model calls (p0 spec).
 - **Provenance is a DAG:** a claim is trusted when it is reachable from raw bytes with passing checks on every step (`specs/2026-08-12-p3-trust-layer-design.md`).
 - **Autonomy levels:** `autonomous` (default) applies AUTO findings with a deterministic fixer unattended, `careful` gates them, `report-only` changes nothing; no level decides a HUMAN finding or admits a skill. The MCP server runs `careful` explicitly (`specs/2026-09-05-autonomy-default-design.md`).
 - **No capability ships ahead of the instrument that measures it.** PyPI publish is Stage 5 (decision D22), after correctness and capability (rule 1 of `specs/2026-10-14-the-plan.md`).

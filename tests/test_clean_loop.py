@@ -461,7 +461,7 @@ def test_a_skill_that_fails_verification_hands_back_to_the_model(stocked, monkey
 
 
 def test_a_skill_applied_fix_never_spawns_another_skill(stocked, monkeypatch):
-    """AC7: the depth-1 recursion cap. Skills do not breed skills."""
+    """AC7: skills never breed skills."""
     gen_stub = counting_generate([])
     monkeypatch.setattr(llm, "generate", gen_stub)
     entry = stocked.library.register("fix-sentinel-missing", disease=4)

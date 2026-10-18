@@ -490,9 +490,10 @@ def build_server():
 
     @app.tool()
     def diagnose_file(path: str) -> str:
-        """Report what is wrong with a CSV/parquet file: 22 named data-quality
-        checks (money as text, mixed date formats, sentinels, encoding damage,
-        duplicates, contradictions). Returns JSON with findings, checks that
+        """Report what is wrong with a data file (csv, tsv or parquet): 25
+        named data-quality checks (money as text, mixed date formats,
+        sentinels, encoding damage, duplicates, contradictions). A 26th,
+        schema drift, needs several files and does not run here. Returns JSON with findings, checks that
         ran clean, and checks that could not run. Free, keyless, read-only —
         always safe to call first. The path must be inside the server's
         configured root (CRIVO_MCP_ROOT, default its launch directory)."""

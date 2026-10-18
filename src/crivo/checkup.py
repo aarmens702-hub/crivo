@@ -1,8 +1,8 @@
 """`crivo diagnose <file>` — what is wrong with this data, for free.
 
 Every other surface in this project needs an API key, a running kernel, and a
-decision to let an agent touch your data. This one needs a file. It runs the
-same 21 single-file signals the CLEAN mode runs, in-process, with no model
+decision to let an agent touch your data. This one needs a file. It runs
+every single-file signal the CLEAN mode runs, in-process, with no model
 involved anywhere — so a stranger can point it at their own CSV and see whether
 the diagnosis is any good before trusting anything else.
 

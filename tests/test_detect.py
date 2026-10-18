@@ -1,4 +1,4 @@
-"""Tests for the 22-disease detection engine (detect.py).
+"""Tests for the 26-disease detection engine (detect.py).
 
 Per detector: one synthetic frame that trips it and one clean frame that must
 not (false-positive discipline is asserted, not assumed). Integration tests run
