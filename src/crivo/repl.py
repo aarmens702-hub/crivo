@@ -127,18 +127,21 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
             if line == "/trace":
                 print_fn(_LAST_TRACE[0] if _LAST_TRACE else "no stored traceback")
                 continue
+            # auto-run is the operator trusting the analyst's own query cells;
+            # a fix, a plan or a skill admission is a judgement call and always
+            # waits
             try:
                 with _TurnInterrupts(print_fn):
                     if line.split()[:1] == ["/load"]:
                         _load(session, line, print_fn)
                     elif line.split()[:1] == ["/clean"]:
-                        _clean(session, line, auto_run, input_fn, print_fn)
+                        _clean(session, line, input_fn, print_fn)
                     elif line.split()[:1] == ["/skills"]:
                         _skills(session, line, print_fn)
                     elif line.split()[:1] == ["/why"]:
                         _why(session, line, print_fn)
                     elif line.split()[:1] == ["/clean-family"]:
-                        _clean_family(session, line, auto_run, input_fn, print_fn)
+                        _clean_family(session, line, input_fn, print_fn)
                     else:
                         _drive(session.run_turn(line), auto_run, input_fn, print_fn)
             except (EOFError, KeyboardInterrupt):
@@ -304,12 +307,12 @@ def _load(session, line: str, print_fn) -> None:
     session.load(parts[1], name)
 
 
-def _clean(session, line: str, auto_run: bool, input_fn, print_fn) -> None:
+def _clean(session, line: str, input_fn, print_fn) -> None:
     parts = line.split()
     if len(parts) < 2:
         print_fn("usage: /clean <variable>")
         return
-    _drive(session.clean(parts[1]), auto_run, input_fn, print_fn)
+    _drive(session.clean(parts[1]), False, input_fn, print_fn)
 
 
 def _skills(session, line: str, print_fn) -> None:
@@ -338,14 +341,14 @@ def _skills(session, line: str, print_fn) -> None:
         )
 
 
-def _clean_family(session, line: str, auto_run: bool, input_fn, print_fn) -> None:
+def _clean_family(session, line: str, input_fn, print_fn) -> None:
     """/clean-family <glob> <name>: harmonize a family, then clean each slice."""
     parts = line.split()
     if len(parts) < 3:
         print_fn('usage: /clean-family "<glob>" <name>')
         return
     pattern = parts[1].strip("\"'")
-    _drive(session.clean_family(pattern, parts[2]), auto_run, input_fn, print_fn)
+    _drive(session.clean_family(pattern, parts[2]), False, input_fn, print_fn)
 
 
 def _why(session, line: str, print_fn) -> None:

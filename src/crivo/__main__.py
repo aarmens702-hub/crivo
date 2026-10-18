@@ -15,7 +15,10 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(prog="crivo")
     parser.add_argument(
-        "--auto-run", action="store_true", help="skip the accept/run gate (dev only)"
+        "--auto-run",
+        action="store_true",
+        help="run the analyst's own query cells without asking (dev only); fix "
+        "gates, plans and skill admissions still wait for a person",
     )
     parser.add_argument(
         "--workspace", default="workspace", help="session workspace directory"
@@ -190,9 +193,9 @@ def main() -> int:
         workspace=args.workspace,
         data_dir=args.data_dir,
         docker=args.docker,
-        # previews cost one kernel cell per gate and nobody reads them when
-        # every gate auto-approves
-        preview=not args.auto_run,
+        # the clean gates a person still answers under --auto-run need their
+        # preview
+        preview=True,
         resume=args.resume,
         autonomy=args.autonomy,
     )

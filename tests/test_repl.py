@@ -983,3 +983,280 @@ def test_a_gate_with_no_title_and_no_code_is_still_reported() -> None:
 
     assert [d.action for d in session.decisions] == ["skip"]
     assert summary["needs_human"] == [""]
+
+
+# --- #35: --auto-run trusts the analyst's own query cells and nothing else ---
+
+
+def test_auto_run_still_asks_a_person_at_a_skill_admission() -> None:
+    """#35: --auto-run answered every gate with run, whatever its grade, and
+    /clean passed the flag through. So the skill-admission gate, graded HUMAN
+    because governance is never unattended, was approved with nobody asked,
+    and skills.save and library.register followed. The flag trusts the
+    analyst's own query cells; an admission waits for a person, and the
+    person's answer is the one the session receives."""
+    admission = GateRequest(
+        "def fix(df, cols):\n    return df.replace({c: {-999: None} for c in cols})",
+        1,
+        title=(
+            "admit skill fix-sentinel-missing · d4 · reproduces the case it came from"
+        ),
+        preview="amount: 143 of 5,210 cells change",
+        grade="HUMAN",
+    )
+    fake = FakeSession(script=[admission, CardReady(FakeCard("# clean report"))])
+    input_fn = scripted_input("/clean df", "s", "/quit")
+
+    run_repl(fake, auto_run=True, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert GATE_PROMPT in input_fn.prompts, "a person must be asked at the admission"
+    assert fake.decisions == [GateDecision("skip")], (
+        "the person's skip, not an unattended run, reaches the session"
+    )
+    assert fake.cleans == ["df"]
+    assert fake.questions == [], "the gate answer must not leak out as a question"
+
+
+class RoutedSession(FakeSession):
+    """FakeSession with one script per command, so a question's gates and a
+    clean's gates are told apart by which generator received the answer."""
+
+    def __init__(
+        self,
+        turn: list[Event] | None = None,
+        clean: list[Event] | None = None,
+        family: list[Event] | None = None,
+    ) -> None:
+        super().__init__()
+        self.scripts = {
+            "turn": turn or [],
+            "clean": clean or [],
+            "family": family or [],
+        }
+        self.answers: dict[str, list] = {"turn": [], "clean": [], "family": []}
+        self.families: list[tuple[str, str]] = []
+
+    def _play(self, kind: str) -> Generator[Event, GateDecision | None, None]:
+        for event in self.scripts[kind]:
+            self.answers[kind].append((yield event))
+
+    def run_turn(self, question: str) -> Generator[Event, GateDecision | None, None]:
+        self.questions.append(question)
+        yield from self._play("turn")
+
+    def clean(self, var: str) -> Generator[Event, GateDecision | None, None]:
+        self.cleans.append(var)
+        yield from self._play("clean")
+
+    def clean_family(
+        self, pattern: str, name: str
+    ) -> Generator[Event, GateDecision | None, None]:
+        self.families.append((pattern, name))
+        yield from self._play("family")
+
+    def decided(self, kind: str) -> list[GateDecision]:
+        return [a for a in self.answers[kind] if isinstance(a, GateDecision)]
+
+
+_SKIP = GateDecision("skip")
+
+# every gate the clean flows yield, each answered by the person in its own way
+# so the answer that lands is visibly theirs. The harmonize gate carries no
+# grade, like a QUERY gate: the route is the command, not the grade (#35).
+_JUDGEMENT_GATES = [
+    pytest.param(
+        "/clean df",
+        GateRequest(
+            "df = fix_trailing_space(df, ['city'])",
+            1,
+            title="autoclean 1/4 · d03 trailing-space · AUTO · 12 cells end in ' '",
+            grade="AUTO",
+        ),
+        ("r",),
+        GateDecision("run"),
+        id="AUTO-fix",
+    ),
+    pytest.param(
+        "/clean df",
+        GateRequest(
+            "def fix_label_variants(df):\n    return df",
+            1,
+            title=(
+                "fix 2/4 · label-variants · GATE · conf 0.81 · "
+                "'NY', 'N.Y.' and 'new york' in state"
+            ),
+            grade="GATE",
+        ),
+        ("j", "keep N.Y. apart"),
+        GateDecision("reject", "keep N.Y. apart"),
+        id="GATE-fix",
+    ),
+    pytest.param(
+        "/clean df",
+        GateRequest(
+            "def fix_conflicting_duplicates(df):\n    return df",
+            1,
+            title=(
+                "fix 3/4 · conflicting-duplicates · HUMAN · conf 0.66 · "
+                "id 00417 has two amounts"
+            ),
+            grade="HUMAN",
+        ),
+        ("s",),
+        _SKIP,
+        id="HUMAN-fix",
+    ),
+    pytest.param(
+        "/clean df",
+        GateRequest(
+            "| step | finding | executor |\n| 1 | d03 | autoclean |",
+            1,
+            title="approve plan v1: 3 steps (2 autoclean, 1 model)",
+            grade="PLAN",
+        ),
+        ("s",),
+        _SKIP,
+        id="plan",
+    ),
+    pytest.param(
+        '/clean-family "data/sales_*.csv" sales',
+        GateRequest(
+            "def harmonize(slices):\n    return slices",
+            1,
+            title="harmonize 3 slices of sales · GATE · 2 drift finding(s)",
+        ),
+        ("s",),
+        _SKIP,
+        id="ungraded-harmonize",
+    ),
+    pytest.param(
+        '/clean-family "data/sales_*.csv" sales',
+        GateRequest(
+            "def fix(df, cols):\n    return df",
+            1,
+            title=(
+                "replay harmonize-sales · proven · GATE · "
+                "a confirmed mapping over every slice of sales"
+            ),
+            grade="GATE",
+        ),
+        ("j", "the 2024 slice renamed a column"),
+        GateDecision("reject", "the 2024 slice renamed a column"),
+        id="GATE-replay",
+    ),
+]
+
+
+@pytest.mark.parametrize(("command", "gate", "typed", "expected"), _JUDGEMENT_GATES)
+def test_auto_run_still_asks_a_person_at_every_clean_gate(
+    command: str, gate: GateRequest, typed: tuple[str, ...], expected: GateDecision
+) -> None:
+    """#35: a fix (AUTO, GATE or HUMAN), a plan, a harmonize and a replay are
+    judgement calls, so under --auto-run each still stops at the gate prompt,
+    and the session gets the person's answer, not an unattended run."""
+    kind = "family" if command.startswith("/clean-family") else "clean"
+    session = RoutedSession(**{kind: [gate, CardReady(FakeCard("# clean report"))]})
+    input_fn = scripted_input(command, *typed, "/quit")
+
+    run_repl(session, auto_run=True, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert input_fn.prompts.count(GATE_PROMPT) == 1, (
+        f"the {gate.grade or 'ungraded'} gate must ask a person under --auto-run"
+    )
+    assert session.decided(kind) == [expected]
+    assert session.questions == [], "the gate answer must not leak out as a question"
+
+
+def test_auto_run_still_runs_query_cells_on_either_side_of_a_clean() -> None:
+    """#35, the legitimate case beside the refusals above: restricting the flag
+    must not make it ask at the analyst's own query cells. In one session the
+    query cells of a question run unprompted both before and after a /clean
+    whose fix gate a person answers, so the clean neither borrows the flag nor
+    switches it off."""
+    query_cells = [
+        GateRequest("df.shape", 1),
+        GateRequest("df['amount'].describe()", 2),
+        CardReady(FakeCard()),
+    ]
+    fix_gate = GateRequest(
+        "df = fix_sentinel_missing(df)",
+        1,
+        title="fix 1/1 · sentinel-missing · AUTO · conf 0.97 · 143 cells are '-999'",
+        grade="AUTO",
+    )
+    session = RoutedSession(
+        turn=query_cells, clean=[fix_gate, CardReady(FakeCard("# clean report"))]
+    )
+    input_fn = scripted_input(
+        "how many rows?", "/clean df", "s", "and the amounts?", "/quit"
+    )
+
+    run_repl(session, auto_run=True, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert session.decided("clean") == [GateDecision("skip")], (
+        "the clean's gate is the person's call"
+    )
+    assert session.decided("turn") == [GateDecision("run")] * 4, (
+        "every query cell, before and after the clean, runs without a prompt"
+    )
+    assert input_fn.prompts.count(GATE_PROMPT) == 1, "only the clean's gate asks"
+    assert session.questions == ["how many rows?", "and the amounts?"]
+
+
+def test_auto_run_with_nobody_at_a_clean_gate_skips_it_and_never_runs_it() -> None:
+    """#35: `yes | crivo --auto-run` used to approve every clean gate, because
+    the flag answered before stdin was read. A clean gate under the flag is a
+    person's call, so the driver's own bounds apply to it: an answer nobody
+    understood is not consent, the gate is skipped, the clean runs to its own
+    end, and the driver leaves."""
+    from crivo.repl import GATE_TRIES, GAVE_UP_NOTE
+
+    session = RoutedSession(
+        clean=[
+            GateRequest(
+                "def fix_conflicting_duplicates(df):\n    return df",
+                1,
+                title="fix 1/1 · conflicting-duplicates · HUMAN · conf 0.66",
+                grade="HUMAN",
+            )
+        ]
+    )
+    asked: list[str] = []
+
+    def nobody_there(prompt: str = "") -> str:
+        asked.append(prompt)
+        if len(asked) > 100:
+            raise AssertionError("the gate re-prompted without bound")
+        if prompt == PROMPT:
+            return "/clean df" if asked.count(PROMPT) == 1 else "/quit"
+        return "y"
+
+    run_repl(session, auto_run=True, input_fn=nobody_there, print_fn=RecordingPrint())
+
+    assert session.decided("clean") == [GateDecision("skip", GAVE_UP_NOTE)], (
+        "an unanswered judgement call is skipped, never run"
+    )
+    assert asked.count(GATE_PROMPT) == GATE_TRIES
+    assert session.closed
+
+
+def test_auto_run_still_builds_the_preview_a_person_answers_by(
+    monkeypatch, tmp_path
+) -> None:
+    """#35: --auto-run turned previews off, because every gate auto-approved
+    and nobody would read one. The clean gates now wait for a person, and a
+    person answering one without its preview is back to executing pandas in
+    their head. The flag itself still reaches the REPL."""
+    main, built = _main_up_to_the_repl(monkeypatch, tmp_path)
+    handed: list[dict] = []
+    monkeypatch.setattr("crivo.repl.run_repl", lambda session, **kw: handed.append(kw))
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    monkeypatch.setattr("sys.argv", ["crivo", "--auto-run"])
+
+    rc = main()
+
+    assert rc == 0
+    assert [kw.get("preview") for kw in built] == [True], (
+        "the gates a person still answers need their preview"
+    )
+    assert handed == [{"auto_run": True}], "query cells still auto-run"
