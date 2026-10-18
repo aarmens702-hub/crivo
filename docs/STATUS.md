@@ -40,11 +40,11 @@
 | #21 cross_column masking | tests red | apply `_handoff/21-crosscol.patch` with Edit; review; ship |
 | #25 d07 refusal + leftovers (core) | 4 tests red | build from `_handoff/25-plan.md`; bench; review; core gate |
 | #26 d04 `-999` (core) | 8 tests red | apply `_handoff/26-d04.patch` after #25; README/QA from real output; bench; core gate |
-| #31 autonomy levels out of governance (core: one loop.py import) | 1 test written | rerun the test-writer (one test per edit), build, core gate |
-| #32 delete governance | not started | after #31 |
+| #31 autonomy levels out of governance (core: one loop.py import) | committed on its branch, rebased, suite green, reviewed SHIP IT | Aarmen's yes on the loop.py line, then push |
+| #32 delete governance | committed, stacked on #31, reviewed, suite green | push right after #31 |
 | #33 retire ingest | text edits done, ingest.py removed (staged) | apply `_handoff/33-blocked-edits.md`; review; ship |
 
-- **Core batch for Aarmen, one sitting:** #27, #13, #25, #26, #31. Each diff with its tradeoffs.
+- **Core batch for Aarmen:** #27 and #31 are ready now (each passes its review); #13, #25, #26 after the restart. Each diff with its tradeoffs.
 - **Decided 2026-10-17 (recorded on the issues):** #25 clean lists every finding left after its fixes in needs_review; #19 CleanSummary.__repr__ masks a deferred reason; #20 True vs 1 is not a change; #37, #39, #30 MCP description changes ship unmeasured (behaviour type, no eval tooling yet). Aarmen asked to work autonomously: take the recommended option, record it, hold only core diffs.
 - **Follow-ups filed (not Stage A):** #44 to #48; #49 export path check after an escaped break; #50 Action/MCP format list; #51 headless clean can run a model-written d09 row deletion unasked (core, Aarmen picks the shape); #52 headless fixes recorded `unattended: false`; #53 the key file is searched from crivo's install dir, not the cwd; #54 headless clean exits 0 when it never ran.
 - **Changelog fragments:** `/ship` writes `changes/<n>.<kind>.md`. #3, #6, #7, #11 shipped before the rule and have none; add them before the next `/promote`.
