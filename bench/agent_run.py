@@ -164,15 +164,26 @@ def _call_stats(path: Path) -> dict:
         knowably short as if it were complete. The span is emitted from
         telemetry.span's `finally` while llm.generate maps usage only after
         the stream finishes, so a cancelled or failed call leaves one behind.
+
+    served_models is the sorted, distinct gen_ai.response.model ids the
+    provider said answered the case's calls (EV1), with the same honesty:
+    None when no telemetry was readable, [] when spans were read and none
+    named a model.
     """
     try:
         lines = path.read_text().splitlines()
     except OSError:
-        return {"count": None, "model_wait_s": None, "new_work_tokens": None}
+        return {
+            "count": None,
+            "model_wait_s": None,
+            "new_work_tokens": None,
+            "served_models": None,
+        }
     count = 0
     unpriced = 0
     wait = 0.0
     sums: dict = {}
+    served: set = set()
     for line in lines:
         try:
             span = json.loads(line)
@@ -185,6 +196,9 @@ def _call_stats(path: Path) -> dict:
         if isinstance(dur, (int, float)):
             wait += dur
         attrs = span.get("attrs") or {}
+        model = attrs.get("gen_ai.response.model")
+        if isinstance(model, str) and model:
+            served.add(model)
         if not all(isinstance(attrs.get(a), (int, float)) for a in _NEW_WORK_ATTRS):
             unpriced += 1
         for key, attr in _TOKEN_ATTRS:
@@ -192,6 +206,7 @@ def _call_stats(path: Path) -> dict:
             if isinstance(value, (int, float)):
                 sums[key] = sums.get(key, 0) + value
     stats = {"count": count, "model_wait_s": round(wait, 2), **sums}
+    stats["served_models"] = sorted(served)
     if unpriced:
         stats["new_work_tokens"] = None  # a call of unknown cost is in there
     else:

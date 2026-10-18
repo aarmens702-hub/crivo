@@ -261,9 +261,9 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
     The provider switch changes which client produces the stream and how one
     stream item becomes text; the watchdog around them is shared, because a
     hung stream hangs identically whoever serves it. Every call emits one
-    telemetry span (A0 R4) carrying model, duration, and usage when the
-    provider reports it, cache hit/miss tokens included, in DeepSeek's
-    meaning on every provider (input counts the cache hits).
+    telemetry span (A0 R4) carrying the model asked for, duration, and, when
+    reported, the model served and usage, cache hit/miss tokens included,
+    in DeepSeek's meaning on every provider (input counts the cache hits).
     """
     from crivo import telemetry
 
@@ -278,7 +278,12 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
         "gen_ai.client.call",
         **{"gen_ai.system": _provider(), "gen_ai.request.model": requested},
     ) as extra:
-        yield from _generate(messages, model, usage_box.append)
+        yield from _generate(  # served id kept on arrival, so a dead call names it
+            messages,
+            model,
+            usage_box.append,
+            lambda m: extra.setdefault("gen_ai.response.model", m),
+        )
         if _provider() == "claude":
             extra.update(_claude_usage(usage_box))
             return
@@ -294,7 +299,9 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
                     extra[dst] = value
 
 
-def _generate(messages: Iterable[dict], model: str | None, usage_sink) -> Iterator[str]:
+def _generate(
+    messages: Iterable[dict], model: str | None, usage_sink, model_sink
+) -> Iterator[str]:
     _cancel.clear()  # before create(), so a cancel while it opens still lands
     if _provider() == "faux":
         if not _faux_responses:
@@ -305,7 +312,7 @@ def _generate(messages: Iterable[dict], model: str | None, usage_sink) -> Iterat
         # one queued reply per call, through the same watchdog as the real
         # providers so a faux run exercises the code path callers get
         yield from _watched(
-            iter([_faux_responses.pop(0)]), lambda item: item, usage_sink
+            iter([_faux_responses.pop(0)]), lambda item: item, usage_sink, model_sink
         )
         return
 
@@ -325,7 +332,7 @@ def _generate(messages: Iterable[dict], model: str | None, usage_sink) -> Iterat
             thinking={"type": "adaptive", "display": "summarized"},
             stream=True,
         )
-        yield from _watched(stream, _claude_text, usage_sink)
+        yield from _watched(stream, _claude_text, usage_sink, model_sink)
         return
 
     # deepseek and the generic openai provider share the wire format; only
@@ -347,10 +354,10 @@ def _generate(messages: Iterable[dict], model: str | None, usage_sink) -> Iterat
         # The wall-clock checks below no longer assume that is enough on its own.
         timeout=Timeout(connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0),
     )
-    yield from _watched(stream, _deepseek_text, usage_sink)
+    yield from _watched(stream, _deepseek_text, usage_sink, model_sink)
 
 
-def _watched(stream, extract, usage_sink=None) -> Iterator[str]:
+def _watched(stream, extract, usage_sink=None, model_sink=None) -> Iterator[str]:
     """Enforce the call and stall budgets around any provider's stream.
 
     Consuming the stream happens on a background thread so both budgets below
@@ -411,6 +418,12 @@ def _watched(stream, extract, usage_sink=None) -> Iterator[str]:
                     usage = getattr(getattr(item, "message", None), "usage", None)
                 if usage is not None:
                     usage_sink(usage)
+            if model_sink is not None:
+                served = getattr(item, "model", None)
+                if served is None:  # Claude's message_start nests it
+                    served = getattr(getattr(item, "message", None), "model", None)
+                if isinstance(served, str) and served:
+                    model_sink(served)
             text = extract(item)
             if text is not None:
                 yield text

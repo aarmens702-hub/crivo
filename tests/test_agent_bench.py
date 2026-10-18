@@ -349,11 +349,12 @@ def test_run_case_points_telemetry_at_a_fresh_per_case_file_and_restores_env(
     assert not expected.exists(), "stale telemetry must be removed before the run"
     # new_work_tokens was pinned at 0 here, which is the bug: a case whose
     # telemetry reported nothing does not know what it cost, and the count and
-    # the wait do not know either
+    # the wait do not know either, nor which models served it
     assert row["calls"] == {
         "count": None,
         "model_wait_s": None,
         "new_work_tokens": None,
+        "served_models": None,
     }
 
 
@@ -426,6 +427,8 @@ def test_call_stats_sums_client_call_spans_and_tolerates_gaps(tmp_path):
         "cache_hit_tokens": 60,
         "cache_miss_tokens": 40,
         "new_work_tokens": None,
+        # spans were read and none named a served model
+        "served_models": [],
     }
     # no file, so nothing is known about this case: not the cost, and not the
     # calls or the wait either. Those two read 0 until the row said "unknown
@@ -434,7 +437,72 @@ def test_call_stats_sums_client_call_spans_and_tolerates_gaps(tmp_path):
         "count": None,
         "model_wait_s": None,
         "new_work_tokens": None,
+        "served_models": None,
     }
+
+
+def test_call_stats_lists_the_models_that_served_the_case_sorted(tmp_path):
+    """EV1 (#64): an agent-lane row lists every model the provider said
+    answered the case's calls, so an eval row can notice the model behind a
+    name changing mid-run. Each model is listed once, in sorted order rather
+    than the order the calls ran, and a call that died before its stream
+    named a model adds nothing."""
+    import json
+
+    tele = tmp_path / "case.jsonl"
+    asked = {"gen_ai.system": "deepseek", "gen_ai.request.model": "deepseek-v4-pro"}
+    spans = [
+        {
+            "name": "gen_ai.client.call",
+            "dur_s": 7.4,
+            "attrs": {**asked, "gen_ai.response.model": "deepseek-v4-pro-1015"},
+        },
+        {"name": "kernel.exec", "dur_s": 0.3, "attrs": {}},
+        {
+            "name": "gen_ai.client.call",
+            "dur_s": 5.1,
+            "attrs": {**asked, "gen_ai.response.model": "deepseek-v4-pro-0926"},
+        },
+        {
+            "name": "gen_ai.client.call",
+            "dur_s": 6.2,
+            "attrs": {**asked, "gen_ai.response.model": "deepseek-v4-pro-1015"},
+        },
+        # cancelled while the request was still opening: no stream, no model
+        {"name": "gen_ai.client.call", "dur_s": 0.4, "attrs": asked},
+    ]
+    tele.write_text("\n".join(json.dumps(s) for s in spans) + "\n")
+
+    stats = agent_run._call_stats(tele)
+    assert stats.get("served_models") == [
+        "deepseek-v4-pro-0926",
+        "deepseek-v4-pro-1015",
+    ]
+
+
+def test_served_models_unknown_without_telemetry_and_empty_when_none_named(tmp_path):
+    """EV1 (#64), the same three-way honesty as the call count: with no
+    readable telemetry nobody knows which models served the case, so the
+    list is None. An empty list is a positive reading, that calls were read
+    and none of their streams named a model (decided on #64)."""
+    import json
+
+    tele = tmp_path / "unnamed.jsonl"
+    tele.write_text(
+        json.dumps(
+            {
+                "name": "gen_ai.client.call",
+                "dur_s": 2.0,
+                "attrs": {"gen_ai.system": "openai", "gen_ai.request.model": "m"},
+            }
+        )
+        + "\n"
+    )
+
+    assert agent_run._call_stats(tele).get("served_models") == []
+    unknown = agent_run._call_stats(tmp_path / "never-written.jsonl")
+    assert "served_models" in unknown, "a missing key reads as not tracked"
+    assert unknown["served_models"] is None
 
 
 def test_call_stats_reports_unknown_tokens_rather_than_zero(tmp_path):
