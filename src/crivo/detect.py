@@ -1,4 +1,4 @@
-"""The 22-disease detection engine (P1 R1-R4).
+"""The 26-disease detection engine (P1 R1-R4).
 
 Runs inside the kernel, next to the data: pandas + stdlib only, no imports from
 the rest of the package. Every signal is one function in REGISTRY, so the same
@@ -106,6 +106,28 @@ MISSING_TOKENS = frozenset(
 )
 NUMERIC_SENTINELS = (-9999, -999, -99, -9, -1, 0, 9999, 99999, 999999)
 SENTINEL_DATES = ("1900-01-01", "1899-12-30", "0001-01-01", "1970-01-01")
+# Numbers typed in for "no reading". Each is also a value a real column can
+# hold, so sentinel_mask names one only where the real values never reach it.
+STRONG_NUMERIC_SENTINELS = frozenset({"-9999", "-999", "9999", "99999", "999999"})
+
+
+def sentinel_mask(values: pd.Series) -> pd.Series:
+    """Cells standing in for a missing value: a missing-data token, or a strong
+    numeric placeholder ("-999") in a column whose other values are all
+    numbers and never reach it. Blanks and NaN are gaps, not values: they never
+    decide whether a placeholder is one. Positional, so a non-unique index is
+    safe; the mask comes back on `values`' own index."""
+    lowered = values.astype(str).str.strip().str.lower()
+    hits = lowered.isin(MISSING_TOKENS).to_numpy(copy=True)
+    strong = lowered.isin(STRONG_NUMERIC_SENTINELS).to_numpy()
+    if strong.any():  # the parse costs a pass; most columns hold no token
+        gap = values.isna().to_numpy() | (lowered == "").to_numpy()
+        real = pd.to_numeric(lowered[~(hits | strong | gap)], errors="coerce")
+        if len(real) and not real.isna().any():
+            token = pd.to_numeric(lowered[strong])
+            hits[strong] = ((token < real.min()) | (token > real.max())).to_numpy()
+    return pd.Series(hits, index=values.index)
+
 
 NUMERIC_WITH_UNIT = re.compile(
     r"^\s*[-+]?\s*[$€£¥]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
@@ -172,7 +194,6 @@ DATE_FAMILIES = (
     # refuses to count this family alone — see the guard there.
     ("epoch", re.compile(r"^(?:1\d{9}|20\d{8})$")),
 )
-SLOTTED_FAMILIES = {"slash", "dash", "dot"}
 
 DOMAIN_BOUNDS = (
     (re.compile(r"(^|_)age(_|$)"), 0.0, 120.0),
@@ -292,7 +313,7 @@ _VIEWS: dict = {}  # (id(df), kind, column) -> materialised column view
 
 
 def _cached(df, i, kind, build):
-    """Twenty-two signals read the same forty columns; deriving each view once
+    """Twenty-five signals read the same forty columns; deriving each view once
     per run is the difference between seconds and a minute on a wide frame.
     detect_all clears this, so a view never outlives the frame it came from."""
     key = (id(df), kind, i)
@@ -891,7 +912,7 @@ def _d04(df, cols) -> list:
         values = _text(df, i)
         if values is not None and len(values) >= 8:
             lowered = values.str.strip().str.lower()
-            hits = lowered.isin(MISSING_TOKENS) | lowered.isin(SENTINEL_DATES)
+            hits = sentinel_mask(values) | lowered.isin(SENTINEL_DATES)
             count = int(hits.sum())
             if count >= 2 and count < len(values):
                 # the tokens as they really appear, not normalised: the model
@@ -2311,10 +2332,6 @@ def detect_all(df, name: str = "df") -> dict:
     }
 
 
-# The stand-in autoclean._fix_headers writes over an 'Unnamed: N' or blank
-# header: a name that carries the position it sits at, which is what lets a
-# frozen target that vanished be matched positionally (_resolve_renames).
-GENERATED_NAME = re.compile(r"^column_(\d+)$")
 # The placeholder pandas writes for a header cell it could not read, built
 # from the column's POSITION. That number is the whole of the name's identity,
 # and it is what _fix_headers turns into "column_<N>".

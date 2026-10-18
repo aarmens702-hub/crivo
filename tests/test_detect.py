@@ -1245,6 +1245,164 @@ def test_d04_evidence_quotes_the_tokens_as_they_actually_appear() -> None:
     assert f["stats"]["tokens"] == ["N/A"]
 
 
+def _plant(readings: list, planted: dict) -> list:
+    """`readings` with the cells at the given positions overwritten."""
+    cells = list(readings)
+    for pos, cell in planted.items():
+        cells[pos] = cell
+    return cells
+
+
+# a weather-station export: forty readings either side of zero (-12.5 to
+# 30.4), so a typed-in -999 sits below a negative minimum
+_TEMPS = [f"{-12.5 + i * 1.1:.1f}" for i in range(40)]
+# the README example's shape: whole counts 3..42, with N/A beside the -999
+_UNITS = [str(3 + (i * 5) % 40) for i in range(40)]
+
+
+@pytest.mark.parametrize(
+    ("column", "cells", "tokens", "count"),
+    [
+        ("temp_c", _TEMPS + ["-999"] * 3, ["-999"], 3),
+        (
+            "units",
+            _plant(_UNITS, {6: "-999", 9: "N/A", 19: "-999", 28: "N/A", 33: "-999"})
+            + ["N/A"],
+            ["-999", "N/A"],
+            6,
+        ),
+    ],
+    ids=["temps-either-side-of-zero", "counts-beside-n/a"],
+)
+def test_d04_names_a_typed_in_minus_999_in_a_numeric_text_column(
+    column, cells, tokens, count
+) -> None:
+    """Regression for #26. d04's text branch matched only the word-like
+    missing tokens, so a typed-in "-999" in a column of numbers stored as text
+    was never named, and load_example's own planted "-999" went unreported. A
+    missing token in the same column is not a number, and must not stop the
+    -999 being judged against the real readings."""
+    res = detect_all(pd.DataFrame({column: cells}))
+    found = _of(res, 4)
+    assert [f["columns"] for f in found] == [[column]]
+    (f,) = found
+    assert "-999" in f["stats"]["tokens"]
+    assert f["stats"]["tokens"] == tokens
+    assert f["stats"]["sentinel_count"] == count
+    assert f["grade"] == "AUTO"
+    assert "-999" in f["evidence"]
+
+
+@pytest.mark.parametrize(
+    ("column", "cells", "tokens"),
+    [
+        # two loggers on one gauge: one writes -999 for a dropout, one -9999.
+        # Judged against -9999, a -999 looks inside the range and is missed.
+        (
+            "rain_mm",
+            _plant(
+                [f"{i * 0.7:.1f}" for i in range(44)],
+                {4: "-999", 11: "-9999", 25: "-999", 38: "-9999"},
+            ),
+            ["-999", "-9999"],
+        ),
+        # a footfall counter: 9999 and 99999 both mean "no count". Judged
+        # against 99999, a 9999 looks inside the range and is missed.
+        (
+            "visitors",
+            _plant(
+                [str(120 + (i * 37) % 731) for i in range(44)],
+                {2: "9999", 15: "99999", 27: "9999", 40: "99999"},
+            ),
+            ["9999", "99999"],
+        ),
+    ],
+    ids=["below-the-minimum", "above-the-maximum"],
+)
+def test_d04_names_two_strong_placeholders_in_one_column(column, cells, tokens) -> None:
+    """Regression for #26. Each placeholder is judged against the column's
+    real values, never against the other placeholder, so both are named."""
+    found = _of(detect_all(pd.DataFrame({column: cells})), 4)
+    assert [f["stats"]["tokens"] for f in found] == [tokens]
+    assert found[0]["stats"]["sentinel_count"] == 4
+    assert found[0]["grade"] == "AUTO"
+
+
+# used-car listings in dollars, up to 20000; 9999 is a real price point here
+_PRICES = [
+    "4500",
+    "7999",
+    "9999",
+    "12500",
+    "18995",
+    "20000",
+    "6250",
+    "9999",
+    "15400",
+    "3200",
+    "11999",
+    "9999",
+] * 3
+
+
+@pytest.mark.parametrize(
+    ("unpriced", "tokens"),
+    [([], []), (["N/A", "N/A"], [["N/A"]])],
+    ids=["numbers-only", "beside-n/a"],
+)
+def test_d04_leaves_a_legitimate_9999_alone(unpriced, tokens) -> None:
+    """Pins the legitimate case beside #26's new catch: a strong placeholder
+    token is a placeholder only when the column's real values never reach it.
+    Here the prices run to 20000, so 9999 is a price, and the N/A beside it is
+    still named on its own."""
+    frame = pd.DataFrame({"list_price": _PRICES + unpriced})
+    found = _of(detect_all(frame), 4)
+    assert [f["stats"]["tokens"] for f in found] == tokens
+    assert all("9999" not in f["evidence"] for f in found)
+
+
+@pytest.mark.parametrize(
+    ("column", "cells"),
+    [
+        # ledger adjustments run -5000..5000, so -999 is a real adjustment
+        (
+            "balance_change",
+            [
+                "-5000",
+                "-2500.00",
+                "-999",
+                "-120.50",
+                "0",
+                "45.10",
+                "999",
+                "2500",
+                "5000",
+                "-999",
+                "310.25",
+                "-999",
+            ]
+            * 3,
+        ),
+        # the bench's tx-sentinels shape: the other values are ids, not
+        # numbers, so the column gives -999 no range to fall outside of
+        (
+            "txn_id",
+            _plant(
+                [f"TX{i:05d}" for i in range(36)], {5: "-999", 18: "-999", 30: "-999"}
+            ),
+        ),
+    ],
+    ids=["inside-the-range", "not-a-numeric-column"],
+)
+def test_d04_leaves_a_strong_token_that_is_not_a_placeholder_alone(
+    column, cells
+) -> None:
+    """Pins the boundary of #26's new catch: a strong numeric token is named
+    only in a text column whose other values are all numbers and never reach
+    it."""
+    assert _of(detect_all(pd.DataFrame({column: cells})), 4) == []
+
+
 def test_d06_evidence_preserves_the_double_space_it_reports() -> None:
     """The evidence sanitiser used to collapse every whitespace run down to
     one space, which erased the exact anomaly disease 6 exists to report —

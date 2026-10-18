@@ -62,7 +62,7 @@ dataframe — 60 rows × 5 columns
         safe to fix automatically · confidence 0.95
 
   d04  sentinel-missing  [units]
-        3/60 values are missing-data tokens ('N/A') masquerading as data
+        6/60 values are missing-data tokens ('-999', 'N/A') masquerading as data
         safe to fix automatically · confidence 0.91
 
   d06  whitespace-damage  [note]

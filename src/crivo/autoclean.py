@@ -27,6 +27,7 @@ from crivo.detect import (
     _ws_tidy,
     detect_all,
     detect_one,
+    sentinel_mask,
 )
 
 # Why every fixer below refuses instead of doing its best: a fixer that
@@ -322,8 +323,7 @@ def _fix_dates(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
 def _fix_sentinels(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     out = frame.copy()
     for c in cols:
-        low = out[c].astype(str).str.strip().str.lower()
-        out.loc[low.isin(MISSING_TOKENS), c] = None
+        out.loc[sentinel_mask(out[c]), c] = None
     return out
 
 
