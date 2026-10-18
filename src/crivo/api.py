@@ -158,10 +158,29 @@ class Report:
         """Cross-column contradictions (P7): near functional-dependency
         violations, where one column determines another for most rows and a
         few break the rule (a city that disagrees with its state). Each is
-        graded HUMAN, a discovered rule being a judgement call. Keyless."""
+        graded HUMAN, a discovered rule being a judgement call. Keyless.
+        An example value from a PII-flagged column is masked (#21)."""
         from crivo import crosscol as _cc
+        from crivo import pii as _pii
 
-        return _cc.find_fd_violations(self._frame, threshold=threshold)
+        findings = _cc.find_fd_violations(self._frame, threshold=threshold)
+        flagged = _pii.flagged_columns(self._frame)
+        out = []
+        for f in findings:
+            types = [flagged.get(str(c)) for c in f["columns"]]
+            if len(types) == 2 and any(types):
+                f = {
+                    **f,
+                    "examples": [
+                        tuple(
+                            _pii.mask_cell(v, t) if t else v
+                            for v, t in zip(ex, types, strict=True)
+                        )
+                        for ex in f["examples"]
+                    ],
+                }
+            out.append(f)
+        return out
 
     def to_html(self, path) -> Path:
         """Write the report as ONE standalone, self-contained HTML file — the

@@ -10,7 +10,9 @@ pandas only.
 """
 
 import pandas as pd
+import pytest
 
+import crivo
 from crivo import crosscol
 
 
@@ -72,3 +74,58 @@ def test_nulls_do_not_count_as_a_dependency_break():
         {"city": ["SF", "SF", "SF", "SF"], "state": ["CA", "CA", None, "CA"]}
     )
     assert crosscol.find_fd_violations(df, threshold=0.8) == []
+
+
+# an order export: four orders per customer, ids keep their leading zeros, and
+# two rows break a rule. Ana's third order has the state typed as "ZZ", and
+# one of Ben's orders carries his address on the wrong domain (.org).
+_CUSTOMERS = [
+    ("00101", "ana.lima@example.com", "CA"),
+    ("00102", "ben.okafor@example.com", "NY"),
+    ("00103", "chen.wei@example.com", "TX"),
+    ("00104", "dana.ruiz@example.com", "WA"),
+    ("00105", "eli.moss@example.com", "OR"),
+]
+
+
+def _orders(id_col, email_col, state_col) -> pd.DataFrame:
+    rows = [list(c) for c in _CUSTOMERS for _ in range(4)]
+    rows[2][2] = "ZZ"  # Ana's state, wrong on one order
+    rows[5][1] = "ben.okafor@example.org"  # Ben's email, wrong domain once
+    return pd.DataFrame(rows, columns=[id_col, email_col, state_col])
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [("cust_id", "email", "state"), (0, 1, 2)],
+    ids=["named-columns", "header-less-int-labels"],
+)
+def test_cross_column_examples_mask_pii_flagged_columns(labels):
+    """Regression for #21. cross_column() examples are shown to people, so a
+    value from a PII-flagged column is masked wherever it sits in the pair,
+    while the violation is still found and counted, and a value from an
+    unflagged column stays as it is. Header-less frames have int labels,
+    which the PII flags key as str."""
+    id_col, email_col, state_col = labels
+    df = _orders(id_col, email_col, state_col)
+    raw_emails = set(df[email_col])
+
+    findings = crivo.diagnose(df).cross_column()
+    by_pair = {tuple(f["columns"]): f for f in findings}
+
+    def examples(a, b):
+        return [tuple(e) for e in by_pair[(a, b)]["examples"]]
+
+    # email determines state for 19 of 20 rows: still found, still counted
+    assert by_pair[(email_col, state_col)]["violations"] == 1
+    # the flagged email is masked as element 0; the unflagged state stays raw
+    assert examples(email_col, state_col) == [("***@example.com", "ZZ")]
+    # the flagged email is masked as element 1; the unflagged key stays raw
+    assert examples(id_col, email_col) == [("00102", "***@example.org")]
+    assert examples(state_col, email_col) == [("NY", "***@example.org")]
+    # a pair with no flagged column is left exactly as crosscol reports it
+    assert examples(id_col, state_col) == [("00101", "ZZ")]
+    # and no example anywhere carries a raw email
+    for f in findings:
+        for example in f["examples"]:
+            assert not raw_emails & {str(v) for v in example}
