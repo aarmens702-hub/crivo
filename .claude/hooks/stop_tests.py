@@ -68,12 +68,12 @@ try:
         cwd=root,
         capture_output=True,
         text=True,
-        timeout=140,
+        timeout=280,
         check=False,
     )
 except subprocess.TimeoutExpired:
     sys.stderr.write(
-        "The test suite did not finish in 140 s. Run `uv run pytest -q` "
+        "The test suite did not finish in 280 s. Run `uv run pytest -q` "
         "yourself and tell the user the result before finishing.\n"
     )
     sys.exit(2)

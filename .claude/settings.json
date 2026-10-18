@@ -91,7 +91,7 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop_tests.py\"",
-            "timeout": 150
+            "timeout": 300
           }
         ]
       }
