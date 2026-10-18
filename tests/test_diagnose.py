@@ -56,12 +56,16 @@ def test_the_clean_subcommand_is_headless_and_machine_readable(
 ) -> None:
     """`crivo clean <file> --json` is the orchestration surface: no
     prompts, chatter on stderr, one JSON object on stdout. The session runs
-    with previews off (nobody reads them) and the auto policy (judgement
-    calls deferred, never decided)."""
+    with previews off (nobody reads them); AUTO fixes run and judgement calls
+    are deferred, never decided. Since #30 there is no policy to hand the
+    clean or to echo in the summary: the fake takes only what the CLI may
+    pass, and the summary carries no "policy" key."""
     import json
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    monkeypatch.setattr("crivo.__main__.load_dotenv", lambda *a, **k: False)
     monkeypatch.setattr("sys.argv", ["crivo", "clean", "data/messy.csv", "--json"])
     session_kw: dict = {}
 
@@ -75,9 +79,8 @@ def test_the_clean_subcommand_is_headless_and_machine_readable(
     monkeypatch.setattr("crivo.loop.Session", FakeSession)
     monkeypatch.setattr(
         "crivo.repl.run_clean_once",
-        lambda session, path, name=None, policy="auto": {
+        lambda session, path, name=None: {
             "file": path,
-            "policy": policy,
             "needs_human": ["fix 2/3 · merge variants"],
         },
     )
@@ -87,7 +90,7 @@ def test_the_clean_subcommand_is_headless_and_machine_readable(
     out = capsys.readouterr().out
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["file"] == "data/messy.csv"
-    assert payload["policy"] == "auto"
+    assert "policy" not in payload, sorted(payload)
     assert session_kw.get("preview") is False
 
 

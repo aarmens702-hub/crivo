@@ -807,11 +807,11 @@ def test_gibberish_at_the_gate_reprompts_instead_of_executing() -> None:
     )
 
 
-def test_policy_all_cannot_approve_a_person_grade_admission_or_plan() -> None:
+def test_policy_decision_cannot_approve_a_person_grade_admission_or_plan() -> None:
     """P0 item 5: policy_decision("all") approved HUMAN findings, HUMAN skill
     admissions and the PLAN gate, contradicting its own docstring. The
-    pre-authorisation covers AUTO and nothing else, whatever policy string a
-    caller hands it."""
+    pre-authorisation covers AUTO and nothing else. Since #30 it reads the
+    event alone, so there is no string left for a caller to widen it with."""
     from crivo.repl import policy_decision
 
     deferred = [
@@ -823,17 +823,18 @@ def test_policy_all_cannot_approve_a_person_grade_admission_or_plan() -> None:
     ]
 
     for event in deferred:
-        for policy in ("all", "auto", "anything"):
-            assert policy_decision(event, policy).action == "skip", (
-                f"{event.grade!r} under policy {policy!r} must not be approved"
-            )
+        assert policy_decision(event).action == "skip", (
+            f"{event.grade!r} must not be approved unattended"
+        )
     auto = GateRequest("fix_a", 1, title="fix 1/3 · trailing space", grade="AUTO")
-    assert policy_decision(auto, "all").action == "run"
+    assert policy_decision(auto).action == "run"
 
 
-def test_headless_policy_all_defers_person_grades_to_a_human() -> None:
-    """The same hole down the path that exposes it: run_clean_once under
-    policy="all" (the CLI flag, and until this fix a free MCP argument)."""
+def test_headless_clean_defers_person_grades_to_a_human() -> None:
+    """The same hole down the path that exposes it: run_clean_once, which
+    took policy="all" from the CLI flag and, until P0 item 5, a free MCP
+    argument. With no policy left, a HUMAN finding, a skill admission and the
+    PLAN gate all wait for a person."""
     from crivo.repl import run_clean_once
 
     gates = [
@@ -844,7 +845,7 @@ def test_headless_policy_all_defers_person_grades_to_a_human() -> None:
     ]
     session = FakeSession(script=gates)
 
-    summary = run_clean_once(session, "data/x.csv", name="x", policy="all")
+    summary = run_clean_once(session, "data/x.csv", name="x")
 
     assert [d.action for d in session.decisions] == ["run", "skip", "skip", "skip"]
     assert summary["needs_human"] == [
@@ -852,6 +853,25 @@ def test_headless_policy_all_defers_person_grades_to_a_human() -> None:
         "admit skill fix-x",
         "approve plan v1",
     ]
+
+
+def test_the_headless_clean_takes_no_policy() -> None:
+    """#30: run_clean_once and policy_decision accepted a `policy` that
+    changed nothing, which tells a caller its choice mattered. Both refuse it
+    now, the clean before it loads anything. The calls without it are pinned
+    in the two tests above."""
+    from crivo.repl import policy_decision, run_clean_once
+
+    session = FakeSession(
+        script=[GateRequest("fix_a", 1, title="fix 1/1 · trailing space", grade="AUTO")]
+    )
+    with pytest.raises(TypeError, match="policy"):
+        run_clean_once(session, "data/x.csv", name="x", policy="all")
+    assert session.loads == [] and session.cleans == [], "nothing may start"
+
+    auto = GateRequest("fix_a", 1, title="fix 1/1 · trailing space", grade="AUTO")
+    with pytest.raises(TypeError, match="positional argument"):
+        policy_decision(auto, "all")
 
 
 def test_a_bare_enter_at_the_gate_does_not_burn_a_try() -> None:

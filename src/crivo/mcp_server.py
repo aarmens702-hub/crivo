@@ -267,9 +267,7 @@ def _make_session():
     )
 
 
-def _clean_file(
-    path: str, name: str | None = None, policy: str = "auto", decide=None
-) -> dict:
+def _clean_file(path: str, name: str | None = None, decide=None) -> dict:
     """Headless one-shot clean under the grade policy (R2); `decide` is the
     v1.5 per-gate callback when the client can be asked (elicitation)."""
     missing = _required_key()
@@ -287,10 +285,7 @@ def _clean_file(
             session = _make_session()
         try:
             with _quiet():
-                summary = repl.run_clean_once(
-                    session, target, name=name, policy=policy, decide=decide
-                )
-            summary["policy"] = policy
+                summary = repl.run_clean_once(session, target, name=name, decide=decide)
             return summary
         finally:
             session.close()
@@ -370,7 +365,8 @@ def _open_data(path: str) -> dict:
 # other grade (GATE, HUMAN, PLAN) is a person's decision, and this connection
 # has no person on it.
 #
-# repl.policy_decision skips an ungraded gate and this runs one, which is a
+# repl.policy_decision, the grade rule clean_file falls back to when its
+# client cannot elicit, skips an ungraded gate and this runs one, which is a
 # real difference and not an oversight: there the ungraded gate is a
 # harmonize decision about somebody's data on the clean path, and here it is
 # the analysis cell the caller just asked for. What it costs is stated in
@@ -503,32 +499,31 @@ def build_server():
     async def clean_file(
         path: str,
         name: str | None = None,
-        policy: str = "auto",
         ctx: Context | None = None,
     ) -> dict:
         """Not sandboxed by default: this runs model-written Python as the
         server user, with that user's files (including .env) and network. Set
         CRIVO_MCP_SANDBOX=docker to run it in a container with no network.
-        Clean a data file headlessly. Fixes are model-written, executed in
-        the server's kernel, and verified by re-running the detector plus row
+        Clean a data file headlessly. An AUTO finding with a deterministic
+        fixer runs that fixer and the rest are model-written; each fix runs in
+        the server's kernel, and is verified by re-running the detector plus row
         and hash invariants; failures revert.
         path must be inside the configured root (CRIVO_MCP_ROOT) and name,
         when given, must be a plain variable name. Only AUTO-grade fixes run:
         judgement-grade findings come back in needs_human for a person to
-        decide, and no value of policy changes that, so there is nothing here
-        to relay a human's consent through. If your client supports
-        elicitation, GATE-grade fixes are offered to the human one by one
-        instead. Returns fixes, needs_human, and artifact paths (cleaned
-        parquet, lineage, report)."""
+        decide, and there is nothing here to relay a human's consent through.
+        If your client supports elicitation, GATE-grade fixes are offered to
+        the human one by one instead. Returns fixes, needs_human, and artifact
+        paths (cleaned parquet, lineage, report)."""
         import anyio
 
         decide = None
-        if policy == "auto" and ctx is not None and _client_can_elicit(ctx):
+        if ctx is not None and _client_can_elicit(ctx):
             decide = _make_decider(_elicit_sync_via(ctx))
         # the kernel blocks for minutes; a worker thread keeps the event loop
         # free to carry the elicitation replies the decider waits on
         return await anyio.to_thread.run_sync(
-            lambda: _clean_file(path, name=name, policy=policy, decide=decide)
+            lambda: _clean_file(path, name=name, decide=decide)
         )
 
     @app.tool()

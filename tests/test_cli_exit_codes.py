@@ -179,8 +179,12 @@ def test_options_may_come_before_the_file(
 def _no_model_clean(monkeypatch) -> dict:
     """The clean path with no model and no kernel: a fake key passes the
     provider gate, and the session and the one-shot clean only record what
-    the CLI handed them."""
+    the CLI handed them. No dotenv file is read (see _main_without_dotenv).
+    The fake takes exactly what the CLI may hand it since #30 retired
+    `policy`, so a CLI that still passes one fails here."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    monkeypatch.setattr("crivo.__main__.load_dotenv", lambda *a, **k: False)
     seen: dict = {"sessions": [], "cleaned": []}
 
     class FakeSession:
@@ -190,7 +194,7 @@ def _no_model_clean(monkeypatch) -> dict:
         def close(self):
             pass
 
-    def fake_clean_once(session, path, name=None, policy="auto"):
+    def fake_clean_once(session, path, name=None):
         seen["cleaned"].append((path, name))
         return {"file": path, "variable": name, "needs_human": []}
 
@@ -343,3 +347,49 @@ def test_data_dir_help_says_it_is_the_docker_mount(
         "--data-dir DATA_DIR read-only data mount for the --docker kernel "
         "(ignored otherwise)"
     ) in out
+
+
+# --- the retired --policy flag (#30) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["clean", "x.csv", "--policy", "all"],
+        ["clean", "--policy", "auto", "x.csv"],
+        ["--clean", "x.csv", "--policy", "all"],
+    ],
+)
+def test_policy_flag_is_gone(tmp_path, monkeypatch, capsys, argv) -> None:
+    """#30: `--policy` widened nothing since 2026-09-06, so accepting it told
+    a script its choice mattered. It is an unknown flag now: argparse's usual
+    exit 2, naming the flag, before any key check or session. Neither value
+    survives, and neither does the legacy `--clean FILE` spelling. The
+    legitimate form beside it, `crivo clean FILE` with no --policy, is pinned
+    in test_clean_cleans_the_file_after_its_options."""
+    main = _main_without_dotenv(monkeypatch, tmp_path)
+    monkeypatch.setattr("sys.argv", ["crivo", *argv])
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+    line = _error_line(capsys.readouterr().err)
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in line and "--policy" in line, line
+
+
+def test_clean_help_no_longer_offers_a_policy(tmp_path, monkeypatch, capsys) -> None:
+    """#30: the help is where a person finds the flag, so it goes there too,
+    and the clean mode's own line says what the mode does without the
+    retired word."""
+    main = _main_without_dotenv(monkeypatch, tmp_path)
+    monkeypatch.setenv("COLUMNS", "200")  # no wrap inside the help sentence
+    monkeypatch.setattr("sys.argv", ["crivo", "clean", "--help"])
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+    out = " ".join(capsys.readouterr().out.split())
+    assert exc.value.code == 0
+    assert "--policy" not in out
+    assert (
+        "headless one-shot clean: AUTO fixes run, judgement calls are deferred" in out
+    )

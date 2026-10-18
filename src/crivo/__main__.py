@@ -62,17 +62,9 @@ def main() -> int:
     parser.add_argument(
         "--clean",
         metavar="FILE",
-        help="headless one-shot clean: auto policy, judgement calls deferred",
+        help="headless one-shot clean: AUTO fixes run, judgement calls are deferred",
     )
     parser.add_argument("--name", help="variable name for the loaded file (clean mode)")
-    parser.add_argument(
-        "--policy",
-        choices=["auto", "all"],
-        default="auto",
-        help="still accepted, and no longer widens anything: only AUTO-grade "
-        "fixes run unattended, and a judgement call waits for a person either "
-        "way (until 2026-09-06 'all' approved them on your behalf)",
-    )
     parser.add_argument(
         "--autonomy",
         choices=list(AUTONOMY_LEVELS),
@@ -167,10 +159,7 @@ def main() -> int:
                 autonomy=args.autonomy,
             )
             try:
-                summary = run_clean_once(
-                    session, args.clean, name=args.name, policy=args.policy
-                )
-                summary["policy"] = args.policy
+                summary = run_clean_once(session, args.clean, name=args.name)
             finally:
                 session.close()
         if args.json:
