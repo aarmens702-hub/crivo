@@ -2,22 +2,32 @@
 
 The keyed twin of `compare`: `compare` diffs table shape, `reconcile` diffs the
 rows themselves matched by a key, sorting them into added / removed / changed /
-unchanged with a partition receipt. These tests pin the contract on crafted
+unchanged with a receipt. These tests pin the contract on crafted
 frames: the four buckets, composite keys, duplicate-key exclusion, null-key
 exclusion, key identity by value, the missing key error, disjoint columns, the
-receipt as a real partition invariant, bounded evidence (rows and columns), and
-keyless import.
+receipt (a partition guard plus an independent recount of the changed rows),
+and bounded evidence (rows and columns). The keyless import of crivo.rowdiff
+is pinned in test_import_isolation.py.
 """
+
+import re
 
 import pandas as pd
 import pytest
 
 import crivo
+from crivo import pii
 
 # the reconcile() feature lives in crivo.rowdiff (named to avoid shadowing the
 # public crivo.reconcile wrapper); reach the module for its internals.
 from crivo import rowdiff as reconcile
 from crivo.rowdiff_report import reconcile_report
+
+
+def _visible_text(html: str) -> str:
+    """The report as a reader sees it: tags stripped, whitespace collapsed, so
+    an assertion on a label does not depend on which element wraps it."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", html))
 
 
 def test_basic_added_removed_changed_unchanged():
@@ -281,9 +291,10 @@ def test_key_identity_is_by_value_bool_distinct_int_matches_float():
 
 def test_receipt_is_a_real_disjoint_cover_over_the_whole_key_space():
     # a rich frame exercising every group at once: an add, a remove, a change,
-    # an unchanged row, a duplicate key, and a null key. The receipt is now a
-    # disjoint-cover invariant, not a cardinality identity, so it verifies that
-    # every reported key lands in exactly one place.
+    # an unchanged row, a duplicate key, and a null key. Every reported key
+    # lands in exactly one place. The buckets come from set algebra, so this
+    # cover holds by construction; the receipt's check that can fail is the
+    # recount of changed rows, pinned in the #20 tests below.
     a = pd.DataFrame(
         {"id": [1, 2, 3, 4, 4, float("nan")], "val": [10, 20, 30, 40, 40, 50]}
     )
@@ -330,28 +341,6 @@ def test_changed_row_before_after_are_bounded_in_width():
     assert len(change["after"]) == cap  # after dict bounded
     assert any("column" in note for note in result["notes"])
     assert result["receipt"] is True
-
-
-def test_import_is_keyless_and_pulls_no_core_module():
-    import os
-    import subprocess
-    import sys
-
-    code = (
-        "import sys, crivo.rowdiff\n"
-        "bad=[m for m in ('crivo.loop','crivo.prompts','crivo.skills',"
-        "'crivo.provenance','crivo.llm') if m in sys.modules]\n"
-        "print(bad); sys.exit(1 if bad else 0)\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        env=dict(os.environ),
-        timeout=120,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_reconcile_surface_is_exported():
@@ -422,3 +411,346 @@ def test_report_escapes_hostile_values():
     html = reconcile_report(a, b, "id")
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html
+
+
+# --- #20: the receipt is a check that can fail, and the report masks PII ---
+# The receipt used to be true by construction (set algebra plus a count of the
+# same loop it checked), so a broken per-cell comparison still read "verified".
+# These pin a receipt that catches a wrong changed count (a misclassification
+# that keeps the count is not caught: no total can see it), the legitimate
+# frames on which it must stay True, and a report that never shows a raw key or
+# value from a column the PII scan flags in either frame.
+
+
+def _crm_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Two CRM extracts keyed on email. Hand-checked buckets: bob is removed,
+    dave is added, ann changes phone, plan and backup_contact, carol's phone
+    goes from the N/A sentinel to a real number, eve is unchanged. So added 1,
+    removed 1, changed 2, unchanged 1. acct carries leading zeros and is not
+    PII; backup_contact is only PII in the after frame (an email typed into a
+    free-text column), so it is flagged by b alone."""
+    a = pd.DataFrame(
+        {
+            "email": [
+                "ann@example.com",
+                "bob.smith@example.com",
+                "carol_01@mail.example.org",
+                "eve@example.com",
+            ],
+            "acct": ["00417", "00982", "01133", "00050"],
+            "phone": ["555-123-4567", "(555) 234-5678", "N/A", "555-222-3333"],
+            "plan": ["basic", "pro", "basic", "pro"],
+            "backup_contact": ["N/A", "N/A", "N/A", "N/A"],
+        }
+    )
+    b = pd.DataFrame(
+        {
+            "email": [
+                "ann@example.com",
+                "carol_01@mail.example.org",
+                "eve@example.com",
+                "dave+crm@example.net",
+            ],
+            "acct": ["00417", "01133", "00050", "02210"],
+            "phone": ["555-987-6543", "555.345.6789", "555-222-3333", "555 456 7890"],
+            "plan": ["pro", "basic", "pro", "basic"],
+            "backup_contact": ["ann.w@example.org", "N/A", "N/A", "N/A"],
+        }
+    )
+    return a, b
+
+
+def test_report_carries_no_raw_value_from_a_pii_flagged_column():
+    """Regression for #20. Keyed on an email column, the report printed every
+    added, removed and changed email raw, and every changed phone value raw.
+    A key or value from a column the PII scan flags in either frame is now
+    masked; the counts, the receipt and non-PII values still render."""
+    a, b = _crm_frames()
+    html = reconcile_report(a, b, "email")
+
+    pii_cols = ("email", "phone", "backup_contact")
+    raw = {v for df in (a, b) for c in pii_cols for v in df[c] if v != "N/A"}
+    leaked = sorted(v for v in raw if v in html)
+    assert leaked == []
+
+    # the masked keys still render in each list: bob removed, dave added, and
+    # carol's key in the changed table
+    assert '<li class="rem"><code>***@example.com</code></li>' in html
+    assert '<li class="add"><code>***@example.net</code></li>' in html
+    assert "<td><code>***@mail.example.org</code></td>" in html
+    # a changed phone still shows that it changed, masked on both sides
+    assert f"{pii.REDACTED} &rarr; {pii.REDACTED}" in html
+    # a column the scan does not flag is not masked
+    assert "basic &rarr; pro" in html
+
+    # the bucket counts and the receipt are untouched by masking
+    assert '<td class="delta add">1</td>' in html
+    assert '<td class="delta rem">1</td>' in html
+    assert '<td class="delta ">2</td>' in html
+    assert '<td class="delta flat">1</td>' in html
+    text = _visible_text(html)
+    assert "receipt: verified" in text
+    assert "partition receipt" not in text
+
+
+def test_report_masks_only_the_flagged_cell_of_a_composite_key():
+    """Regression for #20. A key cell is masked by its column's position in
+    the key, so in a (region, email) key the email is masked and the region
+    still reads plainly, in the changed table and in the removed list."""
+    a = pd.DataFrame(
+        {
+            "region": ["west", "east", "north"],
+            "email": [
+                "ann@example.com",
+                "ann@example.com",
+                "carol_01@mail.example.org",
+            ],
+            "plan": ["basic", "basic", "pro"],
+        }
+    )
+    b = pd.DataFrame(
+        {
+            "region": ["west", "east"],
+            "email": ["ann@example.com", "ann@example.com"],
+            "plan": ["pro", "basic"],
+        }
+    )
+    html = reconcile_report(a, b, ["region", "email"])
+
+    assert "ann@example.com" not in html
+    assert "carol_01@mail.example.org" not in html
+    assert "<td><code>west, ***@example.com</code></td>" in html
+    assert '<li class="rem"><code>north, ***@mail.example.org</code></li>' in html
+
+
+@pytest.mark.parametrize(
+    "broken_equal, reported_changed",
+    [
+        pytest.param(lambda *_: True, 0, id="says-every-cell-equal"),
+        pytest.param(lambda *_: False, 3, id="says-every-cell-differs"),
+    ],
+)
+def test_receipt_fails_when_cell_comparison_is_broken(
+    monkeypatch, broken_equal, reported_changed
+):
+    """Regression for #20. The receipt was true by construction: with the
+    per-cell comparison broken, reconcile still said "verified". It now
+    recounts changed rows without that comparison, so a wrong changed COUNT
+    fails. It checks the total only: a comparison that wrongly marks one row
+    changed and another unchanged keeps the count, and the receipt stays True."""
+    # invoice 0107's amount is corrected from 5.0 to 50.0: one real change
+    a = pd.DataFrame(
+        {
+            "invoice": ["0042", "0107", "0311"],
+            "amount": [19.99, 5.0, 120.5],
+            "status": ["paid", "paid", "refunded"],
+        }
+    )
+    b = pd.DataFrame(
+        {
+            "invoice": ["0042", "0107", "0311"],
+            "amount": [19.99, 50.0, 120.5],
+            "status": ["paid", "paid", "refunded"],
+        }
+    )
+    monkeypatch.setattr(reconcile, "_cell_equal", broken_equal)
+
+    result = reconcile.reconcile(a, b, "invoice")
+
+    # the broken comparison is in effect: the changed count is wrong
+    assert result["counts"]["changed"] == reported_changed
+    assert result["receipt"] is False
+    assert "NOT verified" in reconcile_report(a, b, "invoice")
+
+
+@pytest.mark.parametrize(
+    "a, b, keys, changed",
+    [
+        pytest.param(
+            pd.DataFrame(
+                {
+                    "id": ["0042", "0107", "0311"],
+                    "discount": pd.Series([None, 0.1, pd.NA], dtype=object),
+                    "shipped": pd.to_datetime(["2024-03-01", None, "2024-03-09"]),
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "id": ["0042", "0107", "0311"],
+                    "discount": [float("nan"), 0.1, None],
+                    "shipped": pd.to_datetime(["2024-03-01", None, "2024-03-09"]),
+                }
+            ),
+            "id",
+            0,
+            id="nulls-on-both-sides",
+        ),
+        pytest.param(
+            pd.DataFrame({"id": ["0042", "0107"], "score": [None, 5]}),
+            pd.DataFrame({"id": ["0042", "0107"], "score": [None, 6]}),
+            "id",
+            1,
+            id="a-real-change-beside-a-null",
+        ),
+        pytest.param(
+            pd.DataFrame({"sku": ["A-01", "A-02", "B-07"], "qty": [10, 3, 7]}),
+            pd.DataFrame({"sku": ["A-01", "A-02", "B-07"], "qty": [10.0, 3.0, 7.0]}),
+            "sku",
+            0,
+            id="int-to-float-drift",
+        ),
+        pytest.param(
+            pd.DataFrame({"sku": ["A-01", "A-02"], "old_price": [1.0, 2.0]}),
+            pd.DataFrame({"sku": ["A-01", "A-03"], "price": [1.0, 2.0]}),
+            "sku",
+            0,
+            id="no-shared-non-key-column",
+        ),
+        pytest.param(
+            pd.DataFrame({"id": ["0042"], "val": [1]}),
+            pd.DataFrame({"id": ["0107"], "val": [1]}),
+            "id",
+            0,
+            id="no-matched-key",
+        ),
+    ],
+)
+def test_receipt_holds_on_frames_that_reconcile_cleanly(a, b, keys, changed):
+    """Regression for #20. Pinned beside the receipt that can now fail: two
+    nulls, an int that drifted to the same float, and a matched key with
+    nothing to compare are not changes, and the receipt stays True on them."""
+    result = reconcile.reconcile(a, b, keys)
+
+    assert result["counts"]["changed"] == changed
+    assert result["receipt"] is True
+
+
+# five order ids from one CRM export, kept as text with their leading zeros,
+# and a region column with an "N/A" sentinel that does not change between the
+# two extracts, so every changed row below differs in its dtype column only
+_ORDER_IDS = ["0042", "0107", "0311", "0420", "0533"]
+_REGIONS = ["west", "N/A", "east", "west", "N/A"]
+
+
+@pytest.mark.parametrize(
+    "col, before, after, changed_keys",
+    [
+        # one extract in UTC, the other in local time: the same instant read in
+        # another zone is not a change, nor is NaT on both sides. 0311 moved an
+        # hour; 0533 went from NaT to a ship time.
+        pytest.param(
+            "shipped_at",
+            pd.to_datetime(
+                [
+                    "2024-03-01 09:30",
+                    None,
+                    "2024-03-09 17:00",
+                    "2024-03-12 08:00",
+                    None,
+                ],
+                utc=True,
+            ),
+            pd.to_datetime(
+                [
+                    "2024-03-01 09:30",
+                    None,
+                    "2024-03-09 18:00",
+                    "2024-03-12 08:00",
+                    "2024-03-15 11:45",
+                ],
+                utc=True,
+            ).tz_convert("America/Toronto"),
+            [("0311",), ("0533",)],
+            id="tz-aware-datetime",
+        ),
+        # the after extract added a category; a missing plan on both sides is
+        # not a change. 0420 upgraded; 0533 lost its plan.
+        pytest.param(
+            "plan",
+            pd.Categorical(
+                ["basic", "pro", None, "pro", "basic"], categories=["basic", "pro"]
+            ),
+            pd.Categorical(
+                ["basic", "pro", None, "enterprise", None],
+                categories=["basic", "pro", "enterprise"],
+            ),
+            [("0420",), ("0533",)],
+            id="categorical",
+        ),
+        # a nullable count read back as float: pd.NA against NaN and 3 against
+        # 3.0 are not changes. 0420 went 7 to 8; 0533 went missing to 2.
+        pytest.param(
+            "qty",
+            pd.array([10, pd.NA, 3, 7, pd.NA], dtype="Int64"),
+            [10.0, float("nan"), 3.0, 8.0, 2.0],
+            [("0420",), ("0533",)],
+            id="Int64-NA-vs-float-NaN",
+        ),
+        # pandas string dtype against a plain object column: pd.NA against None
+        # is not a change. 0311 changed tier, 0420 lost it, 0533 gained one.
+        pytest.param(
+            "tier",
+            pd.array(["basic", pd.NA, "pro", "pro", pd.NA], dtype="string"),
+            pd.Series(["basic", None, "enterprise", float("nan"), "pro"], dtype=object),
+            [("0311",), ("0420",), ("0533",)],
+            id="string-dtype-NA",
+        ),
+        # a flag exported as True/False, then as 1/0: the same truth value is
+        # not a change (cell values compare by ==, as 3 and 3.0 do; only KEY
+        # identity keeps a bool apart from 1/0). 0311 and 0420 flipped.
+        pytest.param(
+            "active",
+            [True, False, True, False, True],
+            [1, 0, 0, 1, 1],
+            [("0311",), ("0420",)],
+            id="bool-vs-1-0",
+        ),
+        # the same flag as nullable boolean, then as 1/0 with a blank (so the
+        # column reads as float): pd.NA against NaN is not a change. 0311 and
+        # 0533 flipped.
+        pytest.param(
+            "active",
+            pd.array([True, False, True, pd.NA, False], dtype="boolean"),
+            [1.0, 0.0, 0.0, float("nan"), 1.0],
+            [("0311",), ("0533",)],
+            id="nullable-boolean-vs-float-1-0",
+        ),
+    ],
+)
+def test_recount_agrees_with_the_row_comparison_across_dtypes(
+    col, before, after, changed_keys
+):
+    """Regression for #20. The receipt's recount compares the aligned frames
+    as object columns, apart from the per-row comparison, so it must read each
+    dtype the same way: a null on both sides, or the same value in another
+    dtype or zone, is not a change, and a real change (or a null against a
+    value) is. On these frames exactly the hand-checked rows changed, the rest
+    did not, and the receipt holds."""
+    a = pd.DataFrame({"id": _ORDER_IDS, "region": _REGIONS, col: before})
+    b = pd.DataFrame({"id": _ORDER_IDS, "region": _REGIONS, col: after})
+
+    result = reconcile.reconcile(a, b, "id")
+
+    assert [change["key"] for change in result["changed"]] == changed_keys
+    assert all(change["columns"] == [col] for change in result["changed"])
+    assert result["counts"]["changed"] == len(changed_keys)
+    assert result["counts"]["unchanged"] == len(_ORDER_IDS) - len(changed_keys)
+    assert result["receipt"] is True
+
+
+def test_report_badge_reads_receipt_not_verified_when_the_recount_disagrees(
+    monkeypatch,
+):
+    """Regression for #20. The receipt is no longer only a partition check, so
+    the report labels it "receipt", not "partition receipt", and a recount that
+    disagrees with the changed count reads "receipt: NOT verified"."""
+    # invoice 0107's amount is corrected from 5.0 to 50.0, and the broken
+    # comparison calls every cell equal, so the changed count is 0, not 1
+    a = pd.DataFrame({"invoice": ["0042", "0107"], "amount": [19.99, 5.0]})
+    b = pd.DataFrame({"invoice": ["0042", "0107"], "amount": [19.99, 50.0]})
+    monkeypatch.setattr(reconcile, "_cell_equal", lambda *_: True)
+
+    text = _visible_text(reconcile_report(a, b, "invoice"))
+
+    assert "receipt: NOT verified" in text
+    assert "partition receipt" not in text

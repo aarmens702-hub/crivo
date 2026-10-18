@@ -10,9 +10,6 @@ The scope-immutability clause is pinned adversarially here.
 """
 
 import json
-import os
-import subprocess
-import sys
 
 import pytest
 
@@ -211,28 +208,3 @@ def test_diff_plan_rejects_an_invalid_status():
 def test_planstep_rejects_an_unknown_status():
     with pytest.raises(ValueError, match="bogus"):
         PlanStep("f0", 1, "AUTO", "model", "whitespace-damage", status="bogus")
-
-
-def test_import_is_keyless_and_pulls_no_core_module():
-    # conftest's autouse quarantine has already stripped every provider key, so
-    # the child interpreter imports with no key; the reserved core modules must
-    # stay out of the import graph (contract: loop, prompts, skills, provenance
-    # are never touched)
-    code = (
-        "import sys\n"
-        "import crivo.plan\n"
-        "reserved = ('crivo.loop', 'crivo.prompts', 'crivo.skills',"
-        " 'crivo.provenance', 'crivo.llm')\n"
-        "bad = [m for m in reserved if m in sys.modules]\n"
-        "print(bad)\n"
-        "sys.exit(1 if bad else 0)\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        env=dict(os.environ),
-        timeout=120,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr

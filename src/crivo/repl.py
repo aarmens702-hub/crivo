@@ -127,18 +127,21 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
             if line == "/trace":
                 print_fn(_LAST_TRACE[0] if _LAST_TRACE else "no stored traceback")
                 continue
+            # auto-run is the operator trusting the analyst's own query cells;
+            # a fix, a plan or a skill admission is a judgement call and always
+            # waits
             try:
                 with _TurnInterrupts(print_fn):
                     if line.split()[:1] == ["/load"]:
                         _load(session, line, print_fn)
                     elif line.split()[:1] == ["/clean"]:
-                        _clean(session, line, auto_run, input_fn, print_fn)
+                        _clean(session, line, input_fn, print_fn)
                     elif line.split()[:1] == ["/skills"]:
                         _skills(session, line, print_fn)
                     elif line.split()[:1] == ["/why"]:
                         _why(session, line, print_fn)
                     elif line.split()[:1] == ["/clean-family"]:
-                        _clean_family(session, line, auto_run, input_fn, print_fn)
+                        _clean_family(session, line, input_fn, print_fn)
                     else:
                         _drive(session.run_turn(line), auto_run, input_fn, print_fn)
             except (EOFError, KeyboardInterrupt):
@@ -304,12 +307,12 @@ def _load(session, line: str, print_fn) -> None:
     session.load(parts[1], name)
 
 
-def _clean(session, line: str, auto_run: bool, input_fn, print_fn) -> None:
+def _clean(session, line: str, input_fn, print_fn) -> None:
     parts = line.split()
     if len(parts) < 2:
         print_fn("usage: /clean <variable>")
         return
-    _drive(session.clean(parts[1]), auto_run, input_fn, print_fn)
+    _drive(session.clean(parts[1]), False, input_fn, print_fn)
 
 
 def _skills(session, line: str, print_fn) -> None:
@@ -338,14 +341,14 @@ def _skills(session, line: str, print_fn) -> None:
         )
 
 
-def _clean_family(session, line: str, auto_run: bool, input_fn, print_fn) -> None:
+def _clean_family(session, line: str, input_fn, print_fn) -> None:
     """/clean-family <glob> <name>: harmonize a family, then clean each slice."""
     parts = line.split()
     if len(parts) < 3:
         print_fn('usage: /clean-family "<glob>" <name>')
         return
     pattern = parts[1].strip("\"'")
-    _drive(session.clean_family(pattern, parts[2]), auto_run, input_fn, print_fn)
+    _drive(session.clean_family(pattern, parts[2]), False, input_fn, print_fn)
 
 
 def _why(session, line: str, print_fn) -> None:
@@ -361,17 +364,14 @@ def _why(session, line: str, print_fn) -> None:
     print_fn(provenance.to_markdown(dag, node_id))
 
 
-def policy_decision(event: GateRequest, policy: str) -> GateDecision:
+def policy_decision(event: GateRequest) -> GateDecision:
     """The human's pre-authorisation, applied by grade: AUTO runs, everything
     else is skipped and reported rather than decided.
 
-    `policy` is accepted for the callers that still pass one, and cannot
-    widen this. No value of it approves a HUMAN finding, a skill admission
-    (graded HUMAN, because governance is never unattended), or the PLAN gate,
-    because an orchestrator must never approve a judgement call on a person's
-    behalf. An ungraded gate is a judgement call too, so it is skipped as
-    well. Until 2026-09-06 policy="all" approved all three, which is exactly
-    what the sentence above says it must not do.
+    Nothing approves a HUMAN finding, a skill admission (graded HUMAN,
+    because governance is never unattended), or the PLAN gate, because an
+    orchestrator must never approve a judgement call on a person's behalf.
+    An ungraded gate is a judgement call too, so it is skipped as well.
     """
     if event.grade == "AUTO":
         return GateDecision("run")
@@ -382,7 +382,6 @@ def run_clean_once(
     session,
     path: str,
     name: str | None = None,
-    policy: str = "auto",
     decide=None,
 ):
     """Headless one-shot clean, for agents and scripts (no gate operator).
@@ -390,12 +389,12 @@ def run_clean_once(
     Loads the file, drives the clean under `policy_decision` — or under
     `decide`, a per-gate callback (v1.5: an MCP server with an
     elicitation-capable client asks the human gate by gate instead of
-    applying the blanket policy). A skip whose decision carries a note
+    applying the blanket grade rule). A skip whose decision carries a note
     (declined, elicitation unavailable) surfaces the note in needs_human.
     Returns a machine-readable summary: what ran, what was deferred to a
-    human, and where the durable artifacts landed. "notices" is present only
-    when the run raised one a caller must not miss (today: the once-per-
-    workspace autonomy notice, which no other headless surface renders).
+    human, and where the durable artifacts landed. "notices" is always
+    present: the notices a caller must not miss (today the once-per-workspace
+    autonomy notice), empty when none fired.
     Tolerant of SessionLike doubles, like every other driver in this module.
     """
     session.load(path, name)
@@ -428,7 +427,7 @@ def run_clean_once(
                             "skip", f"decide() returned {type(answer).__name__}"
                         )
                 else:
-                    answer = policy_decision(event, policy)
+                    answer = policy_decision(event)
                 if answer.action == "skip":
                     # an empty title on an empty cell is not a crash: this is
                     # the one path that reports a gate nobody answered
@@ -440,9 +439,12 @@ def run_clean_once(
     except StopIteration:
         pass
 
-    summary = {"file": path, "variable": var, "needs_human": needs_human}
-    if told:
-        summary["notices"] = told
+    summary = {
+        "file": path,
+        "variable": var,
+        "needs_human": needs_human,
+        "notices": told,
+    }
     session_dir = getattr(session, "session_dir", None)
     reports = sorted(session_dir.glob("clean_reports/*.json")) if session_dir else []
     if reports:

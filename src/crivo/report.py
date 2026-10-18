@@ -25,7 +25,7 @@ class CleanReport:
     stats: dict = field(default_factory=dict)  # before/after shape + nulls
     event_chain: list = field(default_factory=list)
     created: str = ""
-    # The posture the run was in, one of governance.AUTONOMY_LEVELS. Defaulted
+    # The posture the run was in, one of policy.AUTONOMY_LEVELS. Defaulted
     # rather than required so a caller that predates the setting still builds;
     # loop._save_report passes the session's real level.
     autonomy: str = "autonomous"

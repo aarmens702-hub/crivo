@@ -394,6 +394,86 @@ def test_main_without_api_key_exits_1(tmp_path) -> None:
     assert callable(main)
 
 
+def _main_up_to_the_repl(monkeypatch, tmp_path):
+    """`python -m crivo` in-process, stopped where the REPL would start: no
+    .env is read, no kernel starts, and every Session built is recorded."""
+    import crivo.__main__ as entry
+
+    built: list[dict] = []
+
+    class _Session:
+        def __init__(self, **kw):
+            built.append(kw)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(entry, "load_dotenv", lambda *a, **k: False)
+    monkeypatch.setattr("crivo.loop.Session", _Session)
+    monkeypatch.setattr("crivo.repl.run_repl", lambda session, **kw: 0)
+    monkeypatch.setattr("sys.argv", ["crivo"])
+    return entry.main, built
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({"CRIVO_PROVIDER": "faux"}, id="faux"),
+        pytest.param(
+            {
+                "CRIVO_PROVIDER": "openai",
+                "CRIVO_BASE_URL": "http://localhost:11434/v1",
+                "CRIVO_MODEL": "qwen3:32b",
+            },
+            id="openai-ollama",
+        ),
+    ],
+)
+def test_main_starts_without_a_deepseek_key_under_faux_and_openai(
+    monkeypatch, tmp_path, capsys, env
+) -> None:
+    """BP3: faux needs nothing and openai needs an endpoint and a model (the
+    README's Ollama example), so neither may be stopped for a DeepSeek key."""
+    main, built = _main_up_to_the_repl(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+
+    rc = main()
+
+    out = capsys.readouterr().out
+    assert "is not set" not in out, out
+    assert rc == 0
+    assert len(built) == 1, "the session must start"
+
+
+def test_main_refuses_a_misspelled_provider_and_still_starts_a_real_one(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """BP3: `CRIVO_PROVIDER=Claude` with keys on hand used to start a DeepSeek
+    session under the misspelling. It is refused before a session starts,
+    while the correctly spelled provider and an empty one (as .env.example
+    ships it, meaning deepseek) still start."""
+    main, built = _main_up_to_the_repl(monkeypatch, tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    assert main() == 0, "the correctly spelled provider must still start"
+    monkeypatch.setenv("CRIVO_PROVIDER", "")
+    assert main() == 0, "an empty CRIVO_PROVIDER is deepseek, not a misspelling"
+    assert len(built) == 2
+    capsys.readouterr()
+    built.clear()
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "Claude")
+    rc = main()
+
+    out = capsys.readouterr().out
+    assert not built, "no session may start under a provider that does not exist"
+    assert rc == 1
+    assert "deepseek, claude, openai, faux" in out
+
+
 # --- P2: the library view (R16) ----------------------------------------------
 
 
@@ -578,6 +658,23 @@ def test_headless_policy_runs_auto_grade_and_defers_judgement() -> None:
     assert "merge variants" in summary["needs_human"][0]
 
 
+def test_the_headless_summary_always_carries_notices() -> None:
+    """Regression for #28. The autonomy notice fires once per workspace, so
+    from the second run on nothing fires, and the summary dropped the key:
+    a script reading `d["notices"]` crashed on its second run. The key is
+    always present, an empty list when no notice fired (the fired case is
+    pinned in test_loop_autonomy)."""
+    from crivo.repl import run_clean_once
+
+    session = FakeSession(
+        script=[GateRequest("fix_a", 1, title="fix 1/1 · trailing space", grade="AUTO")]
+    )
+    summary = run_clean_once(session, "data/x.csv", name="x")
+
+    assert [d.action for d in session.decisions] == ["run"], "the AUTO gate ran"
+    assert summary.get("notices") == [], sorted(summary)
+
+
 def test_the_gate_preview_is_printed_under_the_code_box() -> None:
     """R3's last mile: the loop computes the consequence, the terminal must
     actually show it, or the operator is back to executing pandas in their
@@ -710,11 +807,11 @@ def test_gibberish_at_the_gate_reprompts_instead_of_executing() -> None:
     )
 
 
-def test_policy_all_cannot_approve_a_person_grade_admission_or_plan() -> None:
+def test_policy_decision_cannot_approve_a_person_grade_admission_or_plan() -> None:
     """P0 item 5: policy_decision("all") approved HUMAN findings, HUMAN skill
     admissions and the PLAN gate, contradicting its own docstring. The
-    pre-authorisation covers AUTO and nothing else, whatever policy string a
-    caller hands it."""
+    pre-authorisation covers AUTO and nothing else. Since #30 it reads the
+    event alone, so there is no string left for a caller to widen it with."""
     from crivo.repl import policy_decision
 
     deferred = [
@@ -726,17 +823,18 @@ def test_policy_all_cannot_approve_a_person_grade_admission_or_plan() -> None:
     ]
 
     for event in deferred:
-        for policy in ("all", "auto", "anything"):
-            assert policy_decision(event, policy).action == "skip", (
-                f"{event.grade!r} under policy {policy!r} must not be approved"
-            )
+        assert policy_decision(event).action == "skip", (
+            f"{event.grade!r} must not be approved unattended"
+        )
     auto = GateRequest("fix_a", 1, title="fix 1/3 · trailing space", grade="AUTO")
-    assert policy_decision(auto, "all").action == "run"
+    assert policy_decision(auto).action == "run"
 
 
-def test_headless_policy_all_defers_person_grades_to_a_human() -> None:
-    """The same hole down the path that exposes it: run_clean_once under
-    policy="all" (the CLI flag, and until this fix a free MCP argument)."""
+def test_headless_clean_defers_person_grades_to_a_human() -> None:
+    """The same hole down the path that exposes it: run_clean_once, which
+    took policy="all" from the CLI flag and, until P0 item 5, a free MCP
+    argument. With no policy left, a HUMAN finding, a skill admission and the
+    PLAN gate all wait for a person."""
     from crivo.repl import run_clean_once
 
     gates = [
@@ -747,7 +845,7 @@ def test_headless_policy_all_defers_person_grades_to_a_human() -> None:
     ]
     session = FakeSession(script=gates)
 
-    summary = run_clean_once(session, "data/x.csv", name="x", policy="all")
+    summary = run_clean_once(session, "data/x.csv", name="x")
 
     assert [d.action for d in session.decisions] == ["run", "skip", "skip", "skip"]
     assert summary["needs_human"] == [
@@ -755,6 +853,25 @@ def test_headless_policy_all_defers_person_grades_to_a_human() -> None:
         "admit skill fix-x",
         "approve plan v1",
     ]
+
+
+def test_the_headless_clean_takes_no_policy() -> None:
+    """#30: run_clean_once and policy_decision accepted a `policy` that
+    changed nothing, which tells a caller its choice mattered. Both refuse it
+    now, the clean before it loads anything. The calls without it are pinned
+    in the two tests above."""
+    from crivo.repl import policy_decision, run_clean_once
+
+    session = FakeSession(
+        script=[GateRequest("fix_a", 1, title="fix 1/1 · trailing space", grade="AUTO")]
+    )
+    with pytest.raises(TypeError, match="policy"):
+        run_clean_once(session, "data/x.csv", name="x", policy="all")
+    assert session.loads == [] and session.cleans == [], "nothing may start"
+
+    auto = GateRequest("fix_a", 1, title="fix 1/1 · trailing space", grade="AUTO")
+    with pytest.raises(TypeError, match="positional argument"):
+        policy_decision(auto, "all")
 
 
 def test_a_bare_enter_at_the_gate_does_not_burn_a_try() -> None:
@@ -886,3 +1003,280 @@ def test_a_gate_with_no_title_and_no_code_is_still_reported() -> None:
 
     assert [d.action for d in session.decisions] == ["skip"]
     assert summary["needs_human"] == [""]
+
+
+# --- #35: --auto-run trusts the analyst's own query cells and nothing else ---
+
+
+def test_auto_run_still_asks_a_person_at_a_skill_admission() -> None:
+    """#35: --auto-run answered every gate with run, whatever its grade, and
+    /clean passed the flag through. So the skill-admission gate, graded HUMAN
+    because governance is never unattended, was approved with nobody asked,
+    and skills.save and library.register followed. The flag trusts the
+    analyst's own query cells; an admission waits for a person, and the
+    person's answer is the one the session receives."""
+    admission = GateRequest(
+        "def fix(df, cols):\n    return df.replace({c: {-999: None} for c in cols})",
+        1,
+        title=(
+            "admit skill fix-sentinel-missing · d4 · reproduces the case it came from"
+        ),
+        preview="amount: 143 of 5,210 cells change",
+        grade="HUMAN",
+    )
+    fake = FakeSession(script=[admission, CardReady(FakeCard("# clean report"))])
+    input_fn = scripted_input("/clean df", "s", "/quit")
+
+    run_repl(fake, auto_run=True, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert GATE_PROMPT in input_fn.prompts, "a person must be asked at the admission"
+    assert fake.decisions == [GateDecision("skip")], (
+        "the person's skip, not an unattended run, reaches the session"
+    )
+    assert fake.cleans == ["df"]
+    assert fake.questions == [], "the gate answer must not leak out as a question"
+
+
+class RoutedSession(FakeSession):
+    """FakeSession with one script per command, so a question's gates and a
+    clean's gates are told apart by which generator received the answer."""
+
+    def __init__(
+        self,
+        turn: list[Event] | None = None,
+        clean: list[Event] | None = None,
+        family: list[Event] | None = None,
+    ) -> None:
+        super().__init__()
+        self.scripts = {
+            "turn": turn or [],
+            "clean": clean or [],
+            "family": family or [],
+        }
+        self.answers: dict[str, list] = {"turn": [], "clean": [], "family": []}
+        self.families: list[tuple[str, str]] = []
+
+    def _play(self, kind: str) -> Generator[Event, GateDecision | None, None]:
+        for event in self.scripts[kind]:
+            self.answers[kind].append((yield event))
+
+    def run_turn(self, question: str) -> Generator[Event, GateDecision | None, None]:
+        self.questions.append(question)
+        yield from self._play("turn")
+
+    def clean(self, var: str) -> Generator[Event, GateDecision | None, None]:
+        self.cleans.append(var)
+        yield from self._play("clean")
+
+    def clean_family(
+        self, pattern: str, name: str
+    ) -> Generator[Event, GateDecision | None, None]:
+        self.families.append((pattern, name))
+        yield from self._play("family")
+
+    def decided(self, kind: str) -> list[GateDecision]:
+        return [a for a in self.answers[kind] if isinstance(a, GateDecision)]
+
+
+_SKIP = GateDecision("skip")
+
+# every gate the clean flows yield, each answered by the person in its own way
+# so the answer that lands is visibly theirs. The harmonize gate carries no
+# grade, like a QUERY gate: the route is the command, not the grade (#35).
+_JUDGEMENT_GATES = [
+    pytest.param(
+        "/clean df",
+        GateRequest(
+            "df = fix_trailing_space(df, ['city'])",
+            1,
+            title="autoclean 1/4 · d03 trailing-space · AUTO · 12 cells end in ' '",
+            grade="AUTO",
+        ),
+        ("r",),
+        GateDecision("run"),
+        id="AUTO-fix",
+    ),
+    pytest.param(
+        "/clean df",
+        GateRequest(
+            "def fix_label_variants(df):\n    return df",
+            1,
+            title=(
+                "fix 2/4 · label-variants · GATE · conf 0.81 · "
+                "'NY', 'N.Y.' and 'new york' in state"
+            ),
+            grade="GATE",
+        ),
+        ("j", "keep N.Y. apart"),
+        GateDecision("reject", "keep N.Y. apart"),
+        id="GATE-fix",
+    ),
+    pytest.param(
+        "/clean df",
+        GateRequest(
+            "def fix_conflicting_duplicates(df):\n    return df",
+            1,
+            title=(
+                "fix 3/4 · conflicting-duplicates · HUMAN · conf 0.66 · "
+                "id 00417 has two amounts"
+            ),
+            grade="HUMAN",
+        ),
+        ("s",),
+        _SKIP,
+        id="HUMAN-fix",
+    ),
+    pytest.param(
+        "/clean df",
+        GateRequest(
+            "| step | finding | executor |\n| 1 | d03 | autoclean |",
+            1,
+            title="approve plan v1: 3 steps (2 autoclean, 1 model)",
+            grade="PLAN",
+        ),
+        ("s",),
+        _SKIP,
+        id="plan",
+    ),
+    pytest.param(
+        '/clean-family "data/sales_*.csv" sales',
+        GateRequest(
+            "def harmonize(slices):\n    return slices",
+            1,
+            title="harmonize 3 slices of sales · GATE · 2 drift finding(s)",
+        ),
+        ("s",),
+        _SKIP,
+        id="ungraded-harmonize",
+    ),
+    pytest.param(
+        '/clean-family "data/sales_*.csv" sales',
+        GateRequest(
+            "def fix(df, cols):\n    return df",
+            1,
+            title=(
+                "replay harmonize-sales · proven · GATE · "
+                "a confirmed mapping over every slice of sales"
+            ),
+            grade="GATE",
+        ),
+        ("j", "the 2024 slice renamed a column"),
+        GateDecision("reject", "the 2024 slice renamed a column"),
+        id="GATE-replay",
+    ),
+]
+
+
+@pytest.mark.parametrize(("command", "gate", "typed", "expected"), _JUDGEMENT_GATES)
+def test_auto_run_still_asks_a_person_at_every_clean_gate(
+    command: str, gate: GateRequest, typed: tuple[str, ...], expected: GateDecision
+) -> None:
+    """#35: a fix (AUTO, GATE or HUMAN), a plan, a harmonize and a replay are
+    judgement calls, so under --auto-run each still stops at the gate prompt,
+    and the session gets the person's answer, not an unattended run."""
+    kind = "family" if command.startswith("/clean-family") else "clean"
+    session = RoutedSession(**{kind: [gate, CardReady(FakeCard("# clean report"))]})
+    input_fn = scripted_input(command, *typed, "/quit")
+
+    run_repl(session, auto_run=True, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert input_fn.prompts.count(GATE_PROMPT) == 1, (
+        f"the {gate.grade or 'ungraded'} gate must ask a person under --auto-run"
+    )
+    assert session.decided(kind) == [expected]
+    assert session.questions == [], "the gate answer must not leak out as a question"
+
+
+def test_auto_run_still_runs_query_cells_on_either_side_of_a_clean() -> None:
+    """#35, the legitimate case beside the refusals above: restricting the flag
+    must not make it ask at the analyst's own query cells. In one session the
+    query cells of a question run unprompted both before and after a /clean
+    whose fix gate a person answers, so the clean neither borrows the flag nor
+    switches it off."""
+    query_cells = [
+        GateRequest("df.shape", 1),
+        GateRequest("df['amount'].describe()", 2),
+        CardReady(FakeCard()),
+    ]
+    fix_gate = GateRequest(
+        "df = fix_sentinel_missing(df)",
+        1,
+        title="fix 1/1 · sentinel-missing · AUTO · conf 0.97 · 143 cells are '-999'",
+        grade="AUTO",
+    )
+    session = RoutedSession(
+        turn=query_cells, clean=[fix_gate, CardReady(FakeCard("# clean report"))]
+    )
+    input_fn = scripted_input(
+        "how many rows?", "/clean df", "s", "and the amounts?", "/quit"
+    )
+
+    run_repl(session, auto_run=True, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert session.decided("clean") == [GateDecision("skip")], (
+        "the clean's gate is the person's call"
+    )
+    assert session.decided("turn") == [GateDecision("run")] * 4, (
+        "every query cell, before and after the clean, runs without a prompt"
+    )
+    assert input_fn.prompts.count(GATE_PROMPT) == 1, "only the clean's gate asks"
+    assert session.questions == ["how many rows?", "and the amounts?"]
+
+
+def test_auto_run_with_nobody_at_a_clean_gate_skips_it_and_never_runs_it() -> None:
+    """#35: `yes | crivo --auto-run` used to approve every clean gate, because
+    the flag answered before stdin was read. A clean gate under the flag is a
+    person's call, so the driver's own bounds apply to it: an answer nobody
+    understood is not consent, the gate is skipped, the clean runs to its own
+    end, and the driver leaves."""
+    from crivo.repl import GATE_TRIES, GAVE_UP_NOTE
+
+    session = RoutedSession(
+        clean=[
+            GateRequest(
+                "def fix_conflicting_duplicates(df):\n    return df",
+                1,
+                title="fix 1/1 · conflicting-duplicates · HUMAN · conf 0.66",
+                grade="HUMAN",
+            )
+        ]
+    )
+    asked: list[str] = []
+
+    def nobody_there(prompt: str = "") -> str:
+        asked.append(prompt)
+        if len(asked) > 100:
+            raise AssertionError("the gate re-prompted without bound")
+        if prompt == PROMPT:
+            return "/clean df" if asked.count(PROMPT) == 1 else "/quit"
+        return "y"
+
+    run_repl(session, auto_run=True, input_fn=nobody_there, print_fn=RecordingPrint())
+
+    assert session.decided("clean") == [GateDecision("skip", GAVE_UP_NOTE)], (
+        "an unanswered judgement call is skipped, never run"
+    )
+    assert asked.count(GATE_PROMPT) == GATE_TRIES
+    assert session.closed
+
+
+def test_auto_run_still_builds_the_preview_a_person_answers_by(
+    monkeypatch, tmp_path
+) -> None:
+    """#35: --auto-run turned previews off, because every gate auto-approved
+    and nobody would read one. The clean gates now wait for a person, and a
+    person answering one without its preview is back to executing pandas in
+    their head. The flag itself still reaches the REPL."""
+    main, built = _main_up_to_the_repl(monkeypatch, tmp_path)
+    handed: list[dict] = []
+    monkeypatch.setattr("crivo.repl.run_repl", lambda session, **kw: handed.append(kw))
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    monkeypatch.setattr("sys.argv", ["crivo", "--auto-run"])
+
+    rc = main()
+
+    assert rc == 0
+    assert [kw.get("preview") for kw in built] == [True], (
+        "the gates a person still answers need their preview"
+    )
+    assert handed == [{"auto_run": True}], "query cells still auto-run"

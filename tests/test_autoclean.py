@@ -8,9 +8,51 @@ trustworthily, only chat with it.
 """
 
 import pandas as pd
+import pytest
+from test_detect import _PRICES, _plant
 
 import crivo as aa
-from crivo.autoclean import changed_cells
+from crivo.autoclean import CleanSummary, changed_cells
+
+# The two public ways to call the deterministic cleaner, each taking the frame
+# first and passing any further arguments straight through.
+_CLEAN_ENTRY_POINTS = {
+    "crivo.clean": lambda df, *args, **kwargs: aa.clean(df, *args, **kwargs),
+    "df.crivo.clean": lambda df, *args, **kwargs: df.crivo.clean(*args, **kwargs),
+}
+
+
+@pytest.mark.parametrize("entry", list(_CLEAN_ENTRY_POINTS))
+def test_clean_takes_no_policy(entry: str) -> None:
+    """#29: `policy` was accepted and never read, so `policy="all"` read as if
+    it widened what runs. Both entry points refuse it with a TypeError, by
+    keyword or by position, and the bare call still cleans the frame."""
+    call = _CLEAN_ENTRY_POINTS[entry]
+    df = pd.DataFrame(
+        {
+            "invoice_id": [f"{n:06d}" for n in range(1, 21)],  # leading zeros
+            "amount": ["$1,200", "$3,400.50", "$15", "$980"] * 5,  # d01 AUTO
+            "status": (["paid", "late", "N/A"] * 6) + ["paid", "N/A"],  # d04 AUTO
+        }
+    )
+    original = df.copy()
+
+    cleaned, summary = call(df)
+
+    # the legitimate call: same fixes, same frame, input untouched
+    assert isinstance(summary, CleanSummary)
+    assert df.equals(original), "clean must not touch the input frame"
+    assert {a["disease"] for a in summary.applied} == {1, 4}
+    assert summary.needs_review == []
+    assert cleaned["amount"].tolist()[:4] == [1200.0, 3400.5, 15.0, 980.0]
+    assert cleaned["status"].isna().sum() == 7, "the seven N/A sentinels -> NaN"
+    assert cleaned["invoice_id"].tolist()[:2] == ["000001", "000002"]
+
+    # the dead argument: refused, not silently ignored
+    with pytest.raises(TypeError, match="policy"):
+        call(df, policy="all")
+    with pytest.raises(TypeError):
+        call(df, "all")
 
 
 def test_changed_cells_reports_the_before_and_after_of_a_value_fix() -> None:
@@ -172,11 +214,11 @@ def test_clean_makes_a_real_file_pass_its_own_detectors() -> None:
     detectors — proven by re-diagnosing the cleaned frame."""
     from pathlib import Path
 
-    src = Path("data/takehome/hmt-spend-2026-03.csv")
+    src = Path("data/external/public-spend/hmt-spend-2026-03.csv")
     if not src.exists():
         import pytest
 
-        pytest.skip("run scripts/fetch_takehome.py for the real file")
+        pytest.skip("run scripts/fetch_public_spend.py for the real file")
 
     df = aa.read(src)
     cleaned, summary = aa.clean(df)
@@ -189,3 +231,178 @@ def test_clean_makes_a_real_file_pass_its_own_detectors() -> None:
             r["disease"] for r in summary.needs_review
         }, f"claimed d{a['disease']} fixed but it still fires"
     assert df.equals(aa.read(src)), "the input frame was mutated"
+
+
+def test_clean_on_the_example_applies_the_safe_fixes_and_lists_what_is_left() -> None:
+    """Pins beside #24 and #25: a finding an applied fix cleared never comes
+    back as a review entry, and one the cleaned frame still carries is listed
+    (Aarmen, 2026-10-17). On the example, d01 makes revenue numeric, which
+    bares d15 outliers the string column hid; it is listed beside d09. diagnose
+    reports d15 checked and clean on the original, so the entry says the fixes
+    found it, not that it is still there (decided on #25, 2026-10-17)."""
+    _cleaned, summary = aa.clean(aa.load_example())
+
+    assert [a["disease"] for a in summary.applied] == [4, 6, 7, 1]
+    assert [r["disease"] for r in summary.needs_review] == [9, 15]
+    d15 = next(r for r in summary.needs_review if r["disease"] == 15)
+    assert d15.get("reason") == "found once the fixes ran", d15
+
+
+def test_an_auto_finding_without_a_fixer_says_why() -> None:
+    """Regression for #24. d09 grades AUTO but has no fixer on purpose, so
+    clean() left it in review with no reason, and the summary read "safe to fix
+    automatically" with nothing to say why it was not. The reason travels in
+    the entry and on the line a person reads."""
+    from crivo.autoclean import FIXERS
+
+    assert 9 not in FIXERS, "the premise of this test"
+    _cleaned, summary = aa.clean(aa.load_example())
+
+    entry = next(r for r in summary.needs_review if r["disease"] == 9)
+    assert entry["grade"] == "AUTO"
+    assert "duplicate rows" in entry.get("reason", ""), entry
+    assert any(
+        line.lstrip().startswith("· d09") and "duplicate rows" in line
+        for line in repr(summary).splitlines()
+    ), repr(summary)
+
+
+def test_an_auto_finding_with_no_fixer_yet_gets_the_generic_reason() -> None:
+    """Regression for #24. The same silent path as d09, for a disease that is
+    missing a fixer rather than denied one: a census count column with "<5"
+    suppression flags fires d05 AUTO, and its review entry says there is no
+    fixer yet rather than nothing."""
+    from crivo.autoclean import FIXERS
+
+    counts = ["124", "87", "342", "15", "219", "603", "48", "911", "137", "260"] * 2
+    counts[3] = counts[14] = "<5"
+    df = pd.DataFrame(
+        {"area_code": [f"{n:05d}" for n in range(20)], "residents": counts}
+    )
+
+    assert 5 not in FIXERS, "the premise of this test"
+    _cleaned, summary = aa.clean(df)
+
+    entry = next(r for r in summary.needs_review if r["disease"] == 5)
+    assert entry["grade"] == "AUTO"
+    assert "no deterministic fixer" in entry.get("reason", ""), entry
+
+
+def test_a_refused_fix_is_listed_once_and_keeps_its_reason(monkeypatch) -> None:
+    """Pin beside #24: a finding clean() attempted and refused is in review
+    once, with the refusal's reason, not again as a bare copy or with the
+    no-fixer wording."""
+    from crivo import autoclean
+
+    monkeypatch.setitem(autoclean.FIXERS, 6, lambda frame, cols: frame.copy())
+    df = pd.DataFrame({"note": ["  spaced  ", "clean", "two  spaces", "x"] * 5})
+
+    _cleaned, summary = aa.clean(df)
+
+    entries = [r for r in summary.needs_review if r["disease"] == 6]
+    assert len(entries) == 1, entries
+    assert entries[0]["grade"] == "AUTO"
+    assert entries[0]["reason"] == "fix did not clear verification"
+
+
+@pytest.mark.parametrize(
+    ("gaps", "via_csv", "stacked"),
+    [
+        (("", ""), True, False),
+        ((None, None), False, False),
+        (("", None), False, False),
+        (("", None), False, True),
+    ],
+    ids=["csv-blanks", "nan", "blank-and-nan", "stacked-exports"],
+)
+def test_clean_clears_a_typed_in_minus_999_beside_blank_and_nan_cells(
+    tmp_path, gaps, via_csv, stacked
+) -> None:
+    """Regression for #26. The d04 fixer re-derives which cells to clear on
+    its own (the loop calls FIXERS[4](df, cols) with nothing else), and it
+    sees the gaps the detector skips: crivo's readers keep a blank cell as ""
+    (keep_default_na=False), and a frame built in code holds NaN. A gap is not
+    a number, so a fixer that judged -999 against it would leave the -999,
+    fail verification and revert, taking the N/A clearing with it.
+
+    stacked-exports pins sentinel_mask's "positional, so a non-unique index is
+    safe": two 18-reading gauge exports stacked with pd.concat carry every row
+    label twice, and a mask written by label would also clear the real reading
+    that shares a placeholder's label."""
+    rain = [f"{0.4 + i * 1.3:.1f}" for i in range(36)]  # 0.4 .. 45.9 mm
+    planted = {3: "-999", 12: "N/A", 17: "-999", 26: "N/A", 33: "-999"}
+    for row, cell in {**planted, 8: gaps[0], 21: gaps[1]}.items():
+        rain[row] = cell
+    ids = [f"R{i:04d}" for i in range(36)]
+    if via_csv:
+        path = tmp_path / "gauge.csv"
+        rows = "".join(f"{i},{v}\n" for i, v in zip(ids, rain, strict=True))
+        path.write_text("reading_id,rain_mm\n" + rows)
+        frame = aa.read(path)
+        assert frame.loc[8, "rain_mm"] == "", "the premise: the blank arrives as text"
+    else:
+        frame = pd.DataFrame({"reading_id": ids, "rain_mm": rain})
+    if stacked:
+        frame.index = list(range(18)) * 2
+        assert not frame.index.is_unique, "the premise: each label twice"
+
+    cleaned, summary = aa.clean(frame)
+
+    # by position throughout: under stacked-exports a label names two rows
+    col = cleaned["rain_mm"]
+    assert col.iloc[[3, 17, 33]].isna().tolist() == [True] * 3
+    assert col.iloc[[12, 26]].isna().tolist() == [True] * 2
+    # every real reading is left exactly as it was
+    real = [p for p in range(36) if p not in {*planted, 8, 21}]
+    assert col.iloc[real].tolist() == frame["rain_mm"].iloc[real].tolist()
+    # the fix verified: applied, not reverted into review
+    assert [a["columns"] for a in summary.applied if a["disease"] == 4] == [["rain_mm"]]
+    assert not any(r["disease"] == 4 for r in summary.needs_review)
+
+
+# ledger adjustments run -5000..5000, so -999 is a real adjustment here
+_LEDGER = [
+    "-5000",
+    "-2500.00",
+    "-999",
+    "-120.50",
+    "0",
+    "45.10",
+    "999",
+    "2500",
+    "5000",
+    "-999",
+    "310.25",
+    "-999",
+] * 3
+
+
+@pytest.mark.parametrize(
+    ("column", "cells", "token"),
+    [
+        # used-car prices up to 20000, two listings not yet priced
+        ("list_price", _PRICES + ["N/A", "N/A"], "9999"),
+        # a ledger export with two adjustments marked N/A and one left blank
+        ("balance_change", _plant(_LEDGER, {4: "N/A", 16: "", 28: "N/A"}), "-999"),
+    ],
+    ids=["prices-reach-9999", "ledger-spans-minus-999"],
+)
+def test_clean_keeps_a_strong_token_the_real_values_reach(column, cells, token) -> None:
+    """Pin beside #26, in the fixer. test_detect pins that d04 does not name a
+    9999 or -999 the real values reach, but _fix_sentinels re-derives which
+    cells to clear from the whole column, and it is the step that deletes
+    data. The N/A cells beside the real token are still cleared."""
+    frame = pd.DataFrame(
+        {"row_id": [f"{i:06d}" for i in range(len(cells))], column: cells}
+    )
+    na = [p for p, v in enumerate(cells) if v == "N/A"]
+    real = [p for p, v in enumerate(cells) if v not in {"N/A", ""}]
+    assert cells.count(token) >= 3, "the premise: the token is a real value here"
+
+    cleaned, summary = aa.clean(frame)
+
+    assert [a["columns"] for a in summary.applied if a["disease"] == 4] == [[column]]
+    assert cleaned[column].iloc[na].isna().all()
+    kept = cleaned[column].iloc[real].tolist()
+    assert [v for v in kept if v == token] == [token] * cells.count(token)
+    assert kept == [cells[p] for p in real]

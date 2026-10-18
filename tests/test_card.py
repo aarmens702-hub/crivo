@@ -88,6 +88,22 @@ def test_save_writes_json_and_md(tmp_path):
     assert (tmp_path / "cards" / "c001.md").exists()
 
 
+def test_card_footer_names_effort_when_no_temperature_was_sent():
+    """Regression for #13. DD1: the Claude path sends no temperature, so
+    `temp None` on its card would stamp a setting that was never sent. The
+    card names the control that was. A provider that sent a temperature keeps
+    `temp 0.0`."""
+    card = _card()
+    card.model = {"provider": "claude", "model": "claude-opus-5-5", "effort": "high"}
+    footer = card.to_markdown().splitlines()[-1]
+    assert footer.startswith("*claude-opus-5-5 · effort high · ")
+    assert "temp" not in footer
+
+    deepseek_footer = _card().to_markdown().splitlines()[-1]
+    assert deepseek_footer.startswith("*deepseek-v4-pro · temp 0.0 · ")
+    assert "effort" not in deepseek_footer
+
+
 def test_capped_flag_appears_in_meta_line():
     card = _card()
     card.flags["capped"] = True

@@ -17,7 +17,7 @@ from crivo.events import (
     StreamText,
 )
 from crivo.kernel.client import ExecResult, HelloInfo, StreamOut
-from crivo.loop import Session, parse_tags
+from crivo.loop import MAX_ITERS, Session, parse_tags
 
 
 class FakeClient:
@@ -457,11 +457,11 @@ def test_a_call_that_never_finishes_thinking_is_abandoned(monkeypatch):
 
 
 def test_a_remote_frame_becomes_a_lineage_entry_when_it_appears(session):
-    """R12: load_url stamps the frame in-kernel; the registry carries that
-    stamp up, and the session records it like a load — so cards, reports, and
-    /why ground remote data without a /load ever happening. A re-fetch to new
-    content is a second entry (both kept); a re-stamp of the same content is
-    not a duplicate."""
+    """R12: readers.remote.read_url stamps the frame in-kernel; the registry
+    carries that stamp up, and the session records it like a load — so cards,
+    reports, and /why ground remote data without a /load ever happening. A
+    re-fetch to new content is a second entry (both kept); a re-stamp of the
+    same content is not a duplicate."""
     remote = {
         "uri": "https://example.org/feed.csv",
         "fetched_at": "2026-08-14T21:00:00+00:00",
@@ -558,3 +558,333 @@ def test_a_driver_that_never_answers_the_gate_runs_nothing(session, monkeypatch)
     list(session.run_turn("what is the mean?"))
 
     assert FakeClient.executed == [], "an unanswered gate is not an approval"
+
+
+# --- #17: session ids past s99, and nothing after </execute> --------------------
+
+
+def another_session(session, **kw):
+    """A second Session in the fixture's workspace, built the way it was."""
+    return Session(
+        workspace=session.workspace_root,
+        data_dir=session.data_dir,
+        preview=False,
+        snapshots=False,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize(
+    ("taken", "opened", "expected"),
+    [
+        pytest.param(100, 1, ["s101"], id="s01 to s100 taken"),
+        pytest.param(99, 2, ["s100", "s101"], id="two sessions after s99"),
+        pytest.param(130, 1, ["s131"], id="s01 to s130 taken"),
+    ],
+)
+def test_session_ids_past_s99_stay_unique(session, taken, opened, expected):
+    """Regression for #17. The id scan only saw two-digit names, so s100 was
+    never taken and every session after s99 moved into s100: interleaved
+    events, overwritten cards and cleaned files, and a /why that mixed two
+    sessions. MCP opens one session per tool call, so ~100 calls hit it."""
+    for n in range(2, taken + 1):  # the fixture's own session is s01
+        (session.workspace_root / f"s{n:02d}").mkdir()
+
+    opened_sessions = [another_session(session) for _ in range(opened)]
+
+    assert [s.session_id for s in opened_sessions] == expected
+    for s in opened_sessions:
+        metas = [e for e in s.transcript.events() if e["kind"] == "session_meta"]
+        assert len(metas) == 1, f"{s.session_id} shares its directory"
+
+
+def test_a_session_that_loses_the_race_for_its_id_takes_the_next_one(
+    session, monkeypatch
+):
+    """Regression for #17. Two MCP workers can scan the workspace at the same
+    moment and pick the same id. The one whose mkdir loses takes the next free
+    id; it never moves into the winner's directory."""
+    real_next = Session._next_session_id
+    raced: list[str] = []
+
+    def next_id_lost_once(self):
+        sid = real_next(self)
+        if not raced:
+            (self.workspace_root / sid).mkdir()  # the other worker claims it
+            raced.append(sid)
+        return sid
+
+    monkeypatch.setattr(Session, "_next_session_id", next_id_lost_once)
+    late = another_session(session)
+
+    assert raced == ["s02"]
+    assert late.session_id == "s03"
+    assert not (session.workspace_root / "s02" / "transcript.jsonl").exists(), (
+        "the loser wrote into the winner's directory"
+    )
+
+
+def test_a_session_never_moves_into_a_taken_directory(session, monkeypatch):
+    """Regression for #17. When every id it picks is already taken, opening a
+    session fails after five tries rather than sharing a directory."""
+    before = (session.session_dir / "transcript.jsonl").read_text()
+    picks: list[str] = []
+
+    def next_id_always_taken(self):
+        picks.append(session.session_id)
+        return session.session_id
+
+    monkeypatch.setattr(Session, "_next_session_id", next_id_always_taken)
+
+    with pytest.raises(FileExistsError):
+        another_session(session)
+    assert len(picks) == 5, f"expected five tries, got {len(picks)}"
+    assert (session.session_dir / "transcript.jsonl").read_text() == before
+
+
+def chunked_generate(replies):
+    """scripted_generate, but each reply streams as a list of chunks, and each
+    call records whether its stream was read to the end (the real generate
+    hands usage to telemetry only after its last chunk)."""
+    queue = list(replies)
+    contexts: list[list] = []
+    drained: list[bool] = []
+
+    def generate(messages, model=None):
+        contexts.append(list(messages))
+        drained.append(False)
+        index = len(drained) - 1
+        yield from queue.pop(0)
+        drained[index] = True
+
+    generate.contexts = contexts
+    generate.drained = drained
+    return generate
+
+
+CELL = "<execute>\nx = 1\nassert x == 1\n</execute>"
+INVENTED = "\nOutput:\n999\nSo the table has 999 rows."
+PROSE = "A cell ends at </execute>, so here is mine.\n"
+INTENT_MATCH = (
+    "<restatement>the code set x to 1</restatement>"
+    "<verdict>match</verdict><reason>same quantity</reason>"
+)
+
+
+@pytest.mark.parametrize(
+    ("chunks", "kept"),
+    [
+        pytest.param([CELL + INVENTED], CELL, id="the review repro in one chunk"),
+        pytest.param(
+            ["<execute>\nx = 1\nassert x == 1\n</exe", "cute>" + INVENTED],
+            CELL,
+            id="closing tag split across two chunks",
+        ),
+        pytest.param(
+            ["<execute>\nx = 1\nassert x == 1\n</", "execute", ">" + INVENTED],
+            CELL,
+            id="closing tag split across three chunks",
+        ),
+        pytest.param(
+            [CELL, "\nOutput:\n", "999\n", "So the table has 999 rows."],
+            CELL,
+            id="invention arrives in later chunks",
+        ),
+        pytest.param(
+            ["<execute>\nx = 1\n", "assert x == 1\n</execute>\nOutput:\n999", "\n"],
+            CELL,
+            id="tag closes mid-chunk",
+        ),
+        pytest.param(
+            [CELL + "\n<answer>The table has 999 rows.</answer>"],
+            CELL,
+            id="premature answer after the cell",
+        ),
+        pytest.param(
+            [CELL + "\n<execute>\nprint(999)\n</execute>"],
+            CELL,
+            id="second cell after the first",
+        ),
+        pytest.param(
+            [PROSE + CELL + INVENTED],
+            PROSE + CELL,
+            id="stray closing tag in prose before the cell",
+        ),
+    ],
+)
+def test_text_after_execute_never_reaches_history_or_screen(
+    session, monkeypatch, chunks, kept
+):
+    """Regression for #17 (DD5). A model that writes past </execute> and
+    invents an "Output:" block fed its own made-up numbers back to itself on
+    the next call, streamed them to the screen, and replayed them on
+    --resume. The reply ends at the first </execute> that closes an
+    <execute>; the cell still runs, and a stray closing tag in prose before
+    any cell does not cut."""
+    fake = chunked_generate([chunks, ["<answer>x is 1</answer>"], [INTENT_MATCH]])
+    monkeypatch.setattr(llm, "generate", fake)
+    FakeClient.script = [[ok_result(value="1")]]
+
+    events = drive(session.run_turn("how many rows does the table have?"))
+
+    assert not [m for m in session.history if "999" in str(m.get("content"))], (
+        "invented output reached the model's history"
+    )
+    assert "999" not in json.dumps(fake.contexts[1]), (
+        "invented output reached the next model call"
+    )
+    streamed = [e.text for e in events if isinstance(e, StreamText)]
+    assert not [t for t in streamed if "999" in t], "invented output was streamed"
+    assert kept in "".join(streamed), "the cell itself must still reach the screen"
+    models = [e for e in session.transcript.events() if e["kind"] == "model"]
+    assert models[0]["text"] == kept
+    assert FakeClient.executed == ["x = 1\nassert x == 1"], "the cell must still run"
+    assert card_from(events).answer == "x is 1"
+    assert all(fake.drained), "every provider stream is read to its end"
+
+    resumed = another_session(session, resume=session.session_id)
+    assert not [m for m in resumed.history if "999" in str(m.get("content"))], (
+        "invented output came back on --resume"
+    )
+
+
+def test_the_intent_check_reads_past_an_echoed_execute_tag(session, monkeypatch):
+    """Regression for #17. Only the analyst's own replies stop at </execute>.
+    The intent checker reads the code back, so its reply may quote a cell;
+    cutting it there would drop the verdict and wave a mismatch through."""
+    FakeClient.script = [[ok_result(value="'42'")]]
+    monkeypatch.setattr(
+        llm,
+        "generate",
+        scripted_generate(
+            [
+                "<execute>result = df['b'].sum()\nassert result > 0</execute>",
+                "<answer>the total is 42</answer>",
+                (
+                    "<restatement>the cell <execute>result = df['b'].sum()"
+                    "</execute> summed column b</restatement>"
+                    "<verdict>mismatch</verdict>"
+                    "<reason>the question asked for column a</reason>"
+                ),
+            ]
+        ),
+    )
+    card = card_from(drive(session.run_turn("what is the total of column a?")))
+
+    assert card.flags["intent_mismatch"] is True
+    assert "column a" in card.intent["reason"]
+
+
+def test_a_compaction_summary_reads_past_an_echoed_execute_tag(session, monkeypatch):
+    """Regression for #17. The compaction summary may quote an earlier cell;
+    it is housekeeping, not the analyst's turn, so it is not cut there."""
+    monkeypatch.setattr("crivo.loop.COMPACT_AT_CHARS", 2_000)
+    for i in range(30):
+        session.history.append(
+            {"role": "user", "content": f"question {i} " + "x" * 120}
+        )
+        session.history.append(
+            {"role": "assistant", "content": f"answer {i} " + "y" * 120}
+        )
+    monkeypatch.setattr(
+        llm,
+        "generate",
+        scripted_generate(
+            [
+                "earlier the model ran <execute>x = 1</execute> and found 42 rows",
+                "<answer>still working</answer>",
+            ]
+        ),
+    )
+
+    drive(session.run_turn("are you alive?"))
+
+    summaries = [
+        m["content"]
+        for m in session.history
+        if str(m["content"]).startswith("<history-summary>")
+    ]
+    assert len(summaries) == 1
+    assert "found 42 rows" in summaries[0]
+
+
+QUOTING_ANSWER = (
+    "<answer>The total is 42. How this was computed: "
+    "<execute>df['b'] = df['b'] * 2</execute> doubled b.</answer>"
+)
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        pytest.param([QUOTING_ANSWER], id="answer quotes a whole cell"),
+        pytest.param(
+            [
+                "<answer>The total is 42. How this was computed: ",
+                "<execute>df['b'] = df['b'] * 2</exe",
+                "cute> doubled b.</answer>",
+            ],
+            id="quoted cell closes in a later chunk",
+        ),
+        pytest.param(
+            ["<answer>b</answer><execute>a</execute>"],
+            id="closed answer then a cell",
+        ),
+    ],
+)
+def test_an_answer_that_quotes_a_cell_runs_nothing(session, monkeypatch, chunks):
+    """Regression for #17. The reply ends at </execute> only when no <answer>
+    opened before the cell. An answer that quotes the code it ran was cut
+    mid-answer, so the quoted line ran as a fresh cell (here, doubling column
+    b a second time). A reply holding an answer and a cell stays malformed:
+    it runs nothing, gets the free nudge, and the clean answer after it
+    reaches the card."""
+    fake = chunked_generate([chunks, ["<answer>The total is 42.</answer>"]])
+    monkeypatch.setattr(llm, "generate", fake)
+    # what the kernel would hand back were the quoted cell run; nothing may run
+    FakeClient.script = [[ok_result(value="None")]]
+
+    events = drive(session.run_turn("what is the total of column b?"))
+
+    assert FakeClient.executed == [], "a cell quoted inside an answer ran"
+    assert not [e for e in events if isinstance(e, GateRequest)]
+    nudges = [e for e in events if isinstance(e, Notice) and e.kind == "nudge"]
+    assert len(nudges) == 1, "the reply must be nudged as malformed"
+    models = [e for e in session.transcript.events() if e["kind"] == "model"]
+    assert models[0]["text"] == "".join(chunks), "an open answer is not cut"
+    assert card_from(events).answer == "The total is 42."
+    assert all(fake.drained), "every provider stream is read to its end"
+
+
+def test_a_forced_answer_that_never_comes_keeps_the_reply_cut_at_its_cell(
+    session, monkeypatch
+):
+    """Regression for #17. The stated tradeoff of the forced-answer fallback:
+    when the cell budget is spent and both forced replies are malformed, the
+    card carries the last reply as it was kept, cut at </execute>. The output
+    the model invented past its cell never reaches the card; the cost is a
+    card whose answer is a bare cell, flagged malformed."""
+    cell = "<execute>x = 1\nassert x == 1</execute>"
+    last = "<execute>n = len(df)\nassert n > 0</execute>"
+    monkeypatch.setattr(
+        llm,
+        "generate",
+        scripted_generate(
+            [cell] * MAX_ITERS
+            + [
+                "I need one more look at the table before answering.",
+                last + "\nOutput:\n999\nSo the table has 999 rows.",
+                INTENT_MATCH,
+            ]
+        ),
+    )
+    FakeClient.script = [[ok_result(value="1")] for _ in range(MAX_ITERS)]
+
+    card = card_from(drive(session.run_turn("how many rows does the table have?")))
+
+    assert card.flags["capped"] is True
+    assert card.flags["malformed_answer"] is True
+    assert card.answer == last
+    assert FakeClient.executed == ["x = 1\nassert x == 1"] * MAX_ITERS, (
+        "a forced reply runs nothing"
+    )

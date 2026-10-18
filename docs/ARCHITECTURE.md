@@ -29,15 +29,15 @@ crivo has two halves. The **library** (`crivo.read`, `diagnose`, `clean` and the
 - `prompts.py`: the system prompt and the tag contract the loop parses. `llm.py`: the `generate()` seam (deepseek, claude, openai, faux).
 - `profile.py`: the kernel-side profiler that produces what the model sees instead of rows.
 - `verify.py`: kernel cells for baseline, per-fix verification, revert, and skill admission. `diff.py`: renders a fix's consequence at the gate.
-- `router.py`, `policy.py`, `plan.py`, `governance.py`: grade routing, approval policies, the plan-first artifact, the governance file.
-- `card.py`: the answer card; checks are lifted by AST from cells that ran ok. `report.py`: the per-run clean report.
+- `router.py`, `policy.py`, `plan.py`: grade routing, approval policies and the three autonomy levels, the plan-first artifact.
+- `card.py`: the answer card; checks are lifted by AST from cells that ran ok (every assert in such a cell counts, including ones in branches that did not run: T25, Stage 0b). `report.py`: the per-run clean report.
 - `skills.py`: SKILL.md packaging. `library.py`: the skill ledger, probation, promotion and retirement.
 - `provenance.py`: the provenance DAG behind `/why`. `transcript.py`: the append-only JSONL transcript it reads.
-- `snapshot.py`: namespace snapshots so verified fixes survive a kernel death. `ingest.py`: `load_url` as a gated kernel function. `fingerprint.py`: frame digests. `telemetry.py`: optional JSONL telemetry.
+- `snapshot.py`: namespace snapshots so verified fixes survive a kernel death. `fingerprint.py`: frame digests. `telemetry.py`: optional JSONL telemetry.
 - `kernel/`: `client.py` (host side, protocol v1, env allowlist), `supervisor.py` (drives the IPython kernel), `bootstrap.py` (the kernel start cell).
 
 **Repo**
-- `tests/`: the keyless suite (`conftest.py` quarantines provider keys). `bench/`: the Proving Ground (injectors, truth, scorer, runner, `RESULTS.md`). `skills/`: admitted skills and `ledger.json`. `scripts/`: dataset fetchers and one-off tools. `specs/`: a design spec per phase. `docs/`: these docs. `docker/`: the sandbox image.
+- `tests/`: the keyless suite (`conftest.py` quarantines provider keys). `bench/`: the Proving Ground (injectors, truth, scorer, runner, `RESULTS.md`). `skills/`: admitted skill folders. The ledger (`skills/ledger.json`) is local and git-ignored until the Stage 2 rebuild commits it. `scripts/`: dataset fetchers and one-off tools. `specs/`: a design spec per phase. `docs/`: these docs. `docker/`: the sandbox image.
 
 ## Data flow
 ```
@@ -59,7 +59,7 @@ CLEAN:    Session.clean(var) -> detect_all in kernel -> router.route per finding
 ```
 
 ## Who works where
-- **Core, Aarmen reviews.** Agents draft changes as small reviewed diffs, never landed unattended: `loop.py`, `prompts.py`, `llm.py`, `card.py` (ownership line in `specs/2026-08-09-p0-core-design.md`), `skills.py` and `library.py` (the skill lifecycle and governance, CLAUDE.md), `provenance.py` (CLAUDE.md), `detect.py` (rule 2 of `specs/2026-09-06-master-plan.md`).
+- **Core, Aarmen reviews.** Agents draft changes as small reviewed diffs, never landed unattended: `loop.py`, `prompts.py`, `llm.py`, `card.py` (ownership line in `specs/2026-08-09-p0-core-design.md`), `skills.py` and `library.py` (the skill lifecycle and governance, CLAUDE.md), `provenance.py` (CLAUDE.md), `detect.py` (rule 5 of `specs/2026-10-14-the-plan.md`).
 - **Agent-owned:** everything else. Tests, bench, scripts, docs, Docker, kernel plumbing, readers, the drivers (`repl.py`, `mcp_server.py`, `__main__.py`, `query.py`) and the keyless capability modules.
 - **Bench rule:** whoever writes corruption injectors (`bench/corrupt.py`, `bench/bases.py`) must not read `detect.py` or `autoclean.py`. The bench grades that code; an injector written from its internals grades its own exam.
 
@@ -77,7 +77,7 @@ CLEAN:    Session.clean(var) -> detect_all in kernel -> router.route per finding
 - **Verify or revert.** Detector re-run, row invariant and untouched-column hashes, or the frame is restored (`specs/2026-08-11-p1-clean-mode-design.md`).
 - **The detector is the verifier** (`detect_one`), so the two cannot drift (`detect.py`).
 - **Skill admission is test-gated and human-gated**, with probation, promotion and retirement (`specs/2026-08-12-p2-skill-harness-design.md`).
-- **Recursion is capped at depth 1** (p0 spec).
+- **Skills never breed skills.** Only a fix the model wrote can be offered as a skill; a fix a skill produced never is (`loop._skill_pass`). crivo makes no recursive model calls (p0 spec).
 - **Provenance is a DAG:** a claim is trusted when it is reachable from raw bytes with passing checks on every step (`specs/2026-08-12-p3-trust-layer-design.md`).
 - **Autonomy levels:** `autonomous` (default) applies AUTO findings with a deterministic fixer unattended, `careful` gates them, `report-only` changes nothing; no level decides a HUMAN finding or admits a skill. The MCP server runs `careful` explicitly (`specs/2026-09-05-autonomy-default-design.md`).
-- **No capability ships ahead of the instrument that measures it.** PyPI publish is wave 14, after correctness and capability (`specs/2026-09-06-master-plan.md`).
+- **No capability ships ahead of the instrument that measures it.** PyPI publish is Stage 5 (decision D22), after correctness and capability (rule 1 of `specs/2026-10-14-the-plan.md`).

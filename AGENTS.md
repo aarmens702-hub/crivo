@@ -16,12 +16,25 @@ If you are an agent: your job is the issue in front of you, nothing more. When t
 - **The core is reviewed, not delegated:** `src/crivo/loop.py`, `prompts.py`, `llm.py`, `card.py`, `skills.py`, `library.py`, `provenance.py` and `detect.py`. An agent may draft a change to one of them on its branch, as a small diff with the tradeoffs stated, but `/ship` stops and shows Aarmen the diff. Nothing in the core reaches `dev` without his explicit yes. Issues that touch the core carry the `core` label.
 - Write big calls under "Key decisions" in `docs/ARCHITECTURE.md` so they aren't re-argued. A multi-day feature gets a short WRAP spec in `specs/` first (What, Requirements, Acceptance criteria, Priority).
 
+## Work types: behaviour is measured, not tested
+crivo is an agent, so a green test suite proves the code, not what the model does: a prompt rewrite passes CI unchanged. Every issue has a type, and the type sets what "done" means.
+
+| Type | Covers | Done when |
+|---|---|---|
+| `code` | The library, detectors, fixers, the referee, harness plumbing, the CLI and MCP | A failing test goes green, plus a bench line if detection or repair moved. |
+| `behaviour` | What the model does: prompts, turn structure, tool descriptions the model reads, model and effort defaults | The harness change is tested on recorded model replies, and a pre-registered eval on the dev split (3 runs or more) meets its rule; the false-backed rate never rises. Aarmen sees the diff and the result. |
+| `eval` | Trap cases, graders, injectors, attacks | The oracle passes, no-op and cheating strategies fail, and the author never read the prompts, the loop or the referee. |
+| `experiment` | Bake-offs, loop runs, spikes | The hypothesis and decision rule are on the issue before the first paid call. The result is recorded, then adopted (as a new `code` or `behaviour` issue) or dropped. |
+
+- Until the eval tooling lands (before Stage 0), say plainly when a behaviour change is unmeasured. Never call it verified.
+- Never quote eval or trap cases in an issue, a prompt or a skill. Name the suite.
+
 ## Branches: dev is the workspace, main is tested
 - **`dev`** is the workspace.
   - Work on a local branch off `dev`, in its own worktree at `.worktrees/<n>` (`/start-task` makes both). The main checkout stays on `dev`.
   - `/ship` runs the checks, rebases onto the latest `dev`, and pushes straight to `dev`. No PR.
   - CI (`.github/workflows/ci.yml`: ruff, pytest and the bench smoke on Linux and macOS) runs on every push to `dev`. `/ship`'s local checks are still the gate, so never push without them. If `dev` breaks, whoever broke it fixes it first.
-- **`main`** is tested and is what the public sees: the README, the GitHub Action (`uses: aarmens702-hub/crivo@main`) and `pip install git+...` all read it.
+- **`main`** is tested and is what the public sees: the README, the GitHub Action (`uses: aarmens702-hub/crivo@vX.Y.Z`, a release tag on `main`) and `pip install git+...` all read it.
   - `/promote`: the local checks on `dev`, a walk of the demo story, then a `dev → main` PR merged once CI is green on it.
   - Nothing reaches `main` any other way.
 - **`/qa-pass`** runs all of `docs/QA.md` black-box. It's for checkpoints (before a release, after a big wave), not every promotion. It files `bug` issues.
@@ -49,7 +62,7 @@ Run from the repo root (or the worktree root).
 - `docs/API-CONTRACT.md`: the public API, finding and summary shapes, CLI flags and exit codes, MCP tools, session events, env vars. **Read before writing code that calls, or is called by, another module.** Build against it exactly.
 - `docs/QA.md`: the black-box cases `/qa-pass` runs, with the expected result of each.
 - `docs/what-this-is.md`: the long version of why crivo is built this way.
-- `specs/2026-09-06-master-plan.md`: the plan, wave by wave. Other `specs/` files are the design of record for their items.
+- `specs/2026-10-14-the-plan.md`: the plan, stage by stage, and the only sequencing authority. `specs/2026-10-14-plan-inventory.md` defines its ids. Each stage has a WRAP spec (Stage A: `specs/2026-10-17-stage-a-stabilize.md`). Other `specs/` files are the design of record for their items.
 - `bench/RESULTS.md`: the full benchmark tables.
 - The original brief: `~/Desktop/mailo/coop-project/crivo-brief.md` and `crivo-build-research.md` (on Aarmen's Mac only): stack patterns, the disease taxonomy, datasets.
 
@@ -69,6 +82,7 @@ Run from the repo root (or the worktree root).
 - **Tests are keyless and offline.** `tests/conftest.py` quarantines provider credentials. Use the fake providers and tmp files; never a real key or the network.
 - **The bench grades the code, so it can't be written from the code.** Authors of corruption injectors (`bench/corrupt.py`, `bench/bases.py`) must not read `src/crivo/detect.py` or `src/crivo/autoclean.py`. Plant what the taxonomy says a disease is. The scorer side may read anything.
 - **The instrument comes before the capability it measures.** A change meant to move detection or repair shows its bench effect in the commit. A new detector or fixer ships with corpus cases that exercise it.
+- **User-visible changes get a changelog fragment** (`changes/<issue#>.<kind>.md`). Regression tests for a bug open their docstring with `Regression for #<n>.`
 
 ## Boundaries
 **Always**
@@ -100,5 +114,5 @@ Run from the repo root (or the worktree root).
 - **A pytest fixture error shows as ERROR, not FAILED.** A new failing test must fail inside its body, on its assertion.
 - **Refusing looks like rigour.** Wave 1.5 found that fixers taught to refuse began declining input crivo should repair, and the lower number read as caution. Pin the legitimate repair beside every new refusal.
 - **A docstring is not a fix.** Don't write that a hole is closed unless a test proves the whole of it.
-- **The bench smoke only knows 29 corruption shapes.** A change can score clean there and still regress. If your change handles a new shape, add a corpus case for it.
+- **The bench smoke only knows 31 corruption shapes.** A change can score clean there and still regress. If your change handles a new shape, add a corpus case for it.
 - **tdd-guard is off for this repo** (Aarmen, 2026-10-14). Test-first is enforced by the test-writer and builder split and the Stop hook instead. Don't turn it back on.

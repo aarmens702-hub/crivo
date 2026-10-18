@@ -6,10 +6,13 @@ rewrites an entire column's text while damaging only a rate-selected subset
 (untouched cells still change repr, just not meaning), the other only ever
 touches the cells it names — so together they cover both recording shapes."""
 
+import hashlib
+
 import numpy as np
 import pytest
 
-from bench.bases import typed_frame
+from bench.bases import transactions, typed_frame
+from bench.corpus import SMOKE, build, full_corpus
 from bench.corrupt import INJECTORS, corrupt
 from bench.truth import GroundTruth
 
@@ -199,3 +202,121 @@ def test_d7_targets_repeated_vocab_and_plants_case_only_variants():
         assert str(cell.corrupted).casefold() == str(cell.original).casefold(), (
             "variants must differ by case alone — whitespace is d6's disease"
         )
+
+
+# --- #10: a d04 case planted only with numeric sentinels -----------------
+
+_NUMERIC_SENTINELS = ("-999", "-9999")
+_UNITS_SPEC = {"row_id": "id", "units": "numeric_text", "amount": "numeric"}
+
+
+def _entry_named(entries, name):
+    for entry in entries:
+        if entry["name"] == name:
+            return entry
+    raise ValueError(f"no corpus entry named {name!r}")
+
+
+def _units_by_hand():
+    """The units-numeric-sentinels case assembled from its parts, so the
+    injector's own `sentinels=` is checked apart from the corpus plumbing."""
+    pristine = typed_frame(129, 250, _UNITS_SPEC)
+    truth = GroundTruth(
+        seed=129, base="t", n_rows=250, n_cols=len(_UNITS_SPEC), frame_sha256=""
+    )
+    dirty = INJECTORS[4](
+        pristine,
+        truth,
+        np.random.default_rng(129),
+        columns=["units"],
+        sentinels=_NUMERIC_SENTINELS,
+    )
+    return pristine, dirty, truth
+
+
+def _units_from_smoke():
+    """The SMOKE entry through build(): proves corrupt(params=) is wired."""
+    return build(_entry_named(SMOKE, "units-numeric-sentinels"))
+
+
+def _units_from_full_corpus():
+    """One full_corpus() expansion: the entry's params survive the copy."""
+    return build(_entry_named(full_corpus(seeds=1), "units-numeric-sentinels-s0"))
+
+
+@pytest.mark.parametrize(
+    "make",
+    (_units_by_hand, _units_from_smoke, _units_from_full_corpus),
+    ids=("by-hand", "smoke", "full-corpus"),
+)
+def test_d4_plants_only_the_given_numeric_sentinels(make):
+    """tx-sentinels mixes -999 with N/A, NULL and ? in one column, and the
+    column is scored as a whole, so one N/A credits a missed -999. This case
+    plants nothing but numeric placeholders, in a column of whole numbers
+    stored as text, so a d04 miss on them shows in the bench."""
+    pristine = dirty = truth = None
+    reason = ""
+    try:
+        pristine, dirty, truth = make()
+    except (ValueError, TypeError) as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+    assert truth is not None, f"the numeric-sentinel d04 case can't be built: {reason}"
+
+    (corruption,) = truth.corruptions
+    assert corruption.disease == 4
+    assert corruption.cells, "the case must record the cells it planted"
+    assert {cell.column for cell in corruption.cells} == {"units"}, (
+        "params must aim d04 at units, not the auto-picked id column"
+    )
+    planted = {cell.corrupted for cell in corruption.cells}
+    assert planted <= set(_NUMERIC_SENTINELS), "only the given sentinels may appear"
+    assert planted == set(_NUMERIC_SENTINELS), "each given sentinel is drawn"
+    assert all(str(cell.original).isdigit() for cell in corruption.cells), (
+        "every planted cell must replace a whole number held as text"
+    )
+    assert set(dirty["units"]) - set(pristine["units"]) == set(_NUMERIC_SENTINELS)
+
+
+# Frame and manifest digests of the two smoke cases that run d04 today, taken
+# from the code before #10 changed corrupt(). Change these only in an issue
+# that means to change those cases.
+_D4_PINS = {
+    "tx-sentinels": (
+        "823d2cab61555a5566cfb60b8dec64abbba134244f1f3938352566f22be3b3af",
+        "4c0276e527431e4210029a91d67ec71aa2b0dcf4b3ff90fde9fac6b61d6f5fd2",
+    ),
+    "tx-compound-fixable": (
+        "a4795bfa636819437cbf4c3acf98cd97e084dba96f0d1a6e919716a1f525f16d",
+        "9a6a043fe0dd71d11c0977956a0c84ef30f744959cb809effee3b70966ad2662",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_D4_PINS))
+def test_existing_d4_cases_are_unchanged(name):
+    """Regression for #10. The new `sentinels=` and `params=` defaults must
+    leave every existing d04 case byte-identical, or the published numbers
+    move without anyone deciding they should."""
+    _, _, truth = build(_entry_named(SMOKE, name))
+    frame_digest, truth_digest = _D4_PINS[name]
+    assert truth.frame_sha256 == frame_digest, f"{name}: dirty frame changed"
+    assert hashlib.sha256(truth.to_json().encode()).hexdigest() == truth_digest, (
+        f"{name}: ground truth changed"
+    )
+
+
+@pytest.mark.parametrize("params", (None, {}, {4: {}}), ids=("none", "empty", "d4"))
+def test_corrupt_with_empty_params_matches_the_plain_call(params):
+    """An empty params entry means the injector's own defaults, so passing
+    one plants exactly what the plain call plants."""
+    frame = transactions(131, 350)
+    want_dirty, want_truth = corrupt(frame, [4, 6, 1, 2], seed=131, base="t")
+    dirty = truth = None
+    reason = ""
+    try:
+        dirty, truth = corrupt(frame, [4, 6, 1, 2], seed=131, base="t", params=params)
+    except TypeError as exc:
+        reason = str(exc)
+    assert truth is not None, f"corrupt() must accept params=: {reason}"
+    assert dirty.equals(want_dirty)
+    assert truth == want_truth

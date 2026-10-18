@@ -44,6 +44,55 @@ def test_key_needing_tools_name_the_missing_key(monkeypatch) -> None:
     assert "ANTHROPIC_API_KEY" in mcp_server._clean_file("x.csv")["error"]
 
 
+def test_required_key_is_per_provider(monkeypatch) -> None:
+    """BP3: the model tools ask each provider for what it needs and nothing
+    else. faux needs nothing; openai (Ollama, vLLM, OpenRouter) needs an
+    endpoint and a model, not a DeepSeek key; claude needs its own key; a
+    misspelled provider is refused instead of routed to DeepSeek; an empty
+    CRIVO_PROVIDER, as .env.example ships it, is deepseek."""
+    cases = [
+        ({"CRIVO_PROVIDER": "faux"}, None),
+        (
+            {
+                "CRIVO_PROVIDER": "openai",
+                "CRIVO_BASE_URL": "http://localhost:11434/v1",
+                "CRIVO_MODEL": "qwen3:32b",
+            },
+            None,
+        ),
+        (
+            {"CRIVO_PROVIDER": "openai", "CRIVO_BASE_URL": "http://localhost:11434/v1"},
+            "CRIVO_MODEL",
+        ),
+        (
+            {"CRIVO_PROVIDER": "claude", "DEEPSEEK_API_KEY": "sk-test"},
+            "ANTHROPIC_API_KEY",
+        ),
+        (
+            {
+                "CRIVO_PROVIDER": "Claude",
+                "DEEPSEEK_API_KEY": "sk-test",
+                "ANTHROPIC_API_KEY": "sk-ant-test",
+            },
+            "deepseek, claude, openai, faux",
+        ),
+        ({"CRIVO_PROVIDER": "", "DEEPSEEK_API_KEY": "sk-test"}, None),
+    ]
+    wrong = []
+    for env, expected in cases:
+        with monkeypatch.context() as m:
+            for var, value in env.items():
+                m.setenv(var, value)
+            message = mcp_server._required_key()
+        if expected is None:
+            ok = message is None
+        else:
+            ok = message is not None and expected in message
+        if not ok:
+            wrong.append({"env": env, "want": expected, "got": message})
+    assert not wrong, wrong
+
+
 class FakeSession:
     """SessionLike double in the tests/test_repl.py style: scripted event
     generators, recorded decisions, and just enough surface for the server."""
@@ -79,9 +128,9 @@ class FakeSession:
 
 
 def test_clean_file_relays_needs_human_and_closes_the_session(monkeypatch) -> None:
-    """AC1: the wrapper must not swallow the one thing the policy exists to
-    surface — the judgement calls it refused to make — and must never leak a
-    kernel, success or not."""
+    """AC1: the wrapper must not swallow the one thing the grade rule exists
+    to surface — the judgement calls it refused to make — and must never leak
+    a kernel, success or not. Since #30 the summary echoes no policy."""
     from crivo.events import GateRequest
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
@@ -98,7 +147,7 @@ def test_clean_file_relays_needs_human_and_closes_the_session(monkeypatch) -> No
 
     assert [d.action for d in fake.sent if d is not None] == ["run", "skip"]
     assert summary["needs_human"] == ["fix 2/2 · merge variants"]
-    assert summary["policy"] == "auto"
+    assert "policy" not in summary, sorted(summary)
     assert fake.closed, "the kernel must be closed, success or not"
 
 
@@ -203,9 +252,9 @@ def test_a_crashing_tool_returns_an_error_result_not_a_protocol_crash(
 
 def test_the_server_exposes_exactly_the_six_tools_with_docstrings() -> None:
     """AC3: the six-tool inventory is the contract, and each docstring is
-    what a calling model acts on — clean_file's must carry the policy=all
-    consent warning, because that sentence is the only thing standing between
-    an eager agent and unattended judgement calls."""
+    what a calling model acts on — clean_file's must say there is no way to
+    relay a person's consent through it, because that sentence is what stands
+    between an eager agent and unattended judgement calls."""
     import asyncio
 
     app = mcp_server.build_server()
@@ -267,14 +316,16 @@ def test_the_elicit_decider_asks_only_for_gate_grade() -> None:
 
 def test_clean_file_threads_the_decide_callback_through(monkeypatch) -> None:
     """The tool layer hands its elicitation decider to the driver; without
-    this seam the decider exists but every clean still runs blanket policy."""
+    this seam the decider exists but every clean still runs the blanket grade
+    rule. The fake takes exactly run_clean_once's signature since #30, so a
+    `policy` still passed down comes back as an error result."""
     from types import SimpleNamespace
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     received: dict = {}
 
-    def fake_run(session, path, name=None, policy="auto", decide=None):
-        received.update(path=path, policy=policy, decide=decide)
+    def fake_run(session, path, name=None, decide=None):
+        received.update(path=path, decide=decide)
         return {"file": path, "needs_human": []}
 
     monkeypatch.setattr("crivo.repl.run_clean_once", fake_run)
@@ -285,6 +336,7 @@ def test_clean_file_threads_the_decide_callback_through(monkeypatch) -> None:
 
     summary = mcp_server._clean_file("x.csv", decide=sentinel)
 
+    assert "error" not in summary, summary["error"]
     # the RESOLVED path is what goes downstream, not the client's string: the
     # check and the read must not resolve it twice (see the TOCTOU test below)
     assert summary["file"] == str(pathlib.Path("x.csv").resolve())
@@ -590,6 +642,93 @@ def test_no_tool_docstring_promises_a_sandbox_the_server_may_not_have() -> None:
         assert "CRIVO_MCP_SANDBOX" in tools[name].description
 
 
+def test_every_code_running_tool_opens_with_the_unsandboxed_default() -> None:
+    """#37: a calling agent reads "not sandboxed by default" as the first
+    sentence of every tool that runs model-written code, said once, up front,
+    instead of mid-paragraph. diagnose_file runs no model code, so it must not
+    carry the warning: a warning on every tool reads as boilerplate. ask keeps
+    its un-gated and unresolved_gates text."""
+    import asyncio
+
+    runs = (
+        "Not sandboxed by default: this runs model-written Python as the server "
+        "user, with that user's files (including .env) and network. Set "
+        "CRIVO_MCP_SANDBOX=docker to run it in a container with no network."
+    )
+    opens = (
+        "Not sandboxed by default: the kernel this opens runs the model-written "
+        "Python that ask sends it, as the server user, with that user's files "
+        "(including .env) and network. Set CRIVO_MCP_SANDBOX=docker to run it in "
+        "a container with no network."
+    )
+    openings = {
+        "clean_file": runs,
+        "open_data": opens,
+        "ask": runs,
+        "diagnose_file": None,
+        "why": None,
+        "close_session": None,
+    }
+    app = mcp_server.build_server()
+    tools = {t.name: t for t in asyncio.run(app.list_tools())}
+
+    wrong = []
+    for name, want in openings.items():
+        # the client sees the raw docstring; compare the words, not the wrap
+        text = " ".join(tools[name].description.split())
+        if want is None:
+            ok = "sandboxed by default" not in text.lower()
+        else:
+            ok = text.startswith(want) and "host subprocess" not in text
+        if not ok:
+            wrong.append({"tool": name, "opens": text[:80]})
+    assert not wrong, wrong
+
+    ask = " ".join(tools["ask"].description.split())
+    assert "un-gated" in ask
+    assert "unresolved_gates" in ask
+
+
+def _yaml_text(lines, at):
+    """The string value of the `key:` line at index `at`, inline or folded
+    (`>-`), the way a reader of action.yml sees it. The repo has no YAML
+    parser dependency, and action.yml only uses these two shapes."""
+    indent = len(lines[at]) - len(lines[at].lstrip())
+    inline = lines[at].split(":", 1)[1].strip()
+    parts = [] if inline in {">", ">-", "|", "|-"} else [inline.strip("\"'")]
+    for line in lines[at + 1 :]:
+        if not line.strip() or len(line) - len(line.lstrip()) <= indent:
+            break
+        parts.append(line.strip())
+    return " ".join(parts)
+
+
+def test_the_action_says_it_runs_no_model_code_and_lists_the_promised_formats() -> None:
+    """#37: the Action runs only `crivo diagnose`, so its description says
+    outright that it never runs model-written code, unlike the MCP tools. Its
+    path input lists the formats the issue chose to promise: csv, tsv and
+    parquet. diagnose reads more since #14; widening the promise is its own
+    change, and this assert moves with it."""
+    action = pathlib.Path(__file__).resolve().parents[1] / "action.yml"
+    text = action.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    top = next(i for i, line in enumerate(lines) if line.startswith("description:"))
+    path_key = lines.index("  path:")
+    path_desc = next(
+        i
+        for i in range(path_key + 1, len(lines))
+        if lines[i].strip().startswith("description:")
+    )
+
+    assert (
+        "Keyless: no model, no network, no configuration. "
+        "It never runs model-written code." in _yaml_text(lines, top)
+    )
+    assert _yaml_text(lines, path_desc) == "Data file to check (csv, tsv or parquet)"
+    assert "xlsx, json" not in text
+
+
 def test_the_file_tools_use_the_path_they_checked(tmp_path, monkeypatch) -> None:
     """The check resolved the path and then handed the client's ORIGINAL
     string downstream, so a symlink that pointed inside the root when it was
@@ -698,10 +837,11 @@ def test_an_unknown_sandbox_value_is_an_error_not_the_weaker_default(
 
 
 def test_no_tool_docstring_still_sells_policy_all_as_human_consent() -> None:
-    """repl.policy_decision now ignores `policy` entirely, so a description
-    telling the calling model to obtain and relay human consent through it is
-    the same class of false promise as the sandbox claim that was removed. ask
-    must also say plainly what calling it executes."""
+    """A description telling the calling model to obtain and relay human
+    consent through `policy` was the same class of false promise as the
+    sandbox claim that was removed. Since #30 clean_file has no policy at
+    all, so its description does not name one. ask must also say plainly what
+    calling it executes."""
     import asyncio
 
     app = mcp_server.build_server()
@@ -710,7 +850,7 @@ def test_no_tool_docstring_still_sells_policy_all_as_human_consent() -> None:
     clean = tools["clean_file"].description
     assert "approves judgement-grade changes unattended" not in clean
     assert "human consent relayed by you" not in clean
-    assert "no value of policy changes that" in clean
+    assert "policy" not in clean.lower()
     assert "model-authored code" in tools["ask"].description
 
 
@@ -806,3 +946,172 @@ def test_an_empty_client_path_is_refused_by_name(tmp_path, monkeypatch) -> None:
         _, denied = mcp_server._client_path(path)
         assert denied, f"{path!r} was accepted"
         assert "IsADirectory" not in denied
+
+
+# --- #30: clean_file takes no policy, and asks whenever the client can -------
+
+
+class _ClientCtx:
+    """The slice of an MCP request context clean_file reads: whether the
+    client declared elicitation, and an elicit() whose person approves. Every
+    question is recorded, so a test sees exactly what the person was asked."""
+
+    def __init__(self, can_elicit: bool) -> None:
+        from types import SimpleNamespace
+
+        session = SimpleNamespace(check_client_capability=lambda cap: can_elicit)
+        self.request_context = SimpleNamespace(session=session)
+        self.asked: list[str] = []
+
+    async def elicit(self, message, schema):
+        from types import SimpleNamespace
+
+        self.asked.append(message)
+        return SimpleNamespace(action="accept", data=SimpleNamespace(approve=True))
+
+
+def _mixed_grade_clean() -> FakeSession:
+    """One clean with a gate of each grade a headless clean meets."""
+    from crivo.events import GateRequest
+
+    return FakeSession(
+        script=[
+            GateRequest(
+                "df['city'] = df['city'].str.strip()",
+                1,
+                title="fix 1/3 · strip padding in city",
+                grade="AUTO",
+            ),
+            GateRequest(
+                "df['city'] = df['city'].replace(variants)",
+                1,
+                title="fix 2/3 · merge spelling variants in city",
+                grade="GATE",
+            ),
+            GateRequest(
+                "df = df.drop_duplicates('invoice_id')",
+                1,
+                title="fix 3/3 · drop repeated invoice_id rows",
+                grade="HUMAN",
+            ),
+        ]
+    )
+
+
+def _served_invoices(tmp_path, monkeypatch) -> str:
+    """A key that passes the gate, and a file inside the served root. The
+    session is a double, so the file is only ever path-checked, not read."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(tmp_path))
+    (tmp_path / "invoices.csv").write_text(
+        "invoice_id,city,issued\n"
+        "00417,Vancouver,2024-03-01\n"
+        "00418,vancouver ,03/02/2024\n"
+        "00418,vancouver ,03/02/2024\n"
+        "00419,N/A,\n"
+    )
+    return "invoices.csv"
+
+
+def _clean_file_via_the_server(arguments: dict, ctx) -> dict:
+    """Call clean_file the way a client's tools/call does: the server's own
+    argument model validates `arguments`, and `ctx` reaches the tool's ctx
+    parameter (None lets the server build one with no request behind it)."""
+    import asyncio
+
+    result = asyncio.run(
+        mcp_server.build_server().call_tool("clean_file", arguments, context=ctx)
+    )
+    assert not result.is_error, result.content[0].text
+    return json.loads(result.content[0].text)
+
+
+def test_clean_file_elicits_whenever_the_client_can(tmp_path, monkeypatch) -> None:
+    """#30: any policy but "auto" silently turned elicitation off, so a
+    client that could ask its person had GATE fixes deferred instead of
+    offered. A client that declared elicitation is now asked whatever it
+    sends: a stale `policy` is an unknown name the argument model drops. The
+    plain call is the legitimate path beside it and asks too. HUMAN stays
+    deferred (test_the_elicit_decider_asks_only_for_gate_grade owns that)."""
+    path = _served_invoices(tmp_path, monkeypatch)
+
+    for arguments in (
+        {"path": path, "policy": "all"},
+        {"path": path, "policy": "auto"},
+        {"path": path},
+    ):
+        fake = _mixed_grade_clean()
+        monkeypatch.setattr(mcp_server, "_make_session", lambda fake=fake: fake)
+        ctx = _ClientCtx(can_elicit=True)
+
+        summary = _clean_file_via_the_server(arguments, ctx)
+
+        actions = [d.action for d in fake.sent if d is not None]
+        assert actions == ["run", "run", "skip"], arguments
+        assert len(ctx.asked) == 1, (arguments, len(ctx.asked))
+        assert "merge spelling variants in city" in ctx.asked[0], arguments
+        assert summary["needs_human"] == ["fix 3/3 · drop repeated invoice_id rows"], (
+            arguments
+        )
+
+
+def test_clean_file_without_elicitation_keeps_the_grade_rule(
+    tmp_path, monkeypatch
+) -> None:
+    """The fallback beside the test above: a client that never declared
+    elicitation, or a call with no request behind its context, gets the
+    headless grade rule. AUTO runs, every judgement call comes back in
+    needs_human, nobody is asked, and a stale `policy` changes none of it."""
+    path = _served_invoices(tmp_path, monkeypatch)
+
+    for can_elicit, arguments in (
+        (False, {"path": path, "policy": "all"}),
+        (False, {"path": path}),
+        (None, {"path": path}),
+    ):
+        fake = _mixed_grade_clean()
+        monkeypatch.setattr(mcp_server, "_make_session", lambda fake=fake: fake)
+        ctx = None if can_elicit is None else _ClientCtx(can_elicit)
+
+        summary = _clean_file_via_the_server(arguments, ctx)
+
+        actions = [d.action for d in fake.sent if d is not None]
+        assert actions == ["run", "skip", "skip"], (can_elicit, arguments)
+        assert ctx is None or ctx.asked == [], (can_elicit, arguments)
+        assert summary["needs_human"] == [
+            "fix 2/3 · merge spelling variants in city",
+            "fix 3/3 · drop repeated invoice_id rows",
+        ], (can_elicit, arguments)
+
+
+def test_clean_file_takes_no_policy_argument() -> None:
+    """#30: the input schema is what a client sees, and `policy` in it
+    offered a choice whose only effect was to switch elicitation off. The
+    schema offers path and name, as docs/API-CONTRACT.md lists them, and the
+    plain function under the tool takes no policy either. A client that
+    still sends one is not refused (the two tests above send it)."""
+    import asyncio
+    import inspect
+
+    tools = {t.name: t for t in asyncio.run(mcp_server.build_server().list_tools())}
+    schema = tools["clean_file"].input_schema
+
+    assert set(schema["properties"]) == {"path", "name"}, sorted(schema["properties"])
+    assert schema.get("required") == ["path"]
+    assert "policy" not in inspect.signature(mcp_server._clean_file).parameters
+
+
+def test_the_clean_file_description_says_who_writes_each_fix() -> None:
+    """#30: "Fixes are model-written" was wrong for an AUTO finding with a
+    deterministic fixer, which runs that fixer; the rest are model-written.
+    The description also keeps telling the calling model that GATE fixes go
+    to its person when the client supports elicitation."""
+    import asyncio
+
+    tools = {t.name: t for t in asyncio.run(mcp_server.build_server().list_tools())}
+    clean = tools["clean_file"].description
+
+    assert "Fixes are model-written" not in clean
+    assert "deterministic" in clean
+    assert "elicitation" in clean

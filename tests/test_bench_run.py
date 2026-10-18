@@ -11,7 +11,7 @@ def test_smoke_corpus_is_deterministic_and_covers_every_injector():
     covered: set[int] = set()
     names = [entry["name"] for entry in SMOKE]
     assert len(names) == len(set(names)), "corpus names must be unique"
-    assert 12 <= len(SMOKE) <= 30, "smoke-sized by design (~20 datasets)"
+    assert 12 <= len(SMOKE) <= 40, "smoke-sized by design (about 30 datasets)"
     for entry in SMOKE:
         pristine, dirty, truth = build(entry)
         _, _, again = build(entry)
@@ -50,6 +50,51 @@ def test_run_smoke_scores_corpus_and_writes_artifacts(tmp_path):
         "repair_f1_fixable_mean",
         "survived_rate_mean",
     }
+
+
+def test_smoke_with_default_paths_leaves_published_results_md_untouched(
+    tmp_path, monkeypatch
+):
+    """Regression for #3. CI, /ship and /promote all run `bench.run --smoke`,
+    and it used to rewrite the tracked `bench/RESULTS.md` (the published full
+    tables) with smoke numbers, one careless `git add` from being committed
+    over them. Smoke's markdown belongs beside smoke.json in the git-ignored
+    `bench/results/`; only --full writes `bench/RESULTS.md`. Run with the
+    DEFAULT paths, since the defaults are what the CLI uses."""
+    from bench.run import run
+
+    monkeypatch.chdir(tmp_path)
+    published = tmp_path / "bench" / "RESULTS.md"
+    published.parent.mkdir(parents=True)
+    sentinel = b"# bench results (full, 2026-09-07)\n\npublished tables, hands off\n"
+    published.write_bytes(sentinel)
+
+    run(mode="smoke", limit=2, external_root=tmp_path / "none")
+
+    assert published.read_bytes() == sentinel, "smoke overwrote bench/RESULTS.md"
+    smoke_md = tmp_path / "bench" / "results" / "smoke.md"
+    assert smoke_md.exists(), "smoke markdown should land in bench/results/"
+    assert "deterministic mode baseline" in smoke_md.read_text()
+
+
+def test_full_with_default_paths_writes_published_results_md(tmp_path, monkeypatch):
+    """Regression for #3. The other half of the new default: moving smoke's
+    markdown out of `bench/RESULTS.md` must not also stop --full from writing
+    the published tables there, or the refresh path silently goes dead. A full
+    run with the DEFAULT paths writes `bench/RESULTS.md` and nothing to
+    `bench/results/smoke.md`."""
+    from bench.run import run
+
+    monkeypatch.chdir(tmp_path)
+
+    run(mode="full", limit=2, external_root=tmp_path / "none")
+
+    published = tmp_path / "bench" / "RESULTS.md"
+    assert published.exists(), "a full run should write bench/RESULTS.md"
+    assert published.read_text().startswith("# Proving Ground results (full,")
+    assert not (tmp_path / "bench" / "results" / "smoke.md").exists(), (
+        "a full run wrote the smoke markdown"
+    )
 
 
 def test_sweep_hunts_exceptions_and_reports_a_ledger(monkeypatch):

@@ -82,8 +82,13 @@ class AnswerCard:
         lines.append("")
 
         flags = [k for k, v in self.flags.items() if v]
+        # the sampling control that was sent: Claude takes effort, not temperature
+        if "effort" in self.model:
+            control = f"effort {self.model['effort']}"
+        else:
+            control = f"temp {self.model.get('temperature')}"
         meta = (
-            f"{self.model.get('model', '?')} · temp {self.model.get('temperature')} · "
+            f"{self.model.get('model', '?')} · {control} · "
             f"{len([c for c in self.cells if c.get('status')])} cells run · "
             f"{len(self.checks)} checks passed · {self.created}"
         )

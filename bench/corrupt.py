@@ -168,20 +168,22 @@ def inject_d4(
     rng: np.random.Generator,
     columns: list[str] | None = None,
     rate: float = 0.1,
+    sentinels: tuple[str, ...] = _SENTINELS,
 ) -> pd.DataFrame:
     """sentinel-missing: rate of cells in a chosen column replaced by a
-    sentinel drawn from a fixed vocabulary; untouched cells keep their exact
-    pristine value (only their column's dtype may degrade to hold the mix)."""
+    sentinel drawn from `sentinels` (default: the mixed vocabulary
+    _SENTINELS); untouched cells keep their exact pristine value (only their
+    column's dtype may degrade to hold the mix)."""
     col = _pick_column(list(frame.columns), columns, 4, "sentinel-missing")
     n = len(frame)
     holder = _holder_for(frame, col)
     k = _count(rate, n)
     rows = rng.choice(n, size=k, replace=False)
-    sentinel_idx = rng.integers(0, len(_SENTINELS), size=k)
+    sentinel_idx = rng.integers(0, len(sentinels), size=k)
     cells = []
     for row, s in zip(rows, sentinel_idx):
         original = frame[col].iat[int(row)]
-        sentinel = _SENTINELS[s]
+        sentinel = sentinels[s]
         holder.iat[int(row)] = sentinel
         cells.append(
             Cell(
@@ -459,6 +461,28 @@ def _case_variant(value: str, kind: int) -> str:
     return value.capitalize()
 
 
+_CASE_VARIANTS = 3
+_SPELLING_VARIANTS = 3
+
+
+def _spelling_variant(value: str, kind: int, rng: np.random.Generator) -> str:
+    """One small misspelling, the "Nrth" a hurried typist makes of "North":
+    kind 0 drops an inner letter, 1 doubles one, 2 swaps two neighbours. The
+    first and last characters stay put so the word still reads as itself.
+    Returns `value` unchanged when it is too short to misspell that way."""
+    inner = [i for i in range(1, len(value) - 1) if value[i].isalpha()]
+    if kind == 2:
+        inner = [i for i in inner if i + 1 in inner and value[i] != value[i + 1]]
+    if not inner:
+        return value
+    i = inner[int(rng.integers(0, len(inner)))]
+    if kind == 0:
+        return value[:i] + value[i + 1 :]
+    if kind == 1:
+        return value[: i + 1] + value[i:]
+    return value[:i] + value[i + 1] + value[i] + value[i + 2 :]
+
+
 @injector(7)
 def inject_d7(
     frame: pd.DataFrame,
@@ -466,11 +490,18 @@ def inject_d7(
     rng: np.random.Generator,
     columns: list[str] | None = None,
     rate: float = 0.1,
+    misspell: bool = False,
 ) -> pd.DataFrame:
     """case-spelling-variants: a REPEATED-vocab text column: rate of cells
     re-cased variants of the SAME value. The disease is one entity under
     several spellings, so it needs values that recur — a near-unique id
-    column recased is undetectable by construction and an unfair plant."""
+    column recased is undetectable by construction and an unfair plant.
+
+    misspell=True also plants small misspellings (a dropped, doubled or
+    swapped letter) of the same values, about half the planted cells. A
+    misspelling that lands on another value already in the column is a
+    different category, not a variant, so that cell is skipped. The default
+    draws exactly what it always drew, so existing entries don't move."""
     repeated = [
         c
         for c in _text_columns(frame)
@@ -481,17 +512,24 @@ def inject_d7(
     out = frame.copy()
     k = _count(rate, n)
     rows = rng.choice(n, size=k, replace=False)
-    variant_idx = rng.integers(0, 3, size=k)
+    kinds = _CASE_VARIANTS + (_SPELLING_VARIANTS if misspell else 0)
+    variant_idx = rng.integers(0, kinds, size=k)
+    vocab = {str(v).casefold() for v in frame[col].dropna().unique()}
     cells = []
     for row, v in zip(rows, variant_idx):
         row = int(row)
         original = frame[col].iat[row]
         text = str(original)
-        corrupted = _case_variant(text, int(v))
-        if corrupted == text:
-            corrupted = text.swapcase()  # always differs for alphabetic vocab
-        if corrupted == text:
-            continue  # no alphabetic material to recase — record no lie
+        if v >= _CASE_VARIANTS:
+            corrupted = _spelling_variant(text, int(v) - _CASE_VARIANTS, rng)
+            if corrupted.casefold() in vocab:
+                continue  # unchanged, or another real category — record no lie
+        else:
+            corrupted = _case_variant(text, int(v))
+            if corrupted == text:
+                corrupted = text.swapcase()  # always differs for alphabetic vocab
+            if corrupted == text:
+                continue  # no alphabetic material to recase — record no lie
         out.at[row, col] = corrupted
         cells.append(
             Cell(
@@ -1302,12 +1340,21 @@ def inject_d26(
 
 
 def corrupt(
-    frame: pd.DataFrame, diseases: list[int], seed: int, base: str
+    frame: pd.DataFrame,
+    diseases: list[int],
+    seed: int,
+    base: str,
+    params: dict[int, dict] | None = None,
 ) -> tuple[pd.DataFrame, GroundTruth]:
     """Apply `diseases` in order over one rng stream; ground truth's
     n_rows/n_cols come from the pristine `frame`, frame_sha256 from the final
-    dirty frame. Same (frame, diseases, seed, base) => identical dirty frame
-    and manifest, forever.
+    dirty frame. Same (frame, diseases, seed, base, params) => identical dirty
+    frame and manifest, forever.
+
+    `params` maps a disease id to keyword arguments for its injector, e.g.
+    {4: {"columns": ["units"], "sentinels": ("-999",)}}. A disease with no
+    entry (or params=None) runs on the injector's own defaults. A keyword the
+    injector doesn't take raises TypeError.
 
     Put disease 18 (header-damage) last when combining with cell/row
     diseases: a rename would orphan any later injector's column-name lookup.
@@ -1327,6 +1374,6 @@ def corrupt(
             raise ValueError(
                 f"corrupt(): no injector registered for disease {disease_id}"
             )
-        dirty = fn(dirty, truth, rng)
+        dirty = fn(dirty, truth, rng, **(params or {}).get(disease_id, {}))
     truth.frame_sha256 = frame_sha256(dirty)
     return dirty, truth

@@ -20,12 +20,15 @@ Three disciplines keep it a receipts tool, not a guesser:
   deliberate: two rows that both lack an id are not evidence of the same row,
   and a raw float NaN does not even equal itself, so leaving it in the key space
   would split one row across buckets.
-- The partition is verified, not assumed. Every distinct key observed in either
-  frame must land in exactly one place, one of the four buckets or one of the
-  two excluded sets, with none left over and none in two places at once. That
-  disjoint-cover invariant rides back on the result as `receipt`. It is a real
-  check that can fail, not a cardinality identity that is true by construction,
-  and it is null-safe because the key space is canonicalized before it runs.
+- The changed count is recounted, not assumed. The buckets come from set
+  algebra, so the partition (every distinct key in exactly one bucket or
+  excluded set) holds by construction and is kept only as a guard. The real
+  check in `receipt` is an independent recount of the changed rows over the
+  matched keys, done as one vectorized comparison of the aligned frames rather
+  than the per-row comparison that sorted them, so a per-row comparison that
+  gets the changed count wrong comes back False. It checks the count, not which
+  rows: a mistake that swaps a changed row for an unchanged one keeps the count
+  and passes.
 
 Key identity is by value, with two documented normalizations. An integral float
 is the same key as that integer, so an id column that drifted from int to float
@@ -176,7 +179,8 @@ def reconcile(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) -> dict:
                     the four buckets (bounded example list); a null shows as None
       column_diff   {only_in_a, only_in_b, compared} column-name lists
       receipt       True when every distinct key lands in exactly one bucket or
-                    excluded set (a real disjoint-cover invariant, null-safe)
+                    excluded set and an independent recount of the changed rows
+                    (not the per-row comparison) matches counts["changed"]
       notes         strings recording every truncation and every excluded set
 
     Every key is a tuple in `keys` order, so a single-column key is a one-tuple
@@ -244,7 +248,8 @@ def reconcile(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) -> dict:
     unchanged_total = 0
     wide_changed = 0
     widest_changed = 0
-    for k in _sorted_keys(both_keys):
+    matched = _sorted_keys(both_keys)
+    for k in matched:
         a_row = a.iloc[a_pos[k]]
         b_row = b.iloc[b_pos[k]]
         diff_cols = [c for c in compared if not _cell_equal(a_row[c], b_row[c])]
@@ -282,12 +287,12 @@ def reconcile(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) -> dict:
         "null_keys": len(null_key_set),
     }
 
-    # the receipt: a real disjoint-cover invariant over the whole key space,
-    # not a cardinality identity. every distinct key observed in either frame
-    # must land in exactly one group (a bucket or an excluded set), with none
-    # missing and none counted twice, and the changed/unchanged split must
-    # account for every matched key. canonicalization makes this null-safe, so
-    # the float NaN key that used to slip the old check is caught here.
+    # the receipt. the partition (every distinct key in exactly one bucket or
+    # excluded set) and the changed/unchanged total hold by construction, so
+    # they are only a guard. the real check is the recount below: the matched
+    # rows, aligned by position, compared column-wise in one vectorized pass
+    # without _cell_equal, so a per-row comparison that miscounts the changed
+    # rows makes it disagree (a swap that keeps the count does not).
     observed = set(a_keys) | set(b_keys)
     placements: Counter = Counter()
     for group in (added_keys, removed_keys, both_keys, duplicate, null_key_set):
@@ -296,7 +301,16 @@ def reconcile(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) -> dict:
         n == 1 for n in placements.values()
     )
     classify_ok = changed_total + unchanged_total == len(both_keys)
-    receipt = partition_ok and classify_ok
+    recount = 0
+    if compared and matched:
+        a_side = a.iloc[[a_pos[k] for k in matched]][compared]
+        b_side = b.iloc[[b_pos[k] for k in matched]][compared]
+        a_side = a_side.astype(object).reset_index(drop=True)
+        b_side = b_side.astype(object).reset_index(drop=True)
+        # two nulls are not a change; one null against a value is
+        differs = a_side.ne(b_side) & ~(a_side.isna() & b_side.isna())
+        recount = int(differs.any(axis=1).sum())
+    receipt = partition_ok and classify_ok and recount == changed_total
 
     notes: list[str] = []
     if duplicate:

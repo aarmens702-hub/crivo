@@ -7,8 +7,8 @@ dtype changes (e.g. "12" parsed to 12.0) don't mask value equality.
 
 Usage: uv run python scripts/score_fixes.py <cleaned_file> <dataset_name>
 where cleaned_file is .parquet or .csv and dataset_name picks
-data/raha/<name>/{dirty,clean}.csv. Never wired into the agent flow — a private
-scoring habit, per the brief.
+data/external/raha/<name>/{dirty,clean}.csv. Never wired into the agent flow —
+a private scoring habit, per the brief.
 """
 
 import argparse
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
-RAHA_ROOT = Path(__file__).resolve().parents[1] / "data" / "raha"
+RAHA_ROOT = Path(__file__).resolve().parents[1] / "data" / "external" / "raha"
 
 # Sentinel for missing cells: no real value can contain NUL, so a plain string
 # comparison makes NaN == NaN true and NaN != anything-else true.
@@ -231,7 +231,9 @@ def read_table(path: Path) -> pd.DataFrame:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("cleaned_file", type=Path, help=".parquet or .csv fix output")
-    ap.add_argument("dataset_name", help="picks data/raha/<name>/{dirty,clean}.csv")
+    ap.add_argument(
+        "dataset_name", help="picks data/external/raha/<name>/{dirty,clean}.csv"
+    )
     args = ap.parse_args()
 
     pair = RAHA_ROOT / args.dataset_name

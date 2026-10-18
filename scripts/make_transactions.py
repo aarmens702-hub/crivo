@@ -1,4 +1,4 @@
-"""Synthesise a transaction file carrying the four diseases a finance take-home names.
+"""Synthesise a transaction file carrying four diseases common in finance exports.
 
 Unlike `fetch_raha.py` and `fetch_vancouver.py` this generates rather than
 downloads, because the interesting property here is not realism — it is that we

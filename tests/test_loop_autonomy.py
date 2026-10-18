@@ -967,11 +967,15 @@ def cli(monkeypatch):
     # the shell's provider choice must not decide which key main() demands
     monkeypatch.setenv("CRIVO_PROVIDER", "deepseek")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    # no dotenv file is read: load_dotenv searches upward to the owner's
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    monkeypatch.setattr("crivo.__main__.load_dotenv", lambda *a, **k: False)
     monkeypatch.setattr("crivo.loop.Session", _RecordingSession)
     monkeypatch.setattr("crivo.repl.run_repl", lambda session, auto_run=False: None)
+    # exactly what the CLI may hand the clean since #30 retired `policy`
     monkeypatch.setattr(
         "crivo.repl.run_clean_once",
-        lambda session, path, name=None, policy="auto": {"fixes": []},
+        lambda session, path, name=None: {"fixes": []},
     )
     _RecordingSession.seen = []
     return _RecordingSession
@@ -1049,10 +1053,10 @@ def test_a_caller_armed_policy_still_outranks_an_in_session_plan(tmp_path, monke
     happen ("the seed is only planted when the caller passed none of their
     own"), which is a statement about the seed and not about the ordering.
 
-    A LOG_ONLY shadow-week record is the shape docs/governance.example.json
-    ships, and its whole purpose is that nothing applies unattended. One
-    in-session answer must not override an operator posture: the plan record
-    goes ahead of the SEED and behind anything the caller armed."""
+    The armed record is a LOG_ONLY shadow-week record, and its whole purpose
+    is that nothing applies unattended. One in-session answer must not
+    override an operator posture: the plan record goes ahead of the SEED and
+    behind anything the caller armed."""
     monkeypatch.setenv("CRIVO_PLAN_FIRST", "on")
     monkeypatch.setattr(llm, "generate", gen([]))
     armed = policy.PolicyRecord(

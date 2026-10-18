@@ -60,11 +60,13 @@ def _cell_type(cell: str) -> str | None:
 
 
 def mask_value(value: str, pii_type: str) -> str:
-    """Redact one value of a known PII type. Email keeps its domain so the
-    column still reads as email without exposing the local part; everything
-    else becomes REDACTED."""
+    """Redact one value of a known PII type. Email keeps `***@` plus the
+    domain, cut at the first character outside `[\\w.-]`: a `|`, comma, `;` or
+    whitespace drops the tail after it, but `-`, `.` and `_` do not, so a tail
+    joined by one of those stays. Everything else becomes REDACTED."""
     if pii_type == "email" and "@" in value:
-        return "***@" + value.split("@", 1)[1]
+        domain = re.match(r"[\w.-]+", value.split("@", 1)[1])
+        return "***@" + domain.group(0) if domain else REDACTED
     return REDACTED
 
 
@@ -79,6 +81,58 @@ def mask_column(series: pd.Series, pii_type: str) -> pd.Series:
     return series.map(one)
 
 
+def flagged_columns(*frames: pd.DataFrame) -> dict[str, str]:
+    """Column name (as str) to PII type, from `scan()` of each frame. An
+    earlier frame's type is kept when a later frame flags the same name."""
+    flagged: dict[str, str] = {}
+    for df in frames:
+        for hit in scan(df):
+            flagged.setdefault(str(hit["column"]), hit["pii_type"])
+    return flagged
+
+
+def mask_cell(value, pii_type: str) -> str:
+    """Mask any cell value (string or not) as `pii_type`."""
+    return mask_value(str(value).strip(), pii_type)
+
+
+# a Python-repr quoted literal, single or double quoted, with escapes; a quote
+# right after a word character is an apostrophe in prose ("Excel's"), not an
+# opening quote
+_QUOTED = re.compile(r"(?<!\w)'(?:[^'\\]|\\.)*'|(?<!\w)\"(?:[^\"\\]|\\.)*\"")
+
+
+def redact_text(text: str, columns, flagged: dict[str, str]) -> str:
+    """Mask the quoted literals in one line of evidence, keeping the quotes.
+
+    When a name in `columns` is flagged, every literal is masked with the
+    first flagged column's type (this catches values cut short that no longer
+    match a detector). Otherwise a literal is masked only when it is PII on
+    its own. Text outside quotes is left unchanged.
+    """
+    names = [str(c) for c in columns]
+    column_type = next((flagged[c] for c in names if c in flagged), None)
+
+    def one(m: re.Match) -> str:
+        quote, literal = m.group(0)[0], m.group(0)[1:-1]
+        kind = column_type or _cell_type(literal)
+        if kind is None:
+            return m.group(0)
+        return quote + mask_cell(literal, kind) + quote
+
+    return _QUOTED.sub(one, text)
+
+
+def redact_findings(findings: list[dict], flagged: dict[str, str]) -> list[dict]:
+    """Shallow copies of `findings` with `evidence` passed through
+    `redact_text`. The input is never mutated; `flagged` is precomputed (see
+    `flagged_columns`) so a caller scans once."""
+    return [
+        {**f, "evidence": redact_text(f["evidence"], f["columns"], flagged)}
+        for f in findings
+    ]
+
+
 def scan(df: pd.DataFrame) -> list[dict]:
     """One finding per text column carrying PII, typed by the dominant kind.
 
@@ -87,15 +141,17 @@ def scan(df: pd.DataFrame) -> list[dict]:
     count as evidence, so exposure is surfaced but never auto-decided.
     """
     findings = []
-    for col in df.columns:
-        s = df[col]
+    # by position, not name: df[col] is a DataFrame when a name is duplicated
+    for i in range(df.shape[1]):
+        col = df.columns[i]
+        s = df.iloc[:, i]
         # object OR string dtype (pandas may infer pure-string columns as the
         # string dtype, not object); numeric/bool/datetime are never PII text
         if not (pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s)):
             continue
         counts: dict[str, int] = {}
         first: dict[str, str] = {}
-        for value in df[col]:
+        for value in s:
             if not isinstance(value, str):
                 continue
             kind = _cell_type(value)

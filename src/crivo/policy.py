@@ -19,6 +19,13 @@ from crivo import telemetry
 
 MODES = ("ENFORCE", "LOG_ONLY")
 
+# The three named autonomy postures (specs/2026-09-05-autonomy-default-*.md):
+# "autonomous" decides the AUTO findings that carry a registered deterministic
+# fixer without showing a gate, "careful" gates them for a person, "report-only"
+# diagnoses and stops. The list is closed: an unrecognised level raises rather
+# than falling back, so a typo cannot quietly pick a posture.
+AUTONOMY_LEVELS = ("autonomous", "careful", "report-only")
+
 
 @dataclass(frozen=True)
 class PolicyRecord:

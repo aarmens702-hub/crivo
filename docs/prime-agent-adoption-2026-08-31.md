@@ -1,5 +1,7 @@
 # Prime-agent adoption backlog (approved 2026-08-31)
 
+> **Historical record (closed 2026-10-17).** Kept for how and why. What is still open lives in `specs/2026-10-14-the-plan.md`, with ids in `specs/2026-10-14-plan-inventory.md`.
+
 Four workstreams Aarmen approved after the full teardown of
 PrimeIntellect-ai/prime-agent (MIT). File references are into their repo at
 commit `c382f09`. Each item lands only with tests, per the house rules; the

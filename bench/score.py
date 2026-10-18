@@ -141,17 +141,6 @@ def _positions(
     return out
 
 
-def dirty_cells(
-    pristine: pd.DataFrame, dirty: pd.DataFrame, values_equal=equivalent
-) -> set[tuple[int, str]]:
-    """Cells where `dirty` diverges from `pristine`, scoped to the pristine's
-    own rows and columns — appended rows and renamed columns are row/column-
-    granular damage, scored elsewhere, not cell damage."""
-    return _positions(
-        pristine.columns, len(pristine), pristine, dirty, False, values_equal
-    )
-
-
 def _f1(precision: float | None, recall: float | None) -> float | None:
     """Harmonic mean. None whenever precision or recall is itself undefined,
     or when P+R is 0 — the F1 formula's own zero denominator, never a NaN."""

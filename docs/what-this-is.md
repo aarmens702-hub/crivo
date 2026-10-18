@@ -13,11 +13,12 @@ one cost to build honestly.
 
 The agent writes code; the kernel runs it; only executed assertions count.
 
-A check mark on an answer card is lifted from an `assert` that actually ran to
-completion in the kernel. If the model writes an answer without asserting
-anything, the card says `unchecked` rather than nothing. If the model claims a
-fix worked, that claim is worth exactly zero until the detector that found the
-disease re-runs and comes back clean.
+A check mark on an answer card is lifted from an `assert` in a cell that ran to
+completion in the kernel. Today every `assert` in that cell counts, even one
+inside a branch that never ran; closing that gap is planned. If the model
+writes an answer without asserting anything, the card says `unchecked` rather
+than nothing. If the model claims a fix worked, that claim is worth exactly
+zero until the detector that found the disease re-runs and comes back clean.
 
 Cleaning goes further, because a cleaning fix can silently destroy data while
 looking successful. A fix counts as verified only when all of these hold:
@@ -49,7 +50,7 @@ never model judgments:
    along with rows it did not. The generalised `fix(df, columns)` is re-run
    against that case and must still trip the detector there (or passing proves
    nothing), must clear it, and must leave the untouched rows byte-identical.
-2. **Its own test.** The shipped test runs in the sandbox.
+2. **Its own test.** The shipped test runs in the kernel.
 3. **A human.** One yes or no.
 
 The frozen-case gate is the one that matters, and it is easy to get wrong. A
@@ -174,7 +175,7 @@ differing columns at all. Both halves now hold.
 
 ## What it does not do
 
-- It does not fix everything. Two of the twenty-two diseases — cross-field
+- It does not fix everything. Two of the twenty-six diseases — cross-field
   contradictions and statistical outliers — are **indicators**: detected,
   evidenced, and never auto-fixed, because a spike in a wildfire dataset is
   real data, not an error.
@@ -185,8 +186,10 @@ differing columns at all. Both halves now hold.
 
 ## Measured, not asserted
 
-- Detection runs all 21 single-file signals on a 150,000 × 80 frame in **9.5
-  seconds**, worst case (a frame where every text column is dirty three ways).
+- Detection runs every single-file signal over 300,000 transaction rows in
+  **2.6 seconds** on the author's machine (2026-09-03).
+  `tests/test_perf_budget.py` fails if it takes more than 15 seconds, about
+  six times that.
 - A live cleaning run on Raha beers scored **P=0.99, R=0.78, F1=0.87** against
   the benchmark's ground truth. The recall gap is fully accounted for: 693
   cells from a fix deliberately skipped at the gate, and 254 from the two

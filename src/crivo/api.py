@@ -9,7 +9,7 @@
 Deliberately keyless and kernel-free: this is the deterministic half of the
 project — the detection engine and honest I/O — that works with zero setup.
 The LLM-authored cleaning with gates and provenance stays the agent surface
-(`python -m crivo`), because that half needs a model and a sandbox.
+(`python -m crivo`), because that half needs a model and a kernel.
 """
 
 import json as _json
@@ -19,7 +19,7 @@ import pandas as pd
 
 from crivo import checkup as _checkup
 from crivo.autoclean import CleanSummary, clean
-from crivo.detect import SINGLE_FRAME, detect_all
+from crivo.detect import detect_all
 
 __all__ = [
     "CleanSummary",
@@ -158,29 +158,57 @@ class Report:
         """Cross-column contradictions (P7): near functional-dependency
         violations, where one column determines another for most rows and a
         few break the rule (a city that disagrees with its state). Each is
-        graded HUMAN, a discovered rule being a judgement call. Keyless."""
+        graded HUMAN, a discovered rule being a judgement call. Keyless.
+        An example value from a PII-flagged column is masked (#21)."""
         from crivo import crosscol as _cc
+        from crivo import pii as _pii
 
-        return _cc.find_fd_violations(self._frame, threshold=threshold)
+        findings = _cc.find_fd_violations(self._frame, threshold=threshold)
+        flagged = _pii.flagged_columns(self._frame)
+        out = []
+        for f in findings:
+            types = [flagged.get(str(c)) for c in f["columns"]]
+            if len(types) == 2 and any(types):
+                f = {
+                    **f,
+                    "examples": [
+                        tuple(
+                            _pii.mask_cell(v, t) if t else v
+                            for v, t in zip(ex, types, strict=True)
+                        )
+                        for ex in f["examples"]
+                    ],
+                }
+            out.append(f)
+        return out
 
     def to_html(self, path) -> Path:
         """Write the report as ONE standalone, self-contained HTML file — the
         notebook card wrapped in a document shell, every style inline, no
         scripts, no external assets — for sending to someone who will never
-        install anything. The PII ship-gate (B0.1) runs first and its masked
-        section is injected above the card, so a report that travels never
-        carries raw personal data. Returns the written path; parents made."""
+        install anything. The PII scan (B0.1) runs once: its masked section
+        goes above the card, and finding evidence from the columns it flags is
+        masked, so the file carries no raw value from a PII-flagged column
+        (email, phone, SSN, card); names are not detected. Returns the written
+        path; parents made."""
+        from html import escape
+
         from crivo import htmlreport as _htmlreport
         from crivo import notebook as _notebook
+        from crivo import pii as _pii
 
-        card = _notebook.report_html(self._name, self._frame, self._result)
-        pii_gate = _htmlreport.pii_section_html(self._frame)
+        hits = _pii.scan(self._frame)
+        flagged: dict[str, str] = {}
+        for hit in hits:  # first by position wins, as in pii.flagged_columns
+            flagged.setdefault(str(hit["column"]), hit["pii_type"])
+        card = _notebook.report_html(self._name, self._frame, self._result, flagged)
+        pii_gate = _htmlreport.pii_section_html(self._frame, hits=hits)
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
             '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f"<title>crivo report — {self._name}</title></head>\n"
+            f"<title>crivo report — {escape(str(self._name))}</title></head>\n"
             '<body style="margin:0;padding:24px;background:#f4f4f2">'
             '<div style="max-width:900px;margin:0 auto"><h2 style="font:600 '
             '15px system-ui,sans-serif;color:#1d3a3e">Personal data</h2>'
@@ -195,18 +223,18 @@ class Report:
         no dataset rows on any output surface)."""
         frame = self._frame
         n = len(frame)
-        numeric = [c for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])]
-        datetimes = [
-            c for c in frame.columns if pd.api.types.is_datetime64_any_dtype(frame[c])
-        ]
-        ids = [c for c in frame.columns if n > 1 and frame[c].nunique(dropna=True) == n]
+        # by position: frame[c] is a DataFrame when a name repeats
+        cols = [(frame.columns[i], frame.iloc[:, i]) for i in range(frame.shape[1])]
+        numeric = [c for c, s in cols if pd.api.types.is_numeric_dtype(s)]
+        datetimes = [c for c, s in cols if pd.api.types.is_datetime64_any_dtype(s)]
+        ids = [c for c, s in cols if n > 1 and s.nunique(dropna=True) == n]
         categorical = [
             c
-            for c in frame.columns
+            for c, s in cols
             if c not in ids
-            and not pd.api.types.is_numeric_dtype(frame[c])
-            and not pd.api.types.is_datetime64_any_dtype(frame[c])
-            and 0 < frame[c].nunique(dropna=True) <= max(20, n // 10)
+            and not pd.api.types.is_numeric_dtype(s)
+            and not pd.api.types.is_datetime64_any_dtype(s)
+            and 0 < s.nunique(dropna=True) <= max(20, n // 10)
         ]
 
         out: list[str] = []
@@ -240,8 +268,9 @@ def drivers(
     before: pd.DataFrame, after: pd.DataFrame, value_col: str, by_col: str
 ) -> dict:
     """Explain a metric change: rank each category's contribution to the
-    change in sum(value_col), with the exact receipt that contributions sum
-    to the observed delta (B1.2). Keyless and pure."""
+    change in sum(value_col) (B1.2). Rows with an empty `by_col` form a
+    `None` category, and the `receipt` checks the contributions against the
+    change in the whole frames' totals. Keyless and pure."""
     from crivo.decompose import decompose_sum
 
     return decompose_sum(before, after, value_col, by_col)
@@ -269,7 +298,7 @@ def compare(before, after, name_before="before", name_after="after") -> str:
 def reconcile(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) -> dict:
     """The keyed twin of `compare`: sort two frames' rows onto a key into
     added, removed, changed, and unchanged, excluding duplicate and null keys,
-    and ride a partition receipt (P7 design spec decision 3). `keys` is the key
+    and ride a receipt (P7 design spec decision 3). `keys` is the key
     column or columns. Keyless and pure; returns the result dict."""
     from crivo.rowdiff import reconcile as _reconcile
 
@@ -291,11 +320,15 @@ def export_notebook(source, path) -> Path:
     `source` (B3.2): the analysis as a reproducible .ipynb a colleague can
     open. Reads and diagnoses the source to seed the finding cells; returns
     the written path."""
+    from crivo import pii as _pii
     from crivo.notebook_export import diagnosis_to_notebook
 
     frame = read(source)
     findings = detect_all(frame, Path(str(source)).name)["findings"]
-    return diagnosis_to_notebook(source, findings, path)
+    # the notebook is meant to be handed on: evidence from PII-flagged columns
+    # is masked here, so notebook_export stays pure
+    redacted = _pii.redact_findings(findings, _pii.flagged_columns(frame))
+    return diagnosis_to_notebook(source, redacted, path)
 
 
 def diagnose(data, name: str | None = None) -> Report:
@@ -375,6 +408,3 @@ def write(frame: pd.DataFrame, path, **kwargs) -> Path:
             ".csv .parquet .xlsx .json .jsonl .feather .orc"
         )
     return p
-
-
-SIGNALS = len(SINGLE_FRAME)  # how many checks diagnose runs on every file

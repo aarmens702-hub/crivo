@@ -9,19 +9,24 @@ from dotenv import load_dotenv
 
 def main() -> int:
     load_dotenv()
-    # import-light and keyless: governance pulls in crivo.policy and the
-    # standard library only, so --diagnose still costs no model and no key
-    from crivo.governance import AUTONOMY_LEVELS
+    # import-light and keyless: crivo.policy pulls in the standard library
+    # only, so --diagnose still costs no model and no key
+    from crivo.policy import AUTONOMY_LEVELS
 
     parser = argparse.ArgumentParser(prog="crivo")
     parser.add_argument(
-        "--auto-run", action="store_true", help="skip the accept/run gate (dev only)"
+        "--auto-run",
+        action="store_true",
+        help="run the analyst's own query cells without asking (dev only); fix "
+        "gates, plans and skill admissions still wait for a person",
     )
     parser.add_argument(
         "--workspace", default="workspace", help="session workspace directory"
     )
     parser.add_argument(
-        "--data-dir", default="data", help="directory of immutable source datasets"
+        "--data-dir",
+        default="data",
+        help="read-only data mount for the --docker kernel (ignored otherwise)",
     )
     parser.add_argument(
         "--docker",
@@ -57,17 +62,9 @@ def main() -> int:
     parser.add_argument(
         "--clean",
         metavar="FILE",
-        help="headless one-shot clean: auto policy, judgement calls deferred",
+        help="headless one-shot clean: AUTO fixes run, judgement calls are deferred",
     )
     parser.add_argument("--name", help="variable name for the loaded file (clean mode)")
-    parser.add_argument(
-        "--policy",
-        choices=["auto", "all"],
-        default="auto",
-        help="still accepted, and no longer widens anything: only AUTO-grade "
-        "fixes run unattended, and a judgement call waits for a person either "
-        "way (until 2026-09-06 'all' approved them on your behalf)",
-    )
     parser.add_argument(
         "--autonomy",
         choices=list(AUTONOMY_LEVELS),
@@ -84,11 +81,27 @@ def main() -> int:
         "the family harmonize; a QUERY turn still runs the cell you approve "
         "at its gate, whatever that cell does.",
     )
-    if sys.argv[1:2] == ["diagnose"]:
-        sys.argv = [sys.argv[0], "--diagnose", *sys.argv[2:]]
-    if sys.argv[1:2] == ["clean"]:
-        sys.argv = [sys.argv[0], "--clean", *sys.argv[2:]]
-    args = parser.parse_args()
+    parser.add_argument(
+        "file",
+        nargs="?",
+        metavar="FILE",
+        help="the file for `crivo diagnose FILE` and `crivo clean FILE`",
+    )
+    # the subcommand names the mode and FILE is a positional, so options may
+    # sit before or after it and `crivo diagnose --help` prints the help
+    mode = sys.argv[1] if sys.argv[1:2] in (["diagnose"], ["clean"]) else None
+    if mode:
+        parser.prog = f"crivo {mode}"
+    args = parser.parse_args(sys.argv[2:] if mode else sys.argv[1:])
+    if mode == "diagnose":
+        args.diagnose = args.diagnose or args.file
+    elif mode == "clean":
+        args.clean = args.clean or args.file
+    # the mode's own FILE only: `crivo clean --diagnose FILE` must not diagnose
+    if mode and not getattr(args, mode):
+        parser.error(f"crivo {mode} needs a FILE")
+    if not mode and args.file:
+        parser.error("unexpected FILE; did you mean `crivo diagnose FILE`?")
 
     if args.diagnose:
         import json as _json
@@ -119,24 +132,15 @@ def main() -> int:
             1 if any(judgment.get(f["grade"], 2) >= threshold for f in findings) else 0
         )
 
-    provider = os.environ.get("CRIVO_PROVIDER", "deepseek")
-    key = "ANTHROPIC_API_KEY" if provider == "claude" else "DEEPSEEK_API_KEY"
-    if not os.environ.get(key):
-        print(f"{key} is not set — put it in .env or export it.")
+    # import-light: crivo.query imports only os at module level
+    from crivo.query import provider_problem
+
+    problem = provider_problem()
+    if problem:
+        print(f"{problem}. Put it in .env or export it.")
         return 1
 
-    try:
-        from crivo.loop import Session
-    except ImportError:
-        print(
-            "the hand-written core (src/crivo/loop.py) isn't implemented yet"
-            " — the plumbing is ready and waiting."
-        )
-        print(
-            "interfaces: specs/2026-08-09-p0-core-design.md §1"
-            " and src/crivo/events.py (SessionLike)"
-        )
-        return 1
+    from crivo.loop import Session
 
     if args.clean:
         # the orchestration surface: chatter to stderr, one JSON object (or a
@@ -155,10 +159,7 @@ def main() -> int:
                 autonomy=args.autonomy,
             )
             try:
-                summary = run_clean_once(
-                    session, args.clean, name=args.name, policy=args.policy
-                )
-                summary["policy"] = args.policy
+                summary = run_clean_once(session, args.clean, name=args.name)
             finally:
                 session.close()
         if args.json:
@@ -181,9 +182,9 @@ def main() -> int:
         workspace=args.workspace,
         data_dir=args.data_dir,
         docker=args.docker,
-        # previews cost one kernel cell per gate and nobody reads them when
-        # every gate auto-approves
-        preview=not args.auto_run,
+        # the clean gates a person still answers under --auto-run need their
+        # preview
+        preview=True,
         resume=args.resume,
         autonomy=args.autonomy,
     )

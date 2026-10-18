@@ -10,10 +10,54 @@ from bench import agent_run
 
 
 def test_require_key_exits_without_key(monkeypatch):
-    for var in agent_run.KEY_VARS:
+    for var in ("CRIVO_PROVIDER", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     with pytest.raises(SystemExit):
         agent_run._require_key()
+
+
+def test_require_key_accepts_an_openrouter_arm(monkeypatch):
+    """BP3: an OpenRouter arm runs on CRIVO_PROVIDER=openai with an endpoint,
+    a model and the endpoint's own key. It holds no DeepSeek or Anthropic key
+    and must not be refused for lacking one."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "openai")
+    monkeypatch.setenv("CRIVO_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setenv("CRIVO_MODEL", "qwen/qwen3-32b")
+    monkeypatch.setenv("CRIVO_API_KEY", "sk-or-test")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    try:
+        agent_run._require_key()
+    except SystemExit as exc:
+        pytest.fail(f"the OpenRouter arm was refused: {exc.code}")
+
+
+def test_require_key_names_the_configured_providers_key(monkeypatch):
+    """BP3: under claude, a DeepSeek key is not a model key. Passing the gate
+    on it only defers the failure to llm.py's KeyError mid-run; the gate must
+    stop and name ANTHROPIC_API_KEY. The claude arm with its own key runs."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        agent_run._require_key()
+    assert "ANTHROPIC_API_KEY" in str(exc.value.code)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    agent_run._require_key()  # no SystemExit: the right key is set
+
+
+def test_require_key_refuses_a_provider_that_does_not_exist(monkeypatch):
+    """BP3: CRIVO_PROVIDER=openrouter is a natural slip for an OpenRouter arm.
+    llm routes any unknown value to DeepSeek, so with a DeepSeek key on hand
+    the arm would run on DeepSeek under another arm's name. The gate refuses
+    and lists the providers that exist."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "openrouter")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    with pytest.raises(SystemExit) as exc:
+        agent_run._require_key()
+    assert "deepseek, claude, openai, faux" in str(exc.value.code)
 
 
 def test_load_dotenv_fills_missing_but_never_overwrites(tmp_path, monkeypatch):
@@ -190,7 +234,7 @@ def test_run_case_gives_each_case_an_isolated_skills_dir(tmp_path, monkeypatch):
 def test_repeat_runs_each_case_k_times_with_distinct_files(tmp_path, monkeypatch):
     """--repeat k gives pass^k k rows per case under distinct .rN names, and
     tags each row with its run index (A4)."""
-    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(
         agent_run.corpus,
@@ -225,7 +269,7 @@ def test_policies_auto_mints_one_record_and_reaches_the_session(
 ):
     """T1.4 bench arm: --policies auto builds the bench-auto ENFORCE record
     over every fixer-backed disease and passes it into the Session."""
-    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
     entry = {"name": "pol_case", "diseases": [4]}
     monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
@@ -513,38 +557,6 @@ def test_one_additive_term_alone_is_not_a_cost_basis(tmp_path):
     assert _stats("in2", {"gen_ai.usage.input_tokens": 900})["input_tokens"] == 900
 
 
-def test_the_cost_column_admits_which_providers_it_can_price(tmp_path):
-    """crivo.llm maps usage from `prompt_tokens`/`completion_tokens`, the
-    OpenAI and DeepSeek spelling. Anthropic's usage object spells them
-    `input_tokens`/`output_tokens`, so on the Claude provider no span carries
-    either additive term, every case reads unknown, and the whole cost column
-    is silent. Nothing in the code says so, and a reader of the docstring's
-    three states would read that silence as cancelled calls."""
-    import json
-
-    tele = tmp_path / "claude.jsonl"
-    tele.write_text(
-        json.dumps(
-            {
-                "name": "gen_ai.client.call",
-                "dur_s": 4.0,
-                "attrs": {
-                    "gen_ai.system": "claude",
-                    "gen_ai.request.model": "claude-sonnet-4-6",
-                },
-            }
-        )
-        + "\n"
-    )
-
-    stats = agent_run._call_stats(tele)
-    assert stats["count"] == 1, "the call happened and was billed"
-    assert stats["new_work_tokens"] is None
-
-    doc = agent_run._call_stats.__doc__ or ""
-    assert "claude" in doc.lower(), "the provider gap has to be named, not implied"
-
-
 def test_absent_telemetry_publishes_an_unknown_count_not_a_zero_one(tmp_path):
     """The same return said two things: new_work_tokens None ("we do not know
     whether a call was made") beside count 0 ("no call was made"). The count
@@ -598,7 +610,7 @@ def test_main_prints_unknown_tokens_as_unknown_never_as_zero(
     A case with no token data prints `unknown`; printing 0 would report a
     paid run as a free one. The aggregate mean skips the unknowns, and says
     how many cases it actually covered."""
-    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
     entry = {"name": "silent_case", "diseases": [1]}
     monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
@@ -634,7 +646,7 @@ def test_token_mean_covers_only_the_cases_that_reported_tokens(tmp_path, monkeyp
 def test_main_prints_calls_per_case_and_in_the_aggregate(tmp_path, monkeypatch, capsys):
     """T1.5: the per-case line and the final aggregate carry the calls
     summary (count, new-work tokens) alongside the scores."""
-    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
     entry = {"name": "fresh_case", "diseases": [1]}
     monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
@@ -660,7 +672,7 @@ def test_main_skips_cases_already_on_disk(tmp_path, monkeypatch):
     """R5: a finished case is never rerun without --force, never re-billed."""
     import json
 
-    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
     entry = {"name": "done_case", "diseases": [1]}
     monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
@@ -754,7 +766,7 @@ def test_two_arms_cannot_read_each_others_result_files(
     baseline's score. Each arm writes and reads its own file."""
     import json
 
-    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
     entry = {"name": "arm_case", "diseases": [4]}
     monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
@@ -918,7 +930,7 @@ def test_autonomy_arm_never_drives_human_gates_approve(tmp_path, monkeypatch, ca
     """R1 at the driver: `approve` runs non-admission HUMAN gates, which is a
     person's authorisation to give. An autonomy arm is measured with them
     skipped, so the combination is refused rather than honoured."""
-    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
     entry = {"name": "gate_case", "diseases": [4]}
     monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)

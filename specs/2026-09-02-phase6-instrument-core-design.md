@@ -114,7 +114,8 @@ the synthetic ones.
 
 ### R5 — Runner + publication (`bench/corpus.py`, `bench/run.py`)
 
-`uv run python -m bench.run --smoke` (~20 datasets, < 60 s, deterministic) and
+`uv run python -m bench.run --smoke` (30 corpus entries, < 60 s in the CI form
+without the external datasets, deterministic) and
 `--full` (thousands, headless, on demand). Emits `bench/results/*.json` and
 `bench/RESULTS.md`; a `--write-readme` flag rewrites the marked
 `<!-- bench:start -->…<!-- bench:end -->` section of README.md. Smoke never
@@ -140,7 +141,8 @@ exist. Nonzero exit on violation.
 
 ## Acceptance criteria
 
-1. Smoke run completes < 60 s locally, twice, with byte-identical JSON.
+1. Smoke run completes < 60 s in the CI form (external datasets absent), twice,
+   with byte-identical JSON.
 2. Full suite + ruff green; `detect.py` and `autoclean.py` diffs are empty.
 3. Oracle / no-op / determinism invariants enforced by the smoke run itself.
 4. `fetch_raha.py` fetches (or gracefully reports) all four datasets; scored

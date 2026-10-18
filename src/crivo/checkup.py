@@ -1,8 +1,8 @@
 """`crivo diagnose <file>` — what is wrong with this data, for free.
 
 Every other surface in this project needs an API key, a running kernel, and a
-decision to let an agent touch your data. This one needs a file. It runs the
-same 21 single-file signals the CLEAN mode runs, in-process, with no model
+decision to let an agent touch your data. This one needs a file. It runs
+every single-file signal the CLEAN mode runs, in-process, with no model
 involved anywhere — so a stranger can point it at their own CSV and see whether
 the diagnosis is any good before trusting anything else.
 
@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from crivo import pii
 from crivo.detect import SINGLE_FRAME, detect_all
 from crivo.readers import _sniff
 
@@ -78,14 +79,45 @@ def load(path, **kwargs) -> pd.DataFrame:
     like their plain form (pandas infers the codec from the path), and are
     refused first if they look like decompression bombs. Extra keyword args are
     forwarded to the pandas reader and override the sniffed defaults.
+
+    The non-csv formats in `readers.files.SUPPORTED` (json, jsonl, xlsx and
+    the rest) and parquet directories go through `crivo.read`'s file reader.
+    A directory with no parquet parts is refused, not read as an empty table.
     """
     # this is a door, not a detail: `crivo diagnose` (keyless, aimed at a
-    # stranger's file) and ingest.load_url both reach pandas through here with
-    # nothing else standing between those bytes and the expansion
-    from crivo.readers.files import guard_compressed
+    # stranger's file) reaches pandas through here with nothing else standing
+    # between those bytes and the expansion
+    from crivo.readers.files import guard_compressed, read_file
 
     path = Path(path)
     guard_compressed(path)
+    suffix = path.suffix.lower()
+    if suffix in {".gz", ".zip", ".bz2", ".xz"} and len(path.suffixes) >= 2:
+        suffix = path.suffixes[-2].lower()
+    if path.is_dir() or suffix in {
+        ".json",
+        ".jsonl",
+        ".ndjson",
+        ".xlsx",
+        ".xls",
+        ".feather",
+        ".orc",
+        ".dta",
+        ".sas7bdat",
+    }:
+        # read_file sends only the csv family and parquet back here, so this
+        # cannot recurse; a missing optional reader (xlrd for .xls) becomes a
+        # could-not-read the CLI exits 2 on, not a traceback
+        try:
+            frame = read_file(path, **kwargs)
+        except ImportError as exc:
+            raise ValueError(str(exc)) from exc
+        if path.is_dir() and frame.columns.empty:
+            # an empty directory, or a Spark output holding only _SUCCESS, is
+            # a 0 x 0 frame that passes every check: nothing to check is a
+            # could-not-run, never a clean
+            raise ValueError(f"{path.name}: no parquet parts in this directory")
+        return frame
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path, **kwargs)
     sample = _text_sample(path)
@@ -184,7 +216,17 @@ def report(path, as_json: bool = False) -> str:
     return render(path, frame, result)
 
 
+def _masked(frame: pd.DataFrame, result: dict) -> dict:
+    """A copy of `result` whose evidence is masked for PII-flagged columns
+    (#22): the text report lands in CI logs, public on a public repo. The
+    caller's `result` is untouched, so the exit code and `--json` read the
+    raw findings."""
+    flagged = pii.flagged_columns(frame)
+    return {**result, "findings": pii.redact_findings(result["findings"], flagged)}
+
+
 def render(path, frame: pd.DataFrame, result: dict) -> str:
+    result = _masked(frame, result)
     findings = result["findings"]
     fixable = [f for f in findings if not f["indicator"]]
     flagged = [f for f in findings if f["indicator"]]
@@ -257,6 +299,7 @@ def render_console(path, frame: pd.DataFrame, result: dict, console=None) -> Non
     from rich.text import Text
 
     console = console or Console()
+    result = _masked(frame, result)
     findings = result["findings"]
     fixable = [f for f in findings if not f["indicator"]]
     flagged = [f for f in findings if f["indicator"]]

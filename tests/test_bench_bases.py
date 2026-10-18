@@ -98,3 +98,24 @@ def test_typed_frame_start_end_pairing_and_end_without_start_raises():
 
     with pytest.raises(ValueError, match="start"):
         typed_frame(7, 10, {"deadline": "end"})
+
+
+def test_numeric_text_kind_holds_whole_numbers_as_strings():
+    """A numeric_text column is whole numbers stored as text, the way a CSV
+    column arrives when it is read as strings: the base a typed-in "-999"
+    hides in. The id column is seed-free, so a seed change shows in units."""
+    spec = {"row_id": "id", "units": "numeric_text"}
+    frame = None
+    reason = ""
+    try:
+        frame = typed_frame(42, 200, spec)
+    except ValueError as exc:
+        reason = str(exc)
+    assert frame is not None, f"typed_frame must know the numeric_text kind: {reason}"
+
+    units = frame["units"]
+    assert pd.api.types.is_string_dtype(units)
+    assert all(isinstance(v, str) and v.isdigit() for v in units)
+    assert units.astype(int).between(1, 499).all()
+    assert frame.equals(typed_frame(42, 200, spec)), "same seed, same frame"
+    assert not frame.equals(typed_frame(43, 200, spec)), "a new seed must differ"

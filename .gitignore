@@ -13,8 +13,7 @@ workspace/
 .env
 .env.*
 
-# claude / tdd-guard runtime state
-.claude/tdd-guard/
+# claude local settings
 .claude/settings.local.json
 
 # the skill library: skill folders are authored artifacts and belong in git —

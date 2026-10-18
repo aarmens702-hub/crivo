@@ -7,6 +7,7 @@ core proposals and are tested when they land.
 
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,19 +32,72 @@ def test_cancel_aborts_in_flight_call_and_self_clears():
     assert list(llm._watched(iter(["ok"]), lambda item: item)) == ["ok"]
 
 
-def test_cancel_between_calls_is_a_noop():
-    """A cancel with nothing in flight must not poison the next call."""
+def test_cancel_between_calls_is_a_noop(monkeypatch):
+    """A cancel with nothing in flight must not poison the next call. Goes
+    through generate(): a fresh call clears the flag before its request
+    starts, which is a property of the call, not of the stream watcher."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    monkeypatch.setattr(llm, "_faux_responses", [])  # isolate queue state
+    llm.faux_enqueue("fine")
     llm.request_cancel()
-    assert list(llm._watched(iter(["fine"]), lambda item: item)) == ["fine"]
+    assert "".join(llm.generate([{"role": "user", "content": "q"}])) == "fine"
 
 
-def test_telemetry_disabled_is_noop(monkeypatch):
+@pytest.mark.parametrize(
+    ("provider", "seam", "first_item"),
+    [
+        pytest.param(
+            "claude",
+            "_get_claude_client",
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="text_delta", text="late"),
+            ),
+            id="claude",
+        ),
+        pytest.param(
+            "deepseek",
+            "_get_client",
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="late", reasoning_content=None)
+                    )
+                ]
+            ),
+            id="deepseek",
+        ),
+    ],
+)
+def test_cancel_during_the_request_is_not_lost(monkeypatch, provider, seam, first_item):
+    """Regression for #13. T51: Ctrl-C can land while create() is still
+    opening the request (the SDK's retries included). The stream watcher
+    cleared the flag on entry, after that window, so the cancel was erased
+    and the call ran on."""
+    monkeypatch.setenv("CRIVO_PROVIDER", provider)
+
+    def create(**_):
+        llm.request_cancel()  # the REPL's Ctrl-C handler, mid-request
+        return iter([first_item])
+
+    client = SimpleNamespace(
+        messages=SimpleNamespace(create=create),
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+    monkeypatch.setattr(llm, seam, lambda: client)
+
+    with pytest.raises(llm.CallCancelled):
+        list(llm.generate([{"role": "user", "content": "q"}]))
+
+
+def test_telemetry_disabled_is_noop(tmp_path, monkeypatch):
     monkeypatch.delenv("CRIVO_TELEMETRY", raising=False)
+    monkeypatch.chdir(tmp_path)
     from crivo import telemetry
 
     with telemetry.span("gen_ai.client.call", probe=1):
         pass  # must not raise, must not write anywhere
-    assert not telemetry.enabled()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_telemetry_span_writes_jsonl(tmp_path, monkeypatch):

@@ -17,6 +17,7 @@ import base64
 import html
 from pathlib import Path
 
+from crivo import pii
 from crivo.detect import SINGLE_FRAME
 
 # --- identity tokens (docs/assets/terminal.svg) -----------------------------
@@ -110,7 +111,7 @@ def _cols_label(columns) -> str:
     return f"[{joined}]"
 
 
-def _finding(finding) -> str:
+def _finding(finding, flagged=None) -> str:
     color = GRADE.get(finding["grade"], MUTED_2)
     meta = (
         _span("&#9679;&nbsp;", color)
@@ -120,7 +121,10 @@ def _finding(finding) -> str:
         + _span("&nbsp;&nbsp;", MUTED)
         + _span(_cols_label(finding["columns"]), TEAL, mono=True)
     )
-    evidence = _span(_esc(finding["evidence"]), MUTED_2)
+    # mask before escaping: escape turns quotes into entities, and the masker
+    # finds a value by its quotes
+    redacted = pii.redact_text(finding["evidence"], finding["columns"], flagged or {})
+    evidence = _span(_esc(redacted), MUTED_2)
     # _cols_label already escapes each name; grade is enum but escape the
     # fallback so no interpolated value ever reaches the card unescaped
     note = _span(GRADE_NOTE.get(finding["grade"], _esc(finding["grade"])), color)
@@ -178,16 +182,22 @@ def _footer(clear, n_signals) -> str:
     )
 
 
-def report_html(name, frame, result):
+def report_html(name, frame, result, flagged=None):
+    """The diagnosis card. `flagged` maps a PII-flagged column name to its
+    type (`pii.flagged_columns`); evidence from those columns is masked. It is
+    computed from `frame` when `None`, so a caller that already scanned passes
+    it in."""
+    if flagged is None:
+        flagged = pii.flagged_columns(frame)
     findings = result.get("findings", [])
     fixable = sum(1 for f in findings if not f["indicator"])
-    flagged = sum(1 for f in findings if f["indicator"])
+    indicators = sum(1 for f in findings if f["indicator"])
     parts = [
         _header(name, len(frame), len(frame.columns)),
         _encoding_warning(frame),
-        _summary(fixable, flagged, len(result.get("clear", []))),
+        _summary(fixable, indicators, len(result.get("clear", []))),
     ]
-    parts.extend(_finding(f) for f in findings)
+    parts.extend(_finding(f, flagged) for f in findings)
     parts.append(_footer(result.get("clear", []), len(SINGLE_FRAME)))
     return _card("".join(parts))
 
@@ -203,31 +213,62 @@ def _fix_head(mark, mark_color, slug_color, fix) -> str:
     )
 
 
-def _applied_row(fix, examples) -> str:
+CLIP = 40  # characters per example value, the limit detect._samples uses
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= CLIP else text[:CLIP] + "…"
+
+
+def _shown(value, kind=None, *, quote=False) -> str:
+    """One value as the clean card shows it: masked as PII type `kind` (when
+    not None), clipped, then escaped. Masking runs before escaping, which
+    turns quotes into entities. A string is clipped before it is quoted, so
+    its closing quote stays."""
+    if kind:
+        value = pii.mask_cell(value, kind)
+    if isinstance(value, str):
+        text = repr(_clip(value)) if quote else _clip(value)
+    else:
+        text = _clip(repr(value) if quote else str(value))
+    return _esc(text)
+
+
+def _applied_row(fix, examples, flagged) -> str:
     rows = [
         f'<div style="margin-top:10px;">{_fix_head("✓", GRADE["AUTO"], GRADE["AUTO"], fix)}</div>'
     ]
     for ex in examples[:3]:
-        if ex.get("removed"):
-            text = _esc(f"{ex['column']} removed (constant {ex['value']!r})")
+        kind = flagged.get(str(ex["column"]))
+        if ex.get("renamed"):  # d18: a header name is schema, clipped but never masked
+            text = _shown(ex["column"], quote=True) + " → " + _shown(ex["new"])
+        elif ex.get("removed"):  # d19: the dropped constant is a cell value
+            value = _shown(ex["value"], kind, quote=True)
+            text = f"{_shown(ex['column'])} removed (constant {value})"
         else:
-            text = _esc(repr(ex["old"])) + " → " + _esc(str(ex["new"]))
+            text = _shown(ex["old"], kind, quote=True) + " → " + _shown(ex["new"], kind)
         rows.append(
             f'<div style="margin:2px 0 0 18px;">{_span(text, MUTED_2, mono=True)}</div>'
         )
     return "".join(rows)
 
 
-def _deferred_row(fix) -> str:
+def _deferred_row(fix, flagged) -> str:
     head = _fix_head("&#183;", MUTED, MUTED_2, fix)
     reason = fix.get("reason")
     if reason:
-        head += _span("&nbsp;&#8212; " + _esc(reason), MUTED)
+        # mask before escaping, as in _finding: a fixer error can quote a cell
+        redacted = pii.redact_text(reason, fix["columns"], flagged)
+        head += _span("&nbsp;&#8212; " + _esc(redacted), MUTED)
     return f'<div style="margin-top:8px;">{head}</div>'
 
 
 def clean_html(summary):
+    """The clean card. Example values and review reasons from PII-flagged
+    columns of the frame before cleaning are masked; each example value is
+    clipped to CLIP characters. Reasons are masked, not clipped."""
     applied, deferred = summary.applied, summary.needs_review
+    flagged = pii.flagged_columns(summary._before)
     samples = {
         (s["disease"], tuple(s["columns"])): s["examples"] for s in summary.samples()
     }
@@ -238,10 +279,10 @@ def clean_html(summary):
     )
     parts = [f'<div style="margin:0 0 2px;">{header}</div>{_rule()}']
     parts.extend(
-        _applied_row(f, samples.get((f["disease"], tuple(f["columns"])), []))
+        _applied_row(f, samples.get((f["disease"], tuple(f["columns"])), []), flagged)
         for f in applied
     )
-    parts.extend(_deferred_row(f) for f in deferred)
+    parts.extend(_deferred_row(f, flagged) for f in deferred)
     return _card("".join(parts))
 
 

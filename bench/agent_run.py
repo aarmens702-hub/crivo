@@ -29,8 +29,8 @@ from bench.score import score_end_to_end
 from crivo import llm
 from crivo.autoclean import FIXERS
 from crivo.policy import PolicyRecord
+from crivo.query import provider_problem
 
-KEY_VARS = ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY")
 RESULTS_DIR = Path("bench/results/agent")
 
 # The cap defaults, named once: `main` gives them to the parser and
@@ -57,11 +57,10 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
 
 
 def _require_key() -> None:
-    if not any(os.environ.get(v) for v in KEY_VARS):
-        sys.exit(
-            "agent bench needs a model key; none of "
-            f"{', '.join(KEY_VARS)} set (checked env and .env) — R7"
-        )
+    """R7: the configured provider's own needs, the check the CLI shares."""
+    problem = provider_problem()
+    if problem:
+        sys.exit(f"agent bench: {problem} (checked env and .env)")
 
 
 def _drive(
@@ -153,16 +152,6 @@ def _call_stats(path: Path) -> dict:
         knowably short as if it were complete. The span is emitted from
         telemetry.span's `finally` while llm.generate maps usage only after
         the stream finishes, so a cancelled or failed call leaves one behind.
-
-    What that last state cannot distinguish, and this is the live limitation:
-    crivo.llm maps usage from `prompt_tokens`/`completion_tokens`, the OpenAI
-    and DeepSeek spelling. Anthropic spells them `input_tokens`/
-    `output_tokens` and llm.py does not map those, so on the Claude provider
-    NO span carries either additive term, every case reads unknown, and the
-    whole cost column is silent rather than wrong. A reader seeing `unknown`
-    should check the provider before concluding a call was cancelled. Fixing
-    it means mapping the Anthropic names in crivo/llm.py; nothing in this
-    module can make the numbers appear.
     """
     try:
         lines = path.read_text().splitlines()

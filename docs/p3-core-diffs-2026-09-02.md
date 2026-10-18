@@ -1,7 +1,10 @@
 # Phase 3 core diffs for review (2026-09-02)
 
-Three propose-diffs into Aarmen-owned files (`prompts.py`, `loop.py`). Nothing
-here is applied; each block is the exact change, ready to accept, edit, or
+> **Historical record (closed 2026-10-17).** Kept for how and why. What is still open lives in `specs/2026-10-14-the-plan.md`, with ids in `specs/2026-10-14-plan-inventory.md`.
+
+Three propose-diffs into Aarmen-owned files (`prompts.py`, `loop.py`). Item 1
+was applied (the "How this was computed:" paragraph in `prompts.py`); the rest
+were not; each block is the exact change, ready to accept, edit, or
 reject. Rationale is one paragraph each — sources: the P3 roadmap items
 ("plain-English paragraph on the answer card", "charts on answers") and the
 approved prime-agent backlog §4.

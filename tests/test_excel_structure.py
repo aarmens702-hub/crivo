@@ -105,25 +105,3 @@ def test_findings_are_gradeable_and_suggest_a_fix(tmp_path):
     f = _one(excel_structure.analyze_workbook(path), "r")
     assert f["grade"] in {"GATE", "HUMAN"}  # restructuring is a judgement call
     assert f["suggestion"]  # a concrete next step, e.g. skip N rows
-
-
-def test_import_is_keyless_and_pulls_no_core_module():
-    import os
-    import subprocess
-    import sys
-
-    code = (
-        "import sys, crivo.excel_structure\n"
-        "bad=[m for m in ('crivo.loop','crivo.prompts','crivo.skills',"
-        "'crivo.provenance','crivo.llm') if m in sys.modules]\n"
-        "print(bad); sys.exit(1 if bad else 0)\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        env=dict(os.environ),
-        timeout=120,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr

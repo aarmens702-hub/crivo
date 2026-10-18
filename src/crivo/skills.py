@@ -62,9 +62,24 @@ def render(skill: Skill) -> str:
     return "\n".join(lines) + skill.body
 
 
+# The backslash, the quote, and every character str.splitlines() breaks on, so
+# a value can never cut the frontmatter line it sits on (#27).
+_TO_ESCAPE = re.compile(
+    '[\\\\"\n\r\x0b\x0c\x1c-\x1e\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]'
+)
+_ESCAPES = {"\\": "\\", '"': '"', "\n": "n", "\r": "r"}
+_UNESCAPES = {code: char for char, code in _ESCAPES.items()}
+
+
 def _scalar(value: str) -> str:
-    """Quote a scalar so punctuation can never be read as YAML structure."""
-    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """Quote a scalar so punctuation can never be read as YAML structure. The
+    escapes are YAML double-quoted ones, so other readers decode them too."""
+    return '"' + _TO_ESCAPE.sub(_escape, str(value)) + '"'
+
+
+def _escape(match: re.Match) -> str:
+    char = match.group()
+    return "\\" + _ESCAPES[char] if char in _ESCAPES else f"\\u{ord(char):04x}"
 
 
 def parse(text: str) -> tuple[dict, str]:
@@ -108,8 +123,16 @@ def parse(text: str) -> tuple[dict, str]:
 
 def _unscalar(value: str) -> str:
     if value.startswith('"') and value.endswith('"') and len(value) >= 2:
-        return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        # One pass, so an escaped backslash before n is never decoded twice.
+        return re.sub(r"\\(u[0-9a-fA-F]{4}|.)", _unescape, value[1:-1])
     return value
+
+
+def _unescape(match: re.Match) -> str:
+    code = match.group(1)
+    if len(code) == 5:
+        return chr(int(code[1:], 16))
+    return _UNESCAPES.get(code, match.group())
 
 
 def _unflow(value: str) -> list:

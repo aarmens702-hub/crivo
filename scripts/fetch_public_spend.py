@@ -1,4 +1,4 @@
-"""Fetch the real-world datasets behind the Loop take-home appendix.
+"""Fetch three public datasets crivo uses as real-world dogfood.
 
 Three sources, all free, all keyless, all verified live on 2026-08-13:
 
@@ -23,15 +23,15 @@ Three sources, all free, all keyless, all verified live on 2026-08-13:
     they trust. Terms: https://www.bankofcanada.ca/terms/
 
 Usage:
-    uv run python scripts/fetch_takehome.py            # into data/takehome/
-    uv run python scripts/fetch_takehome.py --rows 50000
+    uv run python scripts/fetch_public_spend.py    # into data/external/public-spend/
+    uv run python scripts/fetch_public_spend.py --rows 50000
 """
 
 import argparse
 import urllib.request
 from pathlib import Path
 
-USER_AGENT = "crivo-fetch-takehome/0.1"
+USER_AGENT = "crivo-fetch-public-spend/0.1"
 
 HMT = {
     # publication pages resolved via the gov.uk content API; asset URLs are
@@ -78,7 +78,11 @@ def _open(url: str):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, default=20_000)
-    parser.add_argument("--dest", default="data/takehome")
+    parser.add_argument(
+        "--dest",
+        default="data/external/public-spend",
+        help="where the files go (default: %(default)s)",
+    )
     args = parser.parse_args()
     dest = Path(args.dest)
     dest.mkdir(parents=True, exist_ok=True)

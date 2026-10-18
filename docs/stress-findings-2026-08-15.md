@@ -1,5 +1,7 @@
 # Stress + review findings — 2026-08-15
 
+> **Historical record (closed 2026-10-17).** Kept for how and why. What is still open lives in `specs/2026-10-14-the-plan.md`, with ids in `specs/2026-10-14-plan-inventory.md`.
+
 A deliberate attempt to break the system after the parallel-agent build round.
 Approach: throw hostile inputs at every surface and assert nothing crashes
 (errors must be results, not exceptions); push the detection engine to scale

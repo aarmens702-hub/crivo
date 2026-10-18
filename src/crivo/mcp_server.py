@@ -189,14 +189,11 @@ def _diagnose_file(path: str) -> str:
 
 
 def _required_key() -> str | None:
-    """R5: which env var the configured provider needs, or None when set."""
-    import os
+    """R5: why the configured provider can't run yet, or None when it can."""
+    from crivo.query import provider_problem
 
-    provider = os.environ.get("CRIVO_PROVIDER", "deepseek")
-    key = "ANTHROPIC_API_KEY" if provider == "claude" else "DEEPSEEK_API_KEY"
-    if not os.environ.get(key):
-        return f"{key} is not set — add it to the MCP client config env"
-    return None
+    problem = provider_problem()
+    return f"{problem}. Add it to the MCP client config env." if problem else None
 
 
 def _make_session():
@@ -270,9 +267,7 @@ def _make_session():
     )
 
 
-def _clean_file(
-    path: str, name: str | None = None, policy: str = "auto", decide=None
-) -> dict:
+def _clean_file(path: str, name: str | None = None, decide=None) -> dict:
     """Headless one-shot clean under the grade policy (R2); `decide` is the
     v1.5 per-gate callback when the client can be asked (elicitation)."""
     missing = _required_key()
@@ -290,10 +285,7 @@ def _clean_file(
             session = _make_session()
         try:
             with _quiet():
-                summary = repl.run_clean_once(
-                    session, target, name=name, policy=policy, decide=decide
-                )
-            summary["policy"] = policy
+                summary = repl.run_clean_once(session, target, name=name, decide=decide)
             return summary
         finally:
             session.close()
@@ -373,7 +365,8 @@ def _open_data(path: str) -> dict:
 # other grade (GATE, HUMAN, PLAN) is a person's decision, and this connection
 # has no person on it.
 #
-# repl.policy_decision skips an ungraded gate and this runs one, which is a
+# repl.policy_decision, the grade rule clean_file falls back to when its
+# client cannot elicit, skips an ungraded gate and this runs one, which is a
 # real difference and not an oversight: there the ungraded gate is a
 # harmonize decision about somebody's data on the clean path, and here it is
 # the analysis cell the caller just asked for. What it costs is stated in
@@ -493,9 +486,10 @@ def build_server():
 
     @app.tool()
     def diagnose_file(path: str) -> str:
-        """Report what is wrong with a CSV/parquet file: 22 named data-quality
-        checks (money as text, mixed date formats, sentinels, encoding damage,
-        duplicates, contradictions). Returns JSON with findings, checks that
+        """Report what is wrong with a data file (csv, tsv or parquet): 25
+        named data-quality checks (money as text, mixed date formats,
+        sentinels, encoding damage, duplicates, contradictions). A 26th,
+        schema drift, needs several files and does not run here. Returns JSON with findings, checks that
         ran clean, and checks that could not run. Free, keyless, read-only —
         always safe to call first. The path must be inside the server's
         configured root (CRIVO_MCP_ROOT, default its launch directory)."""
@@ -505,38 +499,40 @@ def build_server():
     async def clean_file(
         path: str,
         name: str | None = None,
-        policy: str = "auto",
         ctx: Context | None = None,
     ) -> dict:
-        """Clean a data file headlessly. Fixes are model-written, executed in
-        the server's kernel, and verified by re-running the detector plus row
-        and hash invariants; failures revert. That kernel is a host subprocess
-        with the server user's files and network unless the operator set
-        CRIVO_MCP_SANDBOX=docker, so the fixes it writes run with that access.
+        """Not sandboxed by default: this runs model-written Python as the
+        server user, with that user's files (including .env) and network. Set
+        CRIVO_MCP_SANDBOX=docker to run it in a container with no network.
+        Clean a data file headlessly. An AUTO finding with a deterministic
+        fixer runs that fixer and the rest are model-written; each fix runs in
+        the server's kernel, and is verified by re-running the detector plus row
+        and hash invariants; failures revert.
         path must be inside the configured root (CRIVO_MCP_ROOT) and name,
         when given, must be a plain variable name. Only AUTO-grade fixes run:
         judgement-grade findings come back in needs_human for a person to
-        decide, and no value of policy changes that, so there is nothing here
-        to relay a human's consent through. If your client supports
-        elicitation, GATE-grade fixes are offered to the human one by one
-        instead. Returns fixes, needs_human, and artifact paths (cleaned
-        parquet, lineage, report)."""
+        decide, and there is nothing here to relay a human's consent through.
+        If your client supports elicitation, GATE-grade fixes are offered to
+        the human one by one instead. Returns fixes, needs_human, and artifact
+        paths (cleaned parquet, lineage, report)."""
         import anyio
 
         decide = None
-        if policy == "auto" and ctx is not None and _client_can_elicit(ctx):
+        if ctx is not None and _client_can_elicit(ctx):
             decide = _make_decider(_elicit_sync_via(ctx))
         # the kernel blocks for minutes; a worker thread keeps the event loop
         # free to carry the elicitation replies the decider waits on
         return await anyio.to_thread.run_sync(
-            lambda: _clean_file(path, name=name, policy=policy, decide=decide)
+            lambda: _clean_file(path, name=name, decide=decide)
         )
 
     @app.tool()
     def open_data(path: str) -> dict:
-        """Load a data file into a persistent kernel for conversational
-        analysis. That kernel is a host subprocess with the server user's
-        files and network unless the operator set CRIVO_MCP_SANDBOX=docker.
+        """Not sandboxed by default: the kernel this opens runs the
+        model-written Python that ask sends it, as the server user, with that
+        user's files (including .env) and network. Set CRIVO_MCP_SANDBOX=docker
+        to run it in a container with no network. Load a data file into a
+        persistent kernel for conversational analysis.
         The path must be inside the configured root (CRIVO_MCP_ROOT). Returns
         a session_id for ask/why/close_session and a schema/stats profile of
         the data. Use this when multiple questions will be asked over one
@@ -545,13 +541,15 @@ def build_server():
 
     @app.tool()
     def ask(session_id: str, question: str) -> dict:
-        """Ask a question over an open session. The inner analyst writes and
+        """Not sandboxed by default: this runs model-written Python as the
+        server user, with that user's files (including .env) and network. Set
+        CRIVO_MCP_SANDBOX=docker to run it in a container with no network.
+        Ask a question over an open session. The inner analyst writes and
         runs code cells against the loaded data and returns an answer card:
         the answer, the code, executed checks, and lineage back to the source
         file. Trust the card's checks, not the prose alone. Calling this runs
         model-authored code written from your question, un-gated, as the user
-        this server runs as — in a host subprocess with that user's files and
-        network unless the operator set CRIVO_MCP_SANDBOX=docker. Anything the
+        this server runs as. Anything the
         loop graded as a person's decision is skipped rather than approved on
         that person's behalf, and listed in unresolved_gates when it happens:
         if that list comes back, the answer was reached without it and a human

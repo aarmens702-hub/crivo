@@ -36,44 +36,6 @@ def test_short_cp1252_file_falls_back_to_cp1252(tmp_path) -> None:
     assert df.attrs.get("encoding") == "cp1252"
 
 
-def test_remote_bad_records_path_errors_clearly(monkeypatch) -> None:
-    """A wrong records_path must name itself, not surface a bare KeyError the
-    caller can't tie back to the argument they passed."""
-    import pytest
-
-    from crivo.readers import remote
-
-    monkeypatch.setattr(
-        remote,
-        "_fetch",
-        lambda url: ('{"data": {"items": [{"a": 1}]}}', "application/json"),
-    )
-
-    with pytest.raises(ValueError, match="records_path") as excinfo:
-        remote.read_url("http://x/d.json", records_path="data.MISSING")
-    assert "MISSING" in str(excinfo.value)
-
-
-def test_remote_http_error_is_not_blamed_on_the_sandbox(monkeypatch) -> None:
-    """A real 404/500 (the server answered) must not be reported as an
-    unreachable-sandbox failure — HTTPError is a URLError subclass, so it has to
-    be distinguished."""
-    import urllib.error
-    import urllib.request
-
-    import pytest
-
-    from crivo.readers import remote
-
-    def _raise(*_a, **_k):
-        raise urllib.error.HTTPError("http://x/d.json", 404, "Not Found", {}, None)
-
-    monkeypatch.setattr(urllib.request, "urlopen", _raise)
-
-    with pytest.raises(RuntimeError, match="404"):
-        remote.read_url("http://x/d.json")
-
-
 def test_cloud_schemes_fail_clearly_not_as_a_mangled_local_path() -> None:
     """s3://gs://az:// are deferred — the user must get a clear message, not a
     FileNotFoundError from the file reader treating 's3://…' as a local path."""

@@ -7,8 +7,14 @@ It tests the tree the session is working in (stdin's cwd, resolved to its
 git top level), so parallel worktrees don't block each other. Skips quietly
 when nothing relevant changed, when uv or the venv is missing, or when this
 stop was itself caused by this hook (stop_hook_active), so it can't loop.
-Standard library only.
+
+When the tests pass but a file that shapes what the model does changed
+(BEHAVIOUR_FILES), it blocks once more to ask for the eval result, or a plain
+"unmeasured": tests prove the code, not the behaviour (AGENTS.md, "Work
+types"). Standard library only.
 """
+
+BEHAVIOUR_FILES = ("src/crivo/prompts.py", "src/crivo/llm.py")
 
 import json
 import os
@@ -74,6 +80,19 @@ except subprocess.TimeoutExpired:
 except OSError:
     sys.exit(0)
 if run.returncode == 0:
+    touched = [
+        f
+        for f in BEHAVIOUR_FILES
+        if any(line.endswith(f) for line in changed.stdout.splitlines())
+    ]
+    if touched:
+        sys.stderr.write(
+            f"Tests pass, but {', '.join(touched)} shapes what the model does, and tests "
+            "prove the code, not the behaviour. Before finishing, cite the eval result "
+            "for this change, or tell the user plainly that the behaviour change is "
+            "unmeasured.\n"
+        )
+        sys.exit(2)
     sys.exit(0)
 
 tail = "\n".join((run.stdout + run.stderr).splitlines()[-40:])

@@ -82,6 +82,145 @@ def test_ask_gate_matches_the_configured_provider(monkeypatch):
     assert ask_mod._required_key() is None, "the faux provider needs no env"
 
 
+PROVIDERS_LISTED = "deepseek, claude, openai, faux"
+OLLAMA = {"CRIVO_BASE_URL": "http://localhost:11434/v1", "CRIVO_MODEL": "qwen3:32b"}
+BOTH_KEYS = {"DEEPSEEK_API_KEY": "sk-test", "ANTHROPIC_API_KEY": "sk-ant-test"}
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        # refused: not a provider, whatever keys are on hand (llm would route
+        # every one of these to DeepSeek and stamp the misspelling on the card)
+        pytest.param(
+            {"CRIVO_PROVIDER": "Claude", **BOTH_KEYS},
+            ("CRIVO_PROVIDER='Claude'", PROVIDERS_LISTED),
+            id="Claude-capital-C",
+        ),
+        pytest.param(
+            {"CRIVO_PROVIDER": "anthropic", **BOTH_KEYS},
+            ("CRIVO_PROVIDER='anthropic'", PROVIDERS_LISTED),
+            id="anthropic",
+        ),
+        pytest.param(
+            {"CRIVO_PROVIDER": "ollama", **OLLAMA},
+            ("CRIVO_PROVIDER='ollama'", PROVIDERS_LISTED),
+            id="ollama",
+        ),
+        pytest.param(
+            {"CRIVO_PROVIDER": "FAUX"},
+            ("CRIVO_PROVIDER='FAUX'", PROVIDERS_LISTED),
+            id="FAUX",
+        ),
+        # ready: each real provider with what it needs, and nothing more
+        pytest.param({"CRIVO_PROVIDER": "faux"}, None, id="faux-needs-nothing"),
+        pytest.param(
+            {"CRIVO_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "sk-test"},
+            None,
+            id="deepseek-ready",
+        ),
+        pytest.param(
+            {"CRIVO_PROVIDER": "claude", "ANTHROPIC_API_KEY": "sk-ant-test"},
+            None,
+            id="claude-ready",
+        ),
+        pytest.param({"CRIVO_PROVIDER": "openai", **OLLAMA}, None, id="openai-ready"),
+        # missing: the sentence names what this provider still needs
+        pytest.param(
+            {}, ("DEEPSEEK_API_KEY is not set",), id="deepseek-default-no-key"
+        ),
+        pytest.param(
+            {"CRIVO_PROVIDER": "deepseek"},
+            ("DEEPSEEK_API_KEY is not set",),
+            id="deepseek-no-key",
+        ),
+        pytest.param(
+            {"CRIVO_PROVIDER": "claude", "DEEPSEEK_API_KEY": "sk-test"},
+            ("ANTHROPIC_API_KEY is not set",),
+            id="claude-with-only-a-deepseek-key",
+        ),
+        pytest.param(
+            {"CRIVO_PROVIDER": "openai"},
+            ("CRIVO_BASE_URL is not set",),
+            id="openai-no-endpoint",
+        ),
+        pytest.param(
+            {"CRIVO_PROVIDER": "openai", "CRIVO_BASE_URL": OLLAMA["CRIVO_BASE_URL"]},
+            ("CRIVO_MODEL is not set",),
+            id="openai-no-model",
+        ),
+    ],
+)
+def test_provider_problem_refuses_an_unknown_provider(monkeypatch, env, expected):
+    """BP3: one check every entry point shares. None when the configured
+    provider is ready; a sentence naming the missing variable when it is not;
+    a refusal listing the real providers when CRIVO_PROVIDER names none."""
+    from crivo import query
+
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    provider_problem = getattr(query, "provider_problem", None)
+    assert callable(provider_problem), "crivo.query.provider_problem() is missing"
+
+    problem = provider_problem()
+
+    if expected is None:
+        assert problem is None, f"a ready provider was refused: {problem}"
+    else:
+        assert problem is not None, "a provider that is not ready was passed"
+        for part in expected:
+            assert part in problem
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        pytest.param({"DEEPSEEK_API_KEY": "sk-test"}, None, id="with-a-deepseek-key"),
+        pytest.param({}, "DEEPSEEK_API_KEY is not set", id="without-a-key"),
+    ],
+)
+def test_an_empty_provider_is_deepseek(monkeypatch, env, expected):
+    """Owner decision (2026-10-17): .env.example ships `CRIVO_PROVIDER=`, so a
+    copied .env sets it to "". That is unset, meaning deepseek, not a
+    misspelled provider to refuse."""
+    from crivo import query
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "")
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    provider_problem = getattr(query, "provider_problem", None)
+    assert callable(provider_problem), "crivo.query.provider_problem() is missing"
+
+    problem = provider_problem()
+
+    if expected is None:
+        assert problem is None, f"an empty CRIVO_PROVIDER was refused: {problem}"
+    else:
+        assert problem is not None and expected in problem
+
+
+def test_ask_refuses_a_misspelled_provider_before_any_session(monkeypatch):
+    """BP3: `CRIVO_PROVIDER=Claude` with keys on hand used to pass the gate
+    and run on DeepSeek. ask() now refuses it before a kernel starts, names
+    the real providers, and keeps the pointer to the keyless half."""
+    from crivo import query as ask_mod
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "Claude")
+    for var, value in BOTH_KEYS.items():
+        monkeypatch.setenv(var, value)
+
+    def no_session():
+        raise AssertionError("ask() built a session under CRIVO_PROVIDER='Claude'")
+
+    monkeypatch.setattr(ask_mod, "_make_session", no_session)
+
+    with pytest.raises(RuntimeError) as exc:
+        ask_mod.ask(pd.DataFrame({"a": [1]}), "how many rows?")
+
+    assert PROVIDERS_LISTED in str(exc.value)
+    assert "keyless" in str(exc.value), "the hint about the keyless half is kept"
+
+
 class _FakeSession:
     """A Session double speaking the real event protocol: one gate, then the
     card. Records what ask() did with it."""

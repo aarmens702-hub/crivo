@@ -1,4 +1,4 @@
-"""generate() seam: DeepSeek default, Claude later behind the same signature (R3).
+"""generate() seam: DeepSeek default; Claude, OpenAI and faux on one signature (R3).
 
 DeepSeek is OpenAI-compatible, so the openai SDK pointed at their base URL is
 the whole client. The seam yields plain text chunks; only `delta.content` is
@@ -13,8 +13,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator
 
-import httpx
-from openai import OpenAI
+from openai import OpenAI, Timeout
 
 # Overflow shapes for the providers generate() actually speaks to, each with
 # the real error message it came from:
@@ -81,9 +80,12 @@ KEY_ENV_VARS = (
 
 DEFAULT_MODEL = "deepseek-v4-pro"
 BASE_URL = "https://api.deepseek.com"
-CLAUDE_DEFAULT_MODEL = "claude-opus-5"
-CLAUDE_MAX_TOKENS = 8192
-TEMPERATURE = 0.0
+CLAUDE_DEFAULT_MODEL = "claude-opus-5-5"
+# thinking is always on for current Claude models and spends from max_tokens
+CLAUDE_MAX_TOKENS = 32000
+# current Claude models reject temperature with a 400; effort is the control
+CLAUDE_EFFORT = "high"
+TEMPERATURE = 0.0  # the OpenAI-compatible providers only
 # A read timeout cannot fire while reasoning chunks keep arriving, so a model
 # can think without bound. This is the ceiling on one call, start to finish.
 MAX_CALL_S = 420
@@ -106,8 +108,9 @@ class CallCancelled(RuntimeError):
 
 
 # One-shot cancel channel: the REPL's interrupt path sets it, the in-flight
-# _watched loop raises CallCancelled and clears it. A fresh call always
-# starts clean, so a cancel with nothing in flight targets nobody.
+# _watched loop raises CallCancelled and clears it. A fresh call clears it
+# before the request starts, so a cancel that lands while the request is
+# opening still lands, and a cancel with nothing in flight targets nobody.
 _cancel = threading.Event()
 
 
@@ -130,7 +133,8 @@ def faux_enqueue(*texts: str) -> None:
 
 
 def _provider() -> str:
-    """R10: two providers, one env switch, no registry."""
+    """R10: four providers (deepseek, claude, openai, faux), one env switch,
+    no registry."""
     return os.environ.get("CRIVO_PROVIDER", "deepseek")
 
 
@@ -196,7 +200,10 @@ def model_name() -> str:
 
 
 def model_info() -> dict:
-    """Provenance stamp for the answer card."""
+    """Provenance stamp for the answer card: the sampling control actually
+    sent, effort on Claude and temperature on the others."""
+    if _provider() == "claude":
+        return {"provider": "claude", "model": model_name(), "effort": CLAUDE_EFFORT}
     return {"provider": _provider(), "model": model_name(), "temperature": TEMPERATURE}
 
 
@@ -226,6 +233,27 @@ def _claude_text(event) -> str | None:
     return None
 
 
+def _claude_usage(usages: list) -> dict:
+    """Anthropic usage in the span's DeepSeek meaning. Anthropic's
+    input_tokens excludes cache reads and writes, where DeepSeek's
+    prompt_tokens counts the hits, so mapping it raw would make the bench's
+    input - hit + output subtract the cache twice. Input and cache counts
+    arrive once, on message_start (the first usage); message_delta's output
+    count is cumulative, so the last one is the total. With no input count
+    nothing is mapped: an output count alone would price the call cheap."""
+    fresh = getattr(usages[0], "input_tokens", None) if usages else None
+    if fresh is None:
+        return {}
+    written = getattr(usages[0], "cache_creation_input_tokens", None) or 0
+    read = getattr(usages[0], "cache_read_input_tokens", None) or 0
+    return {
+        "gen_ai.usage.input_tokens": fresh + written + read,
+        "gen_ai.usage.output_tokens": getattr(usages[-1], "output_tokens", None) or 0,
+        "crivo.cache.hit_tokens": read,
+        "crivo.cache.miss_tokens": fresh + written,
+    }
+
+
 def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str]:
     """Yield response text chunks for a chat completion.
 
@@ -234,7 +262,8 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
     stream item becomes text; the watchdog around them is shared, because a
     hung stream hangs identically whoever serves it. Every call emits one
     telemetry span (A0 R4) carrying model, duration, and usage when the
-    provider reports it (cache hit/miss tokens included on DeepSeek).
+    provider reports it, cache hit/miss tokens included, in DeepSeek's
+    meaning on every provider (input counts the cache hits).
     """
     from crivo import telemetry
 
@@ -250,6 +279,9 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
         **{"gen_ai.system": _provider(), "gen_ai.request.model": requested},
     ) as extra:
         yield from _generate(messages, model, usage_box.append)
+        if _provider() == "claude":
+            extra.update(_claude_usage(usage_box))
+            return
         for usage in usage_box[-1:]:
             for src, dst in (
                 ("prompt_tokens", "gen_ai.usage.input_tokens"),
@@ -263,6 +295,7 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
 
 
 def _generate(messages: Iterable[dict], model: str | None, usage_sink) -> Iterator[str]:
+    _cancel.clear()  # before create(), so a cancel while it opens still lands
     if _provider() == "faux":
         if not _faux_responses:
             raise RuntimeError(
@@ -285,7 +318,11 @@ def _generate(messages: Iterable[dict], model: str | None, usage_sink) -> Iterat
             max_tokens=CLAUDE_MAX_TOKENS,
             system=system,
             messages=[m for m in msgs if m["role"] != "system"],
-            temperature=TEMPERATURE,
+            output_config={"effort": CLAUDE_EFFORT},
+            # summarized, not the default omitted: its deltas are heartbeats
+            # (_claude_text), so a long think sends events the stall timer
+            # can see (omitted sends none)
+            thinking={"type": "adaptive", "display": "summarized"},
             stream=True,
         )
         yield from _watched(stream, _claude_text, usage_sink)
@@ -302,14 +339,13 @@ def _generate(messages: Iterable[dict], model: str | None, usage_sink) -> Iterat
         # the final stream chunk then carries usage, including DeepSeek's
         # prompt_cache_hit_tokens / prompt_cache_miss_tokens (A0 R4/R5)
         stream_options={"include_usage": True},
-        # First line of defense, not the only one: httpx re-applies this read
-        # timeout to every socket read for the life of the stream (confirmed
-        # against a real local socket -- it is not just a connect timeout), so
-        # it independently catches true wire silence for the real client. The
-        # wall-clock checks below no longer assume that is enough on its own.
-        timeout=httpx.Timeout(
-            connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0
-        ),
+        # First line of defense, not the only one: the SDK's HTTP client re-applies
+        # this read timeout to every socket read for the life of the stream, so it
+        # independently catches true wire silence for the real client. Confirmed
+        # against a real local socket on httpx (it is not just a connect timeout);
+        # httpx2, which newer SDKs use, is its successor and was not re-tested.
+        # The wall-clock checks below no longer assume that is enough on its own.
+        timeout=Timeout(connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0),
     )
     yield from _watched(stream, _deepseek_text, usage_sink)
 
@@ -324,7 +360,6 @@ def _watched(stream, extract, usage_sink=None) -> Iterator[str]:
     chunks at all -- confirmed to be exactly what one real ~15-minute
     production hang was, back when only MAX_CALL_S existed.
     """
-    _cancel.clear()  # a cancel with nothing in flight targets nobody
     done = object()
     chunks: queue.Queue = queue.Queue()
     stop = threading.Event()
@@ -372,6 +407,8 @@ def _watched(stream, extract, usage_sink=None) -> Iterator[str]:
                 raise item
             if usage_sink is not None:
                 usage = getattr(item, "usage", None)
+                if usage is None:  # Claude's message_start nests it
+                    usage = getattr(getattr(item, "message", None), "usage", None)
                 if usage is not None:
                     usage_sink(usage)
             text = extract(item)

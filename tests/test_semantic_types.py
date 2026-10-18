@@ -9,9 +9,6 @@ module is independent of pii.py (typing, not exposure) and keyless.
 """
 
 import importlib
-import os
-import subprocess
-import sys
 
 import pandas as pd
 import pytest
@@ -122,28 +119,3 @@ def test_infer_types(series, expected_type, expected_rate):
     assert 0.0 <= f["confidence"] <= 1.0
     # evidence names the match rate (and the threshold)
     assert f"{expected_rate:.2f}" in f["evidence"]
-
-
-def test_import_is_keyless_and_pulls_no_core_module():
-    # conftest's autouse quarantine has already stripped every provider key
-    # from os.environ, so the child interpreter imports with no key at all;
-    # the module must import without the network and must not drag a reserved
-    # core module into the graph (contract: loop, prompts, skills, provenance)
-    code = (
-        "import sys\n"
-        "import crivo.semantic_types\n"
-        "reserved = ('crivo.loop', 'crivo.prompts', 'crivo.skills',"
-        " 'crivo.provenance', 'crivo.llm')\n"
-        "bad = [m for m in reserved if m in sys.modules]\n"
-        "print(bad)\n"
-        "sys.exit(1 if bad else 0)\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        env=dict(os.environ),
-        timeout=120,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr

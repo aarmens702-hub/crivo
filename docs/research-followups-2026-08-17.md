@@ -1,5 +1,8 @@
 # Research follow-ups — GitHub deep-dive, 2026-08-17
 
+> **Historical record (closed 2026-10-17).** Kept for how and why. What is still open lives in `specs/2026-10-14-the-plan.md`, with ids in `specs/2026-10-14-plan-inventory.md`.
+> Its open items are tracked as `RFa` to `RFg` in the plan inventory.
+
 Backlog surfaced by the three research agents (Strike patterns, Strike
 issues-as-gotchas, best-in-class notebook output). These are **not** in the
 Phase-1 notebook build (`specs/2026-08-16-notebook-output-design.md`) — they are
