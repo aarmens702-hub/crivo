@@ -30,6 +30,8 @@ jobs:
         run: uv run pytest -q
       - name: Ledger locks (append-only, linked, true to the code it ran)
         run: uv run python scripts/check_locks.py
+      - name: Leak scan (suite material in prompts, tool descriptions, skills)
+        run: uv run python scripts/leak_scan.py
       - name: Fresh install (what users get, no lock)
         run: |
           uv venv --python 3.12 .fresh
