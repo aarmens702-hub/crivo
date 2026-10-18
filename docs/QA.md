@@ -6,8 +6,8 @@
      to explain a failure; report it.
      Each case: what to do, and what must be true. Expected results are exact (numbers, messages, exit codes)
      so a pass or fail is never a judgment call. Every expected value below was observed on 2026-10-14, except
-     where a case says it fails today or costs money. When a result changes on purpose, update the case in the
-     same commit. -->
+     where a case says it fails today or costs money; BENCH-01 and LIB-01 were re-observed on 2026-10-17. When
+     a result changes on purpose, update the case in the same commit. -->
 
 ## Setup
 
@@ -52,7 +52,7 @@
 
 | ID | Do | Pass when |
 |---|---|---|
-| LIB-01 | `print(r)`, then `[f["disease"] for f in r.findings]` | The header is `dataframe — 60 rows × 5 columns`, then `5 fixable · 0 flagged · 20 signals clear`. Five findings in this order: `d01 numbers-as-strings [revenue]`, `d04 sentinel-missing [units]`, `d06 whitespace-damage [note]`, `d07 case-spelling-variants [region]`, `d09 duplicate-rows [whole table]`. The last lines read `checked and clean: 2-3, 5, 8, 10-19, 21-26`. The list is `[1, 4, 6, 7, 9]`. |
+| LIB-01 | `print(r)`, then `[f["disease"] for f in r.findings]` | The header is `dataframe — 60 rows × 5 columns`, then `5 fixable · 0 flagged · 20 signals clear`. Five findings in this order: `d01  numbers-as-strings  [revenue]`, `d04  sentinel-missing  [units]`, `d06  whitespace-damage  [note]`, `d07  case-spelling-variants  [region]`, `d09  duplicate-rows  [whole table]`. The last lines read `checked and clean: 2-3, 5, 8, 10-19, 21-26`. The list is `[1, 4, 6, 7, 9]`. |
 | LIB-02 | `[f["evidence"] for f in r.findings if "units" in f["columns"]]` | The units finding names both planted placeholders, `'N/A'` and `'-999'` (the `load_example` docstring plants both). |
 | LIB-03 | `print(s)`, `len(df), len(cleaned)`, `cleaned.revenue.dtype` | `cleaned: 4 fix(es) applied, 2 left for review`, then `✓ d04 sentinel-missing [units]`, `✓ d06 whitespace-damage [note]`, `✓ d07 case-spelling-variants [region]`, `✓ d01 numbers-as-strings [revenue]`, `· d09 duplicate-rows [whole table] — removing duplicate rows deletes data, so a person decides`, `· d15 statistical-outliers [revenue] — found once the fixes ran` (the outliers show only once revenue is numeric). Rows stay `60, 60`. Revenue is `float64`. |
 | LIB-04 | Compare `print(r)` with `s.needs_review` | A finding `clean` leaves for review is not labelled `safe to fix automatically` in the report, or its review entry carries a `reason`. |
@@ -159,4 +159,4 @@ else:
 
 | ID | Do | Pass when |
 |---|---|---|
-| BENCH-01 | In a scratch copy of the repo, never the main checkout: `git clone -q --branch dev https://github.com/aarmens702-hub/crivo "$Q/clone" && cd "$Q/clone" && uv run python -m bench.run --smoke; echo $?` | Exit `0`, and the summary line reads `smoke: 30 synthetic + 0 external \| detect µF1 0.728 \| repair F1 mean 0.913 over 4 of 30 (4 of 10 fixable) \| survived mean 0.673 over 13 of 30`, and `git status --short` in the clone prints nothing after the run. A checkout with the four Raha datasets in `data/` prints `+ 4 external` with the same three numbers. A different number is a finding: say which moved and by how much. |
+| BENCH-01 | In a scratch copy of the repo, never the main checkout: `git clone -q --branch dev https://github.com/aarmens702-hub/crivo "$Q/clone" && cd "$Q/clone" && uv run python -m bench.run --smoke; echo $?` | Exit `0`, and the summary line reads `smoke: 31 synthetic + 0 external \| detect µF1 0.769 \| repair F1 mean 0.899 over 5 of 31 (5 of 11 fixable) \| survived mean 0.717 over 15 of 31`, and `git status --short` in the clone prints nothing after the run. A checkout with the four Raha datasets in `data/` prints `+ 4 external` with the same three numbers. A different number is a finding: say which moved and by how much. |
