@@ -13,7 +13,7 @@ Every signature below is copied from the source. Shapes marked "seen" were captu
 | `write` | `write(frame, path, **kwargs)` | `Path`. Extensions: .csv .parquet/.pq .xlsx .json .jsonl/.ndjson .feather .orc; anything else raises `ValueError`. Parents are created. |
 | `load_example` | `load_example()` | `DataFrame`, 60 rows x 5 columns (`customer`, `region`, `revenue`, `units`, `note`), same every call. Planted: d01, d04, d06, d07, d09. |
 | `diagnose` | `diagnose(data, name=None)` | `Report`. `data` is a DataFrame or a path (read with `read`). |
-| `clean` | `clean(df, policy="auto")` | `(DataFrame, CleanSummary)`. Input never mutated. `policy` is accepted and not read. |
+| `clean` | `clean(df)` | `(DataFrame, CleanSummary)`. Input never mutated. |
 | `compare` | `compare(before, after, name_before="before", name_after="after")` | `str`, one self-contained HTML document. |
 | `reconcile` | `reconcile(a, b, keys)` | `dict` with keys `keys, counts, added, removed, changed, duplicate_keys, null_keys, column_diff, receipt, notes` (seen). `keys` is a column name or list. `receipt` is true when every distinct key lands in exactly one bucket or excluded set and an independent recount of changed rows, done without the per-row comparison, equals `counts["changed"]`. |
 | `reconcile_report` | `reconcile_report(a, b, keys)` | `str`, HTML. A key cell or changed value from a column `flagged_columns(a, b)` flags is masked with `mask_cell`; counts, receipt and notes are unchanged. |
@@ -23,7 +23,7 @@ Every signature below is copied from the source. Shapes marked "seen" were captu
 | `ask` | `ask(data, question, *, name=None)` | `Answer`. Needs a model (see Environment). Raises `RuntimeError` naming the missing variable. Gates auto-run. |
 | `main` | `main()` | `int`, the console-script entry. |
 
-The accessor, registered on import: `df.crivo.diagnose(name=None) -> Report` and `df.crivo.clean(policy="auto") -> (DataFrame, CleanSummary)`.
+The accessor, registered on import: `df.crivo.diagnose(name=None) -> Report` and `df.crivo.clean() -> (DataFrame, CleanSummary)`.
 
 ### `Report`
 - `findings: list[dict]`, `clear: list[int]` (disease ids that ran and found nothing), `broken: dict` (ids that could not run, with why).

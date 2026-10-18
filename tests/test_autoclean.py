@@ -8,9 +8,50 @@ trustworthily, only chat with it.
 """
 
 import pandas as pd
+import pytest
 
 import crivo as aa
-from crivo.autoclean import changed_cells
+from crivo.autoclean import CleanSummary, changed_cells
+
+# The two public ways to call the deterministic cleaner, each taking the frame
+# first and passing any further arguments straight through.
+_CLEAN_ENTRY_POINTS = {
+    "crivo.clean": lambda df, *args, **kwargs: aa.clean(df, *args, **kwargs),
+    "df.crivo.clean": lambda df, *args, **kwargs: df.crivo.clean(*args, **kwargs),
+}
+
+
+@pytest.mark.parametrize("entry", list(_CLEAN_ENTRY_POINTS))
+def test_clean_takes_no_policy(entry: str) -> None:
+    """#29: `policy` was accepted and never read, so `policy="all"` read as if
+    it widened what runs. Both entry points refuse it with a TypeError, by
+    keyword or by position, and the bare call still cleans the frame."""
+    call = _CLEAN_ENTRY_POINTS[entry]
+    df = pd.DataFrame(
+        {
+            "invoice_id": [f"{n:06d}" for n in range(1, 21)],  # leading zeros
+            "amount": ["$1,200", "$3,400.50", "$15", "$980"] * 5,  # d01 AUTO
+            "status": (["paid", "late", "N/A"] * 6) + ["paid", "N/A"],  # d04 AUTO
+        }
+    )
+    original = df.copy()
+
+    cleaned, summary = call(df)
+
+    # the legitimate call: same fixes, same frame, input untouched
+    assert isinstance(summary, CleanSummary)
+    assert df.equals(original), "clean must not touch the input frame"
+    assert {a["disease"] for a in summary.applied} == {1, 4}
+    assert summary.needs_review == []
+    assert cleaned["amount"].tolist()[:4] == [1200.0, 3400.5, 15.0, 980.0]
+    assert cleaned["status"].isna().sum() == 7, "the seven N/A sentinels -> NaN"
+    assert cleaned["invoice_id"].tolist()[:2] == ["000001", "000002"]
+
+    # the dead argument: refused, not silently ignored
+    with pytest.raises(TypeError, match="policy"):
+        call(df, policy="all")
+    with pytest.raises(TypeError):
+        call(df, "all")
 
 
 def test_changed_cells_reports_the_before_and_after_of_a_value_fix() -> None:

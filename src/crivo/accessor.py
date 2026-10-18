@@ -42,11 +42,11 @@ class AnalystAccessor:
 
         return diagnose(self._obj, name=name)
 
-    def clean(self, policy: str = "auto"):
+    def clean(self):
         """Deterministically clean the frame — see autoclean.clean."""
         from crivo.autoclean import clean  # lazy: avoid an import cycle
 
-        return clean(self._obj, policy=policy)
+        return clean(self._obj)
 
 
 # Guard registration: pandas' register_dataframe_accessor emits a UserWarning

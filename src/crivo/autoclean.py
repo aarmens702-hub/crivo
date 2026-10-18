@@ -768,7 +768,7 @@ def styler_diff(before: pd.DataFrame, after: pd.DataFrame, max_rows: int = 200):
     return a.style.apply(_mark, axis=None)
 
 
-def clean(df: pd.DataFrame, policy: str = "auto") -> tuple[pd.DataFrame, CleanSummary]:
+def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, CleanSummary]:
     """Deterministically clean a DataFrame. Returns (cleaned_frame, summary).
 
     The input is never mutated. Each auto-fix is verified — the detector must
