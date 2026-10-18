@@ -2,7 +2,7 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Claude Code's own memory lives on one laptop only, so anything worth keeping goes here. Update it at the end of each session (Claude: do it as part of wrapping up).
 
-*Last updated: 2026-10-18, Mac session.*
+*Last updated: 2026-10-18 (night), Mac session.*
 
 ## Where things are
 - **The repo is `github.com/aarmens702-hub/crivo`** (renamed from `analyst-agent` on 2026-10-14; the old URLs redirect). MIT. Not on PyPI yet.
@@ -18,7 +18,7 @@
 | Stage | What | State |
 |---|---|---|
 | A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **Done:** 39 of 39, on `main` as v0.2.0 (2026-10-17) |
-| Eval tooling | Record and replay, the eval ledger, `/eval`, the eval-author and `guard_reads`, `check_locks` and `leak_scan` in CI, gates by work type. 20 issues, #64 to #83 (`specs/2026-10-17-eval-tooling.md`) | **In progress: 9 of 20 shipped** (#64-#70, #74, #81); ED5, ED7, ED8 decided 2026-10-18 |
+| Eval tooling | Record and replay, the eval ledger, `/eval`, the eval-author and `guard_reads`, `check_locks` and `leak_scan` in CI, gates by work type. 20 issues, #64 to #83 (`specs/2026-10-17-eval-tooling.md`) | **In progress: 13 of 20 shipped** (#64-#72, #74, #75, #81); ED5, ED7, ED8 decided 2026-10-18 |
 | 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | **Filed 2026-10-17:** `specs/2026-10-17-stage-0-foundation.md`, 162 rows: #86 to #232 plus 15 open issues folded in. all 38 owner decisions taken as recommended (2026-10-18), so no row waits on a decision. Starts after the eval tooling |
 | 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, charts and descriptive analysis, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
 | 2 | Two tracks in parallel. 2a the analyst toolkit: statistics, drivers, segments and cohorts, forecasting, anomalies, dashboards. 2b learning: System 1 as the loop's first filter, skills, the glossary, saved answers, `crivo verify`, the nightly skill loop | |
@@ -28,14 +28,16 @@
 
 25 owner decisions are listed in the plan with the stage each is needed by.
 
-### Next, 2026-10-18: pick up here
-- **Stage A is on `main` as v0.2.0** (PR #62, after a `/qa-pass` of 41 of 42 unpaid cases; BENCH-01's stale line fixed in #61).
-- **Eval tooling, 9 of 20 shipped:** #64 served model (core, Aarmen's yes), #65 `agent_run --record`, #66 replay and the cassette scan, #67 the ledger, #68 `guard_reads`, #69 the eval-author agent, #70 agent wiring, #74 `check_locks` in CI, #81 architecture docs. In progress: #71 (the runner), #75 (`leak_scan`). Next: #72 (caps), #73 (`/eval`), #76, #77, #79, #80, #82; #78 (the paid A/A run) runs its dry run, then Aarmen names the cap (ED5); #83 rewords plan rule 10 (ED8).
-- **Decisions, 2026-10-18:** Aarmen took every Stage 0 recommendation (38 decisions, including D4's regrade, which changes the demo story's exit code, and D16's loop budget) plus ED5, ED7, ED8 and #237's hash pin. Every row is unblocked; the specs' decision tables say "decided".
-- **Security:** #84 shipped (model-written QUERY and fix cells never run in a preview before approval). #85 in progress (a proposed skill's checks run before its admission gate; Aarmen picked a "test skill" gate first; core). #237 pins admitted skill files by hash (core).
-- **Process:** the Stop hook gives the suite 280 s (#236); the suite is about 1,730 tests, about 2 minutes. The eval-author agent type loads only in a session started after #69.
-- **Stage 0 is filed** (`specs/2026-10-17-stage-0-foundation.md`): 162 rows, #86 to #232 plus 15 folded issues; 46 core rows in 18 review sittings; about three months at Stage A's pace. It starts when the eval tooling is done.
-- **Follow-ups:** #233 (recorder gaps), #235 (eval-author git and doc reads; guard_reads' 0d claim), #63 (README tail). #234 came from an outside account and overlaps #117 (PF9).
+### Next, 2026-10-19: pick up here
+- **Eval tooling, 13 of 20 shipped** to `dev`: #64 served model, #65 `--record`, #66 replay and the cassette scan, #67 the ledger, #68 `guard_reads`, #69 the eval-author agent, #70 agent wiring, #71 the eval runner (`bench.eval`), #72 dollar caps (only the faux price ships; a real price needs its pricing-page URL and date), #74 `check_locks` in CI, #75 `leak_scan` in CI, #81 architecture docs. Next, in order: #73 (`/eval` skill; first route the runner's per-case Session output to a log, see the issue), #76, #77 (run `check_locks` after the rebase, before the push), #80, #82, then #78 (the paid A/A run: real prices first, then `register --dry`, then Aarmen names the cap) and #79; #83 (plan rule 10, ED8 decided).
+- **Two worktrees are open locally (push or finish before switching machines):**
+  - `.worktrees/235` (branch `aarmen/235-eval-author-git`, a WIP commit): the eval-author's `git -C <worktree>` access, worktree-only pytest paths, the inventory and stage specs off its reads, and git's implicit `--no-index` closed (round 2). Next step: the reviewer's final pass, then /ship.
+  - `.worktrees/237` (branch `aarmen/237-skill-pin`, committed, reviewed SHIP IT): admitted skills pinned by sha256 and refused at load if edited. Core (`library.py` +41, `loop.py` +10): **waits for Aarmen's yes**, then rebase and /ship.
+- **Shipped 2026-10-18 besides the eval tooling:** #84 and #85 (security, core, Aarmen's yes: model-written code never runs before approval, in a preview or a proposed skill's checks), #63 (README tail), #236 (the Stop hook allows 280 s).
+- **Decisions, 2026-10-18:** Aarmen took every Stage 0 recommendation (38) plus ED5, ED7, ED8 and #237's pin. Every Stage 0 row is unblocked.
+- **Follow-ups open:** #233 (recorder gaps), #238 (export skips the pin check). #234 came from an outside account and overlaps #117 (PF9).
+- **Process notes:** the suite is about 1,970 tests, about 2.5 minutes; the Stop hook allows 280 s. Agent definitions load at session start, so the eval-author agent type exists in sessions started after #69. guard_reads now runs on builders and test-writers (#70): a paid command needs `CRIVO_PROVIDER=faux` on it.
+- **Stage 0 is filed** (`specs/2026-10-17-stage-0-foundation.md`): 162 rows, #86 to #232 plus 15 folded issues, all unblocked; it starts when the eval tooling is done.
 
 ### Stage A, done 2026-10-17
 - **All 39 shipped to `dev` and closed:** #3, #6 to #43. The last six (#13, #19, #21, #25, #26, #33) landed in the late session once a restart cleared tdd-guard. Aarmen gave the core yes for #13, #25 and #26 in session. CI green on every push.
