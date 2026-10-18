@@ -84,8 +84,8 @@ class StaleCassette(UserWarning):
 # fixer's attempt fails verification there, so the finding falls through to
 # the model. Reply 1 is the fix, verified in the kernel. The corpus wraps
 # positive amounts in parentheses, so the fix strips them rather than reading
-# them as negatives. Reply 2 generalises the fix into a skill, which passes
-# admission and then stops at the admit-skill gate the bench always skips.
+# them as negatives. Reply 2 generalises the fix into a skill, which stops at
+# the test-skill gate the bench always skips, so its code never runs (#85).
 
 _MONEY_FIX = (
     "The amount column holds numbers written as text, with currency symbols, "

@@ -54,7 +54,8 @@ CLEAN:    Session.clean(var) -> detect_all in kernel -> router.route per finding
           -> AUTO with a fixer: autoclean | else: model writes a fix -> GateRequest
           -> verify.py: detector re-run + row invariant + untouched-column hashes
           -> pass: keep, provenance node | fail: revert from baseline, back to the model
-          -> verified model fix -> skill proposal -> admission gate -> library ledger
+          -> verified model fix -> skill proposal -> test gate -> checks -> admission gate
+          -> library ledger
           -> report.py clean report
 ```
 

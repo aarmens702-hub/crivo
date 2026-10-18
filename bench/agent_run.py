@@ -2,10 +2,10 @@
 
 Drives the real `Session.clean` loop headlessly over the same corpus as the
 deterministic bench, then scores the cleaned frame with the same
-`score_end_to_end`. Plain gates are auto-approved; HUMAN gates (skill
-admissions, judgement calls) are skipped, never fake-approved. Sampled runs
-print to the terminal only; storefront numbers come from a full, blessed
-run (R6).
+`score_end_to_end`. Plain gates are auto-approved; HUMAN gates (a proposed
+skill's test and its admission, judgement calls) are skipped, never
+fake-approved. Sampled runs print to the terminal only; storefront numbers
+come from a full, blessed run (R6).
 
 `uv run python -m bench.agent_run --sample 2`
 """
@@ -87,9 +87,10 @@ def _drive(
 
     HUMAN gates default to skip — a person's authorisation is not the bench's
     to give. `human_gates="approve"` applies the owner's standing
-    pre-authorisation to judgement-call fixes (the ceiling arm), but a skill
-    admission (title "admit skill …") is governance and stays skipped in
-    every mode."""
+    pre-authorisation to judgement-call fixes (the ceiling arm), but the
+    skill gates are governance and stay skipped in every mode: a proposed
+    skill's test (title "test skill …", #85), so its code never runs, and its
+    admission (title "admit skill …")."""
     from crivo.events import GateDecision, GateRequest
 
     events = 0
@@ -106,7 +107,7 @@ def _drive(
             answer = None
             if isinstance(event, GateRequest):
                 approved = human_gates == "approve" and not event.title.startswith(
-                    "admit skill "
+                    ("test skill ", "admit skill ")
                 )
                 action = "run" if event.grade != "HUMAN" or approved else "skip"
                 answer = GateDecision(action)
@@ -650,7 +651,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("skip", "approve"),
         default="skip",
         help="approve = owner pre-authorises judgement-call fixes (ceiling arm); "
-        "skill admissions are skipped in every mode",
+        "skill gates are skipped in every mode",
     )
     parser.add_argument(
         "--only",

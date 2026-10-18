@@ -169,6 +169,44 @@ def test_drive_approve_policy_runs_human_gates_but_never_admissions():
     assert gates == ["run", "skip"]
 
 
+def test_drive_never_runs_a_proposed_skills_test_in_any_mode():
+    """Regression for #85. A proposed skill's code first runs at its test
+    gate, before the admission gate, so a bench that answered run there would
+    run model-written code no person approved. The bench never admits skills,
+    so it skips that gate in every --human-gates mode, the owner's approve arm
+    included, as it skips "admit skill"."""
+    import time
+
+    from crivo.events import GateRequest
+
+    def decided(mode: str) -> str:
+        seen = []
+
+        def gen():
+            answer = yield GateRequest(
+                code=(
+                    "# fix-x\n# Parse money held as text.\n\n"
+                    "def fix(df, columns):\n    return df.copy()\n"
+                ),
+                iteration=1,
+                grade="HUMAN",
+                title="test skill fix-x · d3 · on a copy of the case it came from",
+            )
+            seen.append(answer)
+
+        agent_run._drive(
+            gen(),
+            max_events=10,
+            wall_cap=60.0,
+            t0=time.monotonic(),
+            human_gates=mode,
+        )
+        return seen[0].action
+
+    modes = ("skip", "approve")  # the --human-gates choices
+    assert {mode: decided(mode) for mode in modes} == dict.fromkeys(modes, "skip")
+
+
 def test_drive_event_cap_aborts():
     import time
 

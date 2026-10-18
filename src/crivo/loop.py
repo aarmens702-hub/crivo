@@ -796,9 +796,10 @@ class Session:
         if model_written:
             return "(no preview: model-written code runs only after you say yes)"
         # the other callers are screened first: an admitted skill, the
-        # admission gate's proposed skill (already run by _admit, #85) and a
-        # deterministic fixer, whose crivo import stops it at the screen today,
-        # so of crivo's own code only an admitted skill reaches a preview
+        # admission gate's proposed skill (approved at its test gate, then run
+        # by _admit, #85) and a deterministic fixer, whose crivo import stops
+        # it at the screen today, so of crivo's own code only an admitted
+        # skill reaches a preview
         reason = verify.preview_screen(cell_source)
         if reason:
             return f"(preview skipped: {reason})"
@@ -1927,7 +1928,8 @@ class Session:
                 self.library.save()
 
     def _propose_skill(self, var: str, rec: dict):
-        """One candidate through generalise -> execute -> execute -> human."""
+        """One candidate through generalise -> human (its test gate, #85) ->
+        execute -> execute -> human (admission)."""
         finding = rec["finding"]
         source = next((d["path"] for d in self.datasets if d["variable"] == var), var)
         msgs = [
@@ -1976,6 +1978,40 @@ class Session:
                 )
                 continue
 
+            source_view = f"# {skill.name}\n# {skill.description}\n\n{skill.fix_source}"
+            # #85: _admit runs the proposed fix and test in the live kernel (only
+            # the case is a copy), so a person reads both before any of it runs
+            code = f"{source_view}\n# --- its test ---\n{skill.test_source}"
+            pv = yield from self._preview([], code, model_written=True)
+            decision = yield GateRequest(
+                code,
+                1,
+                title=(
+                    f"test skill {skill.name} · d{finding['disease']} · "
+                    f"run its checks on a copy of the case it came from"
+                ),
+                preview=pv,
+                grade="HUMAN",
+            )
+            if not isinstance(decision, GateDecision):
+                decision = GateDecision("skip")  # not an answer, so nothing runs
+            self.transcript.append(
+                "gate",
+                action=decision.action,
+                note=decision.note,
+                kind_note="skill_test",
+            )
+            if decision.action == "skip":
+                return None
+            if decision.action == "reject":
+                msgs.append(
+                    {
+                        "role": "user",
+                        "content": f"<observation>rejected: {decision.note}</observation>",
+                    }
+                )
+                continue
+
             failure = yield from self._admit(skill, finding, rec["case"])
             if failure:
                 yield Notice("skill", f"{skill.name} refused: {failure}")
@@ -1984,7 +2020,6 @@ class Session:
                 )
                 continue
 
-            source_view = f"# {skill.name}\n# {skill.description}\n\n{skill.fix_source}"
             # R4: the approving human sees the skill's effect on the frozen
             # case, not only its source — same renderer as every other gate
             effect = ""
@@ -2003,8 +2038,8 @@ class Session:
                         f"_case_preview = fix(_case_preview, "
                         f"{finding.get('columns', [])!r})\n"
                     )
-                    # _admit already ran this code before the gate (#85), so
-                    # its preview adds no new exposure
+                    # a person approved this code at its test gate and _admit
+                    # has run it (#85), so its preview adds no new exposure
                     effect = yield from self._preview(
                         ["_case_preview"], apply_src, model_written=False
                     )

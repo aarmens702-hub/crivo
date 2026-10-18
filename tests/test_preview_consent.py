@@ -5,8 +5,9 @@ the [r]un / re[j]ect prompt. The copies protect only the data: the cell itself
 ran in the live kernel, so it could write the namespace or reach the shell
 before anyone said yes. The QUERY gate and the fix gate carry model-written
 cells, so they now wait for the answer. crivo's own code, a deterministic
-fixer or an admitted skill, keeps the preview it had. One path stays open: a
-proposed skill, model-written, still runs before its admission gate (#85).
+fixer or an admitted skill, keeps the preview it had. A proposed skill is
+model-written too: it waits for its own gate, before its test runs, and
+tests/test_admission_consent.py checks that (#85).
 
 The first test drives the real subprocess kernel, because what it checks is
 what the kernel ran. The rest use the scripted fake kernel, which records

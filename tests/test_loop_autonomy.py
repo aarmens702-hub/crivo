@@ -187,7 +187,9 @@ def test_autonomous_keeps_verify_then_revert_on_a_silent_fix(tmp_path, monkeypat
 
 def test_autonomous_never_auto_admits_a_skill(tmp_path, monkeypatch):
     """Admission is governance, and governance is never unattended in any
-    mode. The gate still comes out at grade HUMAN, and a skip admits nothing."""
+    mode. Both skill gates come out at grade HUMAN: the one that runs the
+    proposed skill's test (#85) and the admission after it. A run at the first
+    and a skip at the second admits nothing."""
     monkeypatch.setattr(llm, "generate", gen([FIX_A, GOOD_PROPOSAL]))
     session = make_session(tmp_path)
     FakeClient.script = [
@@ -199,22 +201,21 @@ def test_autonomous_never_auto_admits_a_skill(tmp_path, monkeypatch):
         [ok()],  # verify
         case(),  # freeze the case the skill must reproduce
         baseline(),
-        [ok()],  # admission cell
+        [ok()],  # admission cell, once its test gate is answered run
         [ok()],  # the skill's own test
         saved(),
     ]
     events = drive(
         session.clean("df"),
-        decisions=[GateDecision("run"), GateDecision("skip")],
+        # the fix, the proposed skill's test, the admission
+        decisions=[GateDecision("run"), GateDecision("run"), GateDecision("skip")],
     )
 
-    admit = [
-        e
-        for e in events
-        if isinstance(e, GateRequest) and e.title.startswith("admit skill")
-    ]
-    assert admit, [e.title for e in events if isinstance(e, GateRequest)]
-    assert admit[0].grade == "HUMAN"
+    gates = [e for e in events if isinstance(e, GateRequest)]
+    tested = [g for g in gates if g.title.startswith("test skill ")]
+    admit = [g for g in gates if g.title.startswith("admit skill")]
+    assert tested and admit, [g.title for g in gates]
+    assert [tested[0].grade, admit[0].grade] == ["HUMAN", "HUMAN"]
     assert report_of(session)["skills_admitted"] == []
     assert session.library.entries == {}
 

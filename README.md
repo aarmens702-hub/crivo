@@ -186,11 +186,12 @@ through namespace snapshots.
 <br>
 
 After a clean run, each fix the model wrote is rewritten as a general
-`fix(df, columns)` and has to earn its place. On the original frozen case it
-has to trip the detector, clear it, and leave the rows that were never broken
+`fix(df, columns)` and has to earn its place. A person reads it and its test
+and says yes before any of it runs. On the original frozen case it then has
+to trip the detector, clear it, and leave the rows that were never broken
 alone. That last part matters: a "fix" that blanks the whole column also
 clears the detector. Its own shipped test has to pass in the kernel. Then a
-person says yes.
+person says yes again, to admit it.
 
 New skills start on probation: retrieved and applied, but always gated. Three
 wins across two different datasets promote a skill; two failures in a row

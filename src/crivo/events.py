@@ -23,12 +23,13 @@ class GateRequest:
     iteration: int
     title: str = ""
     # R3: the rendered consequence of running this cell on a sampled scratch
-    # copy, except a QUERY cell or a model fix, which never runs before
-    # approval and gets a "no preview" line (#84). Empty when previews are off
+    # copy, except a QUERY cell, a model fix or a proposed skill's test gate,
+    # which never runs before approval and gets a "no preview" line (#84,
+    # #85). Empty when previews are off
     preview: str = ""
     # the finding's grade (AUTO/GATE/HUMAN), so a headless driver can apply
     # the human's pre-authorisation instead of deciding on their behalf;
-    # empty for QUERY gates, "HUMAN" for skill admissions
+    # empty for QUERY gates, "HUMAN" for both skill gates (test, admission)
     grade: str = ""
 
 
