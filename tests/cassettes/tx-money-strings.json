@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "source": {
+    "kind": "fixture",
+    "entry": {
+      "name": "tx-money-strings",
+      "base": [
+        "transactions",
+        {}
+      ],
+      "diseases": [
+        1
+      ],
+      "seed": 101,
+      "n": 250
+    },
+    "dirty_sha256": "cec371eb8dba4f4179a50bb7d7dc73ed5dbdaaf5185155c85b944f4194a2a4f9"
+  },
+  "arm": {
+    "autonomy": "careful",
+    "human_gates": "skip",
+    "policies": "none",
+    "docker": false,
+    "max_events": 8000,
+    "wall_cap": 300.0,
+    "suffix": ""
+  },
+  "crivo": {
+    "commit": "802d44e18595b061e68a7eb5c5417b3a88e3e26c",
+    "dirty": true,
+    "prompts_sha256": "41f8e9fb6c3db1f0e0ee4e63909eb60a8db7fd6205c3e1d04dc0d825e2b585ac"
+  },
+  "calls": [
+    {
+      "i": 0,
+      "messages_sha256": "f77189c5f35c711bdbb7c466fa58fd51753832dfac286414839f742ac6fb32a6",
+      "system_sha256": "99fd85939b2633892f9641fd98af32f3b8dfcd5774b98387b309a20cd46640d9",
+      "n_messages": 3,
+      "model": "deepseek-v4-pro",
+      "params": {
+        "provider": "faux",
+        "model": "deepseek-v4-pro",
+        "temperature": 0.0
+      },
+      "reply": "The amount column holds numbers written as text, with currency symbols, thousands separators and parentheses. Strip them and parse.\n<execute>\nimport pandas as pd\n\ndef fix_money_strings(df):\n    out = df.copy()\n    text = out['amount'].astype(str).str.strip()\n    text = text.str.replace(r'[$,()]', '', regex=True)\n    out['amount'] = pd.to_numeric(text, errors='raise')\n    return out\n\ndf = fix_money_strings(df)\nassert df['amount'].dtype.kind == 'f'\n</execute>",
+      "complete": true,
+      "error": null,
+      "dur_s": 0.0
+    },
+    {
+      "i": 1,
+      "messages_sha256": "83cc4366ebcc1ffa2220a8feb717e5991e821649022bc9244849f8c9a37b234c",
+      "system_sha256": "d84049b83f88c6a4c6596c83aaeb7f7e3ef1ef8178156673993a941154561489",
+      "n_messages": 3,
+      "model": "deepseek-v4-pro",
+      "params": {
+        "provider": "faux",
+        "model": "deepseek-v4-pro",
+        "temperature": 0.0
+      },
+      "reply": "<name>fix-money-strings</name>\n<description>Parse money written as text into numbers. Use when an amount column holds currency symbols, thousands separators or parentheses around the number.</description>\n<fix>\ndef fix(df, columns):\n    import pandas as pd\n    out = df.copy()\n    for c in columns:\n        if c in out.columns:\n            text = out[c].astype(str).str.strip()\n            text = text.str.replace(r'[$,()]', '', regex=True)\n            out[c] = pd.to_numeric(text, errors='raise')\n    return out\n</fix>\n<test>\nimport pandas as pd\ndef test_fix_parses_money_text():\n    out = fix(pd.DataFrame({'x': ['$12.00', '3,000.50', '(7.25)']}), ['x'])\n    assert out['x'].tolist() == [12.0, 3000.5, 7.25]\n</test>",
+      "complete": true,
+      "error": null,
+      "dur_s": 0.0
+    }
+  ],
+  "execs": [
+    {
+      "code_sha256": "24232159377311570f814dd14bb67ad73c25ed58b81870d15e24267a4b843d57",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": null,
+      "stream_sha256": "8e4a6096ecd7bc2fa71857d0da7bf037e95c20e5ba2753ddb019ae177d40904d",
+      "exec_count": 1
+    },
+    {
+      "code_sha256": "b6acef6766dff00ac3f07a4d0ce63eb9068f1a73dde82b9946f1444d4ab50eb4",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": null,
+      "stream_sha256": "b419527f1e2ad7e842d165c57c1aa2bfdc9a5a53dc7f5ec0f5585a4bed11f8be",
+      "exec_count": 2
+    },
+    {
+      "code_sha256": "252f8e43020196cbd5e9bb5f8c4aa9b7a34096871d78f5ec2df37947ea2b7f20",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": "1bfe27ac98718f9faded4393b7a114f34381c68c1665987950c4b5e186236959",
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 3
+    },
+    {
+      "code_sha256": "aedad5f0d975e57194b9608c259bcfca89a64dad377b754ec79a20e0ba059404",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": "f77130c089207c74de7c003ec4375e0d1dcfaba209aa7723b3fe3d5c0b02df2c",
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 4
+    },
+    {
+      "code_sha256": "40c0ff852fb2c7eb7d4467979ce44443801443f2c6299f07b979cdbbf3281f43",
+      "status": "error",
+      "ename": "AssertionError",
+      "value_sha256": null,
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 5
+    },
+    {
+      "code_sha256": "c397459ec48dc33d657d9a22d3a8a512e9191f273f81a9e770be9a6511d7ec70",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": "310d8a5fd75287c57083571854589a7f8d1eb1491ce96b85f09cdd0a4f369acc",
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 6
+    },
+    {
+      "code_sha256": "bdf37e8d4f4c128e434c4df154e9f947006b648a766c487ca170fe6c4516641d",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": null,
+      "stream_sha256": "edc48c0adfe4cc2df18c0f5e88df28eae8ba3b55671dac73e620e1b777e3d0b6",
+      "exec_count": 7
+    },
+    {
+      "code_sha256": "59d1145fb84ff83078ece0db03858dbf7107c4c54ce624cbee655d8b3d2a086f",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": null,
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 8
+    },
+    {
+      "code_sha256": "bdf37e8d4f4c128e434c4df154e9f947006b648a766c487ca170fe6c4516641d",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": null,
+      "stream_sha256": "8137a7da4a4065eb0aee5e96c7565ab2a37f4679f97794b72b615c6676eea5e1",
+      "exec_count": 9
+    },
+    {
+      "code_sha256": "40c0ff852fb2c7eb7d4467979ce44443801443f2c6299f07b979cdbbf3281f43",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": "dd3dd981fb0fa8863ece68db05b5b3789c7f882b87081742a80b25bac4f0f86a",
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 10
+    },
+    {
+      "code_sha256": "845eb1ae871fea14ace87ba1d4d5b35e4cc40f6792c73aa8df53194868fe142b",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": "76b965d5fba3504b1be715f11e8314508ef10b220f5a321219ac34f993702143",
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 11
+    },
+    {
+      "code_sha256": "252f8e43020196cbd5e9bb5f8c4aa9b7a34096871d78f5ec2df37947ea2b7f20",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": "1bfe27ac98718f9faded4393b7a114f34381c68c1665987950c4b5e186236959",
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 12
+    },
+    {
+      "code_sha256": "eb2a50cd8f8a878e70a9a179e6bc17e690ac3a45298fb8d0f1ab47893c046100",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": "374a92fc94ad0e8ca71e42e70369dc50b86bc1fcb3038fe7a0ca21e2b5ebf7bc",
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 13
+    },
+    {
+      "code_sha256": "150ba7c43cc55654d4f8e4286c4848b55839a9d350c66cfc788e4973d7ce991f",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": "7f6e18e7d6a46e5901fdac4d8e051acdbbfebd7633d0bdb4fa9d313f314326fe",
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 14
+    },
+    {
+      "code_sha256": "c35d8034cb6b1b683c973cd46beb5331b0b46eb576cf61eba37505ea5ea38add",
+      "status": "ok",
+      "ename": null,
+      "value_sha256": "43c509791488b34bede001e21ad4639f6ba947094befc63cfbd8024334080d98",
+      "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exec_count": 15
+    }
+  ],
+  "outcome": {
+    "status": "ok",
+    "events": 11,
+    "gates": [
+      "run",
+      "run",
+      "skip"
+    ],
+    "records": [
+      [
+        1,
+        [
+          "amount"
+        ],
+        "AUTO",
+        "fixed",
+        1
+      ]
+    ],
+    "cleaned_sha256": "d5287789e50f29163a7d9ca6a280ae23eef753e13b95abfda8e8d20a4611e182",
+    "scores": {
+      "dirt_targeting": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "repair": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "counts": {
+        "dirty": 250,
+        "changed": 250,
+        "repaired": 250
+      }
+    }
+  }
+}
