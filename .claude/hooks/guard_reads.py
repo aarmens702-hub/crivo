@@ -3,11 +3,14 @@ by mode (set in the agent's .claude/agents/*.md frontmatter):
 
     python3 guard_reads.py eval-author -> reads and searches stay on an
         allowlist (bench/ but not bench/results/, the bench tests, the
-        contract, AGENTS.md, CLAUDE.md, SECURITY.md, docs/PRD.md, the plan and
-        its inventory, the 2026-10-17 specs, pyproject.toml, the brief);
-        writes go only to the traps, the injectors, the corpus, the shape and
+        contract, AGENTS.md, CLAUDE.md, SECURITY.md, docs/PRD.md, the plan,
+        the eval tooling spec, pyproject.toml, the brief; not the plan
+        inventory or the stage specs, which quote the detector); writes go
+        only to the traps, the injectors, the corpus, the shape and
         degenerate generators and their tests; Bash runs only a few whole
-        commands, with no shell operators
+        commands, with no shell operators: uv run pytest on bench tests inside
+        a .worktrees/<n> of this checkout, and git status and git diff -- PATH,
+        bare or with -C on a .worktrees/<n>, each PATH one it may read
     python3 guard_reads.py builder -> nothing names bench/traps/heldout or
         bench/traps/sealed (nor searches from above one, once it is on disk),
         the shell never writes bench/ledger.jsonl, and a paid command runs
@@ -39,10 +42,20 @@ The honest limits. The hook makes a read deliberate, not impossible:
 - An eval-author search from bench/ is allowed though bench/results/ is not,
   because bench/results/ is git-ignored and ripgrep skips it. Its Glob
   patterns are brace-expanded before the check for .. and for / or ~.
+- An eval-author git -C checks the folder's shape (.worktrees/<n> of this
+  checkout, links followed), not that git keeps a worktree there; git run in
+  a plain folder there finds the main checkout's repository. Each PATH is
+  still checked.
+- Each PATH of an eval-author git diff must be relative, with no .. part, and
+  inside the work tree git runs in (the -C folder, or else the cwd's worktree
+  or checkout) once links are followed, since git tests a path's text and a
+  path outside makes git diff compare files as diff --no-index.
 - The hook sees only the tools its matcher sends: wire it with matcher "*" and
   limit the agent's tools: frontmatter. A builder can edit .claude/, this hook
   included.
-The reviewer checks the diff (EV13); the real wall is 0d's OS sandbox.
+The reviewer checks the diff (EV13), and nothing else stops these yet: 0d's
+sandbox contains the analyst's kernel, not agent tools, and an OS sandbox for
+code the eval-author runs is deferred to 0d (D18), not built.
 """
 
 import glob
@@ -66,8 +79,7 @@ EVAL_AUTHOR_READS = (
     "CLAUDE.md",
     "SECURITY.md",
     "specs/2026-10-14-the-plan.md",
-    "specs/2026-10-14-plan-inventory.md",
-    "specs/2026-10-17-*.md",
+    "specs/2026-10-17-eval-tooling.md",
     "pyproject.toml",
     "~/Desktop/mailo/coop-project/**",
 )
@@ -185,6 +197,15 @@ def repo_parts(real, top):
     return parts[2:] if parts[:1] == [".worktrees"] else parts
 
 
+def worktree(real, top):
+    """The .worktrees/<n> folder of the checkout `top` that `real` is or sits
+    in, or None when it is in none. Both are folded real paths."""
+    parts = [p for p in real[len(top) :].split("/") if p] if inside(real, top) else []
+    if len(parts) < 2 or parts[0] != ".worktrees":
+        return None
+    return top.rstrip("/") + "/.worktrees/" + parts[1]
+
+
 def matches(parts, rule):
     if rule[-1] == "**":
         rule = rule[:-1]
@@ -265,13 +286,36 @@ def check_write(name, mode, tool, args, cwd):
     return on_list(name, mode, tool, args, cwd, "writes", "writes")
 
 
+def in_tree(path, base, tree):
+    """Whether a git diff PATH, read from `base`, sits in the work tree `tree`
+    as git reads it, by its text (relative, with no .. part: git compares an
+    absolute path with the tree's on-disk case, so the hook can't fold it), and
+    once links are followed. A PATH outside the work tree turns git diff into
+    diff --no-index, a diff of whatever files it names."""
+    if os.path.isabs(path) or ".." in path.split("/"):
+        return False
+    return inside(resolve(path, base), tree)
+
+
 def runs_allowed(words, mode, cwd):
-    """The whole commands eval-author mode may run: git status, git diff on
-    paths it may read, and uv run pytest on its tests with -q or -k NAME."""
+    """The whole commands eval-author mode may run: git status, and git diff on
+    paths it may read, bare or with -C on a .worktrees/<n> of the checkout; and
+    uv run pytest, with -q or -k NAME, on its tests inside a .worktrees/<n>, so
+    a relative path from the main checkout never tests dev's bench."""
+    top, base = fold(checkout(cwd)), cwd
+    tree = worktree(fold(cwd), top) or top  # the work tree git runs in
+    if words[:2] == ["git", "-C"] and len(words) > 3:
+        base = os.path.realpath(os.path.join(cwd, words[2]))
+        if worktree(fold(base), top) != fold(base):
+            return False
+        words, tree = ["git"] + words[3:], fold(base)  # PATHs read from there
     if words == ["git", "status"]:
         return True
     if words[:3] == ["git", "diff", "--"] and len(words) > 3:
-        return all(allowed(resolve(p, cwd), mode["reads"], cwd) for p in words[3:])
+        return all(
+            in_tree(p, base, tree) and allowed(resolve(p, base), mode["reads"], cwd)
+            for p in words[3:]
+        )
     if words[:3] != ["uv", "run", "pytest"]:
         return False
     files, rest = 0, words[3:]
@@ -280,7 +324,8 @@ def runs_allowed(words, mode, cwd):
         if word == "-k" and rest:
             rest.pop(0)  # NAME: PLAIN_COMMAND already limits its characters
         elif word != "-q":
-            if not allowed(resolve(word, cwd), mode["tests"], cwd):
+            real = resolve(word, cwd)
+            if not worktree(real, top) or not allowed(real, mode["tests"], cwd):
                 return False
             files += 1
     return files > 0
@@ -295,8 +340,10 @@ def check_command(name, mode, tool, args, cwd):
     if not runs_allowed(words, mode, cwd):
         return (
             f"{name} mode runs only uv run pytest on {', '.join(mode['tests'])} "
-            "with -q or -k NAME, git status, and git diff -- PATH on a path it "
-            "may read, each as one whole command with no shell operators"
+            "inside a .worktrees/<n> of this checkout, with -q or -k NAME, and "
+            "git status or git diff -- PATH on a path it may read, bare or as "
+            "git -C on a .worktrees/<n>, each as one whole command with no "
+            "shell operators"
         )
     return None
 

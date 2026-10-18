@@ -10,7 +10,9 @@ as loudly as one that refuses nothing.
 guard_reads.py (#68) keeps the eval-author to its allowlist (ED3, ED4) and
 keeps the builder off the held-out and sealed sets, off writes to the ledger
 and off paid commands. The eval-author agent (#69) is wired to it in its
-frontmatter, read here as text.
+frontmatter, read here as text. Its git runs on its own worktree with -C, its
+pytest runs only a worktree's tests, and it reads neither the plan inventory
+nor the stage specs (#235).
 
 The agent files (#70) wire it: the builder and the test-writer run it in
 builder mode beside their guard_tests.py entry, and the scout, builder and
@@ -35,8 +37,18 @@ HOME = os.path.expanduser("~")
 
 # The checkout each case runs in. It is named like a fresh clone of the repo,
 # so a "crivo" path component is the normal case, not a paid command. There is
-# no bench/traps/heldout or bench/traps/sealed until a test makes one.
+# no bench/traps/heldout or bench/traps/sealed until a test makes one. It holds
+# two worktrees, .worktrees/9 and .worktrees/10, where /start-task puts them.
 CHECKOUT = (
+    ".worktrees/9/bench/corrupt.py",
+    ".worktrees/9/src/crivo/detect.py",
+    ".worktrees/9/tests/test_bench_bases.py",
+    ".worktrees/9/tests/test_bench_corrupt.py",
+    ".worktrees/9/tests/test_bench_degenerate.py",
+    ".worktrees/9/tests/test_bench_shapes.py",
+    ".worktrees/9/tests/test_bench_truth.py",
+    ".worktrees/9/tests/test_detect.py",
+    ".worktrees/10/tests/test_bench_corrupt.py",
     "AGENTS.md",
     "CLAUDE.md",
     "pyproject.toml",
@@ -61,6 +73,8 @@ CHECKOUT = (
     "specs/2026-10-14-plan-inventory.md",
     "specs/2026-10-14-the-plan.md",
     "specs/2026-10-17-eval-tooling.md",
+    "specs/2026-10-17-stage-0-foundation.md",
+    "specs/2026-10-17-stage-a-stabilize.md",
     "src/crivo/__init__.py",
     "src/crivo/__pycache__/detect.cpython-312.pyc",
     "src/crivo/autoclean.py",
@@ -98,10 +112,11 @@ TOOL_FIELDS = {
 }
 
 
-def call(tool_name, target=None, **fields):
+def call(tool_name, target=None, cwd="{root}", **fields):
     """The PreToolUse payload Claude Code sends, with `target` in the tool's
-    path field (left out when None). The hook reads only tool_name and
-    tool_input; the rest is there because real payloads carry it."""
+    path field (left out when None), from the shell's `cwd`. The hook reads
+    tool_name, tool_input and cwd; the rest is there because real payloads
+    carry it."""
     key, tool_input = TOOL_FIELDS[tool_name]
     tool_input = {**tool_input, **fields}
     if target is not None:
@@ -109,7 +124,7 @@ def call(tool_name, target=None, **fields):
     return {
         "session_id": "5f0c2a9e-0b7d-4c1e-9a3f-2d6e8b1c4a70",
         "transcript_path": "{home}/.claude/projects/crivo/5f0c2a9e.jsonl",
-        "cwd": "{root}",
+        "cwd": cwd,
         "permission_mode": "default",
         "hook_event_name": "PreToolUse",
         "tool_name": tool_name,
@@ -128,7 +143,7 @@ def _fill(value, slots):
 
 
 def run_hook(hook, mode, payload, cwd, python=sys.executable, **slots):
-    slots = {"root": str(cwd), "home": HOME, **slots}
+    slots = {"root": str(cwd), "parent": str(Path(cwd).parent), "home": HOME, **slots}
     stdin = payload if isinstance(payload, str) else json.dumps(_fill(payload, slots))
     argv = [str(python), str(hook)] + ([] if mode is None else [mode])
     return subprocess.run(
@@ -150,8 +165,8 @@ def assert_exit(proc, expected):
         assert lines[0].startswith("Blocked"), proc.stderr
 
 
-def ea(tool_name, target, expected, name, **fields):
-    payload = call(tool_name, target, **fields)
+def ea(tool_name, target, expected, name, cwd="{root}", **fields):
+    payload = call(tool_name, target, cwd, **fields)
     return pytest.param("eval-author", payload, expected, id="eval-author-" + name)
 
 
@@ -165,7 +180,11 @@ def raw(mode, stdin, name):
 
 
 BRIEF = "{home}/Desktop/mailo/coop-project/crivo-brief.md"
-PYTEST_CORRUPT = "uv run pytest tests/test_bench_corrupt.py -q"
+# The eval-author's shell starts in the main checkout, so its pytest names the
+# worktree's tests by their full path.
+WORKTREE = "{root}/.worktrees/9"
+WT_TESTS = WORKTREE + "/tests/"
+PYTEST_CORRUPT = "uv run pytest " + WT_TESTS + "test_bench_corrupt.py -q"
 AGENT_RUN = "uv run python -m bench.agent_run --sample 1"
 CLEAN = "uv run crivo clean data/example.csv"
 FAUX = "CRIVO_PROVIDER=faux "
@@ -201,7 +220,11 @@ GUARD_READS_CASES = [
     ea("Read", "AGENTS.md", 0, "read-agents-md"),
     ea("Read", "CLAUDE.md", 0, "read-claude-md"),
     ea("Read", "specs/2026-10-14-the-plan.md", 0, "read-plan"),
-    ea("Read", "specs/2026-10-14-plan-inventory.md", 0, "read-inventory"),
+    # the inventory and the stage specs quote the detector and its misses; the
+    # eval tooling spec is the eval-author's own design of record (#235)
+    ea("Read", "specs/2026-10-14-plan-inventory.md", 2, "read-inventory"),
+    ea("Read", "specs/2026-10-17-stage-0-foundation.md", 2, "read-stage-0-spec"),
+    ea("Read", "specs/2026-10-17-stage-a-stabilize.md", 2, "read-stage-a-spec"),
     ea("Read", "specs/2026-10-17-eval-tooling.md", 0, "read-spec-new"),
     ea("Read", "pyproject.toml", 0, "read-pyproject"),
     ea("Read", "SECURITY.md", 0, "read-security-md"),
@@ -246,11 +269,17 @@ GUARD_READS_CASES = [
     ea("Edit", "tests/test_bench_bases.py", 0, "edit-bases-tests"),
     # eval-author shell: whole commands off an allowlist, no shell operators
     ea("Bash", "cat src/crivo/loop.py", 2, "bash-cat-loop"),
-    ea("Bash", "uv run pytest tests/test_detect.py -q", 2, "bash-pytest-detect"),
-    ea("Bash", "uv run pytest -q", 2, "bash-pytest-all"),
     ea(
         "Bash",
-        "uv run pytest tests/test_bench_corrupt.py tests/test_detect.py -q",
+        "uv run pytest " + WT_TESTS + "test_detect.py -q",
+        2,
+        "bash-pytest-detect",
+    ),
+    ea("Bash", "uv run pytest -q", 2, "bash-pytest-all"),
+    ea("Bash", "uv run pytest -q", 2, "bash-pytest-all-wt", cwd=WORKTREE),
+    ea(
+        "Bash",
+        PYTEST_CORRUPT + " " + WT_TESTS + "test_detect.py",
         2,
         "bash-pytest-extra-file",
     ),
@@ -271,17 +300,175 @@ GUARD_READS_CASES = [
     ea("Bash", PYTEST_CORRUPT + "\ncat x", 2, "bash-newline"),
     ea("Bash", None, 2, "bash-no-command"),
     ea("Bash", PYTEST_CORRUPT, 0, "bash-pytest-corrupt"),
-    ea("Bash", "uv run pytest tests/test_bench_bases.py -k mixed_dates", 0, "bash-k"),
-    ea("Bash", "uv run pytest tests/test_bench_truth.py -q -k sentinel", 0, "bash-q-k"),
     ea(
         "Bash",
-        "uv run pytest tests/test_bench_degenerate.py -q",
+        "uv run pytest " + WT_TESTS + "test_bench_bases.py -k mixed_dates",
+        0,
+        "bash-k",
+    ),
+    ea(
+        "Bash",
+        "uv run pytest tests/test_bench_truth.py -q -k sentinel",
+        0,
+        "bash-q-k",
+        cwd=WORKTREE,
+    ),
+    ea(
+        "Bash",
+        "uv run pytest " + WT_TESTS + "test_bench_degenerate.py -q",
         0,
         "bash-pytest-degenerate",
     ),
-    ea("Bash", "uv run pytest tests/test_bench_shapes.py -q", 0, "bash-pytest-shapes"),
+    ea(
+        "Bash",
+        "uv run pytest tests/test_bench_shapes.py -q",
+        0,
+        "bash-pytest-shapes",
+        cwd=WORKTREE,
+    ),
     ea("Bash", "git status", 0, "bash-git-status"),
     ea("Bash", "git diff -- bench/corrupt.py", 0, "bash-diff-corrupt"),
+    # eval-author pytest: each test path resolves into a .worktrees/<n>, since a
+    # relative path from the main checkout tests dev's bench, not the
+    # worktree's (#235)
+    ea("Bash", "uv run pytest tests/test_bench_corrupt.py -q", 2, "bash-pytest-main"),
+    ea(
+        "Bash",
+        "uv run pytest {root}/tests/test_bench_corrupt.py -q",
+        2,
+        "bash-pytest-main-abs",
+    ),
+    ea(
+        "Bash",
+        "uv run pytest ../../tests/test_bench_corrupt.py -q",
+        2,
+        "bash-pytest-wt-up-to-main",
+        cwd=WORKTREE,
+    ),
+    ea(
+        "Bash",
+        PYTEST_CORRUPT + " tests/test_bench_bases.py",
+        2,
+        "bash-pytest-wt-and-main",
+    ),
+    ea(
+        "Bash",
+        "uv run pytest tests/test_bench_corrupt.py -q",
+        0,
+        "bash-pytest-wt-relative",
+        cwd=WORKTREE,
+    ),
+    ea(
+        "Bash",
+        "uv run pytest .worktrees/9/tests/test_bench_corrupt.py -q",
+        0,
+        "bash-pytest-main-into-wt",
+    ),
+    # another worktree's bench tests are bench tests too (pinned: allowed)
+    ea(
+        "Bash",
+        "uv run pytest ../10/tests/test_bench_corrupt.py -q",
+        0,
+        "bash-pytest-other-wt",
+        cwd=WORKTREE,
+    ),
+    # eval-author git -C: onto a .worktrees/<n> of this checkout only, each
+    # PATH read against that worktree, the same two commands (#235)
+    ea("Bash", "git -C " + WORKTREE + " status", 0, "bash-C-wt-status"),
+    ea("Bash", "git -C .worktrees/9 diff -- bench/corrupt.py", 0, "bash-C-wt-diff"),
+    ea(
+        "Bash",
+        "git -C " + WORKTREE + " diff -- bench/corrupt.py tests/test_bench_corrupt.py",
+        0,
+        "bash-C-wt-diff-two",
+    ),
+    ea("Bash", "git -C /tmp/elsewhere status", 2, "bash-C-elsewhere"),
+    ea("Bash", "git -C {root} status", 2, "bash-C-main"),
+    ea("Bash", "git -C .worktrees/9/bench status", 2, "bash-C-wt-subdir"),
+    ea("Bash", "git -C .worktrees/9 -C ../.. status", 2, "bash-C-twice"),
+    ea("Bash", "git -C .worktrees/9 log -p", 2, "bash-C-wt-log"),
+    ea("Bash", "git -C .worktrees/9 diff", 2, "bash-C-wt-diff-everything"),
+    ea("Bash", "git -C .worktrees/9 diff --", 2, "bash-C-wt-diff-no-path"),
+    ea(
+        "Bash",
+        "git -C .worktrees/9 diff -- src/crivo/detect.py",
+        2,
+        "bash-C-wt-diff-detect",
+    ),
+    ea(
+        "Bash",
+        "git -C .worktrees/9 diff -- bench/corrupt.py src/crivo/detect.py",
+        2,
+        "bash-C-wt-diff-mixed",
+    ),
+    # git diff on two paths, one outside the work tree, runs as --no-index: a
+    # diff of the two folders on disk, git-ignored files such as bench/results/
+    # included (#235)
+    ea("Bash", "git -C .worktrees/9 diff -- ../../bench bench", 2, "bash-C-noindex"),
+    ea(
+        "Bash",
+        "git -C " + WORKTREE + " diff -- {root}/bench bench",
+        2,
+        "bash-C-noindex-abs",
+    ),
+    ea(
+        "Bash",
+        "git diff -- {root}/bench bench",
+        2,
+        "bash-diff-wt-noindex",
+        cwd=WORKTREE,
+    ),
+    ea(
+        "Bash",
+        "git diff -- {home}/Desktop/mailo/coop-project {root}/bench",
+        2,
+        "bash-diff-noindex-brief",
+    ),
+    # git reads a PATH's ".." as text, so one that climbs out of the work tree
+    # and back in by the folder's own name is outside to git (the checkout here
+    # is named crivo), though its real path is inside
+    ea("Bash", "git diff -- ../crivo/bench bench/traps", 2, "bash-diff-climb-back"),
+    ea(
+        "Bash",
+        "git -C .worktrees/9 diff -- ../9/bench/corrupt.py bench/truth.py",
+        2,
+        "bash-C-diff-climb-back",
+    ),
+    ea(
+        "Bash",
+        "git diff -- ../9/bench bench",
+        2,
+        "bash-diff-wt-climb-back",
+        cwd=WORKTREE,
+    ),
+    # every PATH is relative, since git and the hook read an absolute one
+    # differently: by its text against the work tree, or folded (APFS ignores
+    # case) and links followed. A worktree's own files are named from it.
+    ea(
+        "Bash",
+        "git -C .worktrees/9 diff -- " + WORKTREE + "/bench/corrupt.py",
+        2,
+        "bash-C-wt-diff-full-path",
+    ),
+    ea(
+        "Bash",
+        "git -C .worktrees/9 diff -- {root}/.WORKTREES/9/bench/corrupt.py bench/truth.py",
+        2,
+        "bash-C-diff-abs-case",
+    ),
+    ea(
+        "Bash",
+        "git diff -- {parent}/CRIVO/bench bench/traps",
+        2,
+        "bash-diff-abs-case",
+    ),
+    ea(
+        "Bash",
+        "git diff -- bench/corrupt.py tests/test_bench_corrupt.py",
+        0,
+        "bash-diff-wt-two",
+        cwd=WORKTREE,
+    ),
     # builder: off the held-out and sealed sets, by any spelling of the path
     bd("Read", "bench/traps/heldout/x.json", 2, "read-heldout"),
     bd("Read", "bench/traps/HELDOUT/x.json", 2, "read-heldout-upper"),
@@ -489,7 +676,8 @@ def test_builder_is_kept_off_a_sealed_set_spelled_with_a_folded_letter(
 
 # Links are followed before matching: a link inside bench/ that points into
 # the core is the core, and the checkout reached through a linked directory
-# (macOS /tmp is /private/tmp) is still the checkout.
+# (macOS /tmp is /private/tmp) is still the checkout. A link in .worktrees/
+# named like a worktree is the folder it points to, here another clone (#235).
 LINKED = [
     pytest.param(call("Read", "bench/prompts_view.py"), 2, id="file-link"),
     pytest.param(call("Read", "bench/crivo_src/loop.py"), 2, id="dir-link"),
@@ -498,6 +686,22 @@ LINKED = [
     pytest.param(call("Read", "{alias}/src/crivo/prompts.py"), 2, id="alias-prompts"),
     pytest.param(call("Read", "{alias}/bench/corrupt.py"), 0, id="alias-corrupt"),
     pytest.param(call("Write", "{alias}/bench/corrupt.py"), 0, id="alias-write"),
+    pytest.param(call("Bash", "git -C .worktrees/7 status"), 2, id="git-C-fake-wt"),
+    pytest.param(
+        call("Bash", "uv run pytest .worktrees/7/tests/test_bench_corrupt.py -q"),
+        2,
+        id="pytest-fake-wt",
+    ),
+    pytest.param(
+        call("Bash", "git -C {alias}/.worktrees/9 status"), 0, id="git-C-alias"
+    ),
+    # a link outside the checkout into bench/ is outside the work tree to git,
+    # so git diff on it and a second path runs as --no-index
+    pytest.param(
+        call("Bash", "git diff -- {bench_link} bench/traps"),
+        2,
+        id="git-diff-bench-link",
+    ),
 ]
 
 
@@ -509,9 +713,23 @@ def test_eval_author_follows_links_before_matching(
     (checkout / "bench" / "prompts_view.py").symlink_to(core / "prompts.py")
     (checkout / "bench" / "crivo_src").symlink_to(core, target_is_directory=True)
     (checkout / "bench" / "traps" / "detect_view.py").symlink_to(core / "detect.py")
+    clone = tmp_path / "other-clone"
+    for rel in ("bench/corrupt.py", "tests/test_bench_corrupt.py"):
+        (clone / rel).parent.mkdir(parents=True, exist_ok=True)
+        (clone / rel).write_text("")
+    (checkout / ".worktrees" / "7").symlink_to(clone, target_is_directory=True)
     alias = tmp_path / "checkout-link"
     alias.symlink_to(checkout, target_is_directory=True)
-    proc = run_hook(GUARD_READS, "eval-author", payload, checkout, alias=str(alias))
+    bench_link = tmp_path / "bench-link"
+    bench_link.symlink_to(checkout / "bench", target_is_directory=True)
+    proc = run_hook(
+        GUARD_READS,
+        "eval-author",
+        payload,
+        checkout,
+        alias=str(alias),
+        bench_link=str(bench_link),
+    )
     assert_exit(proc, expected)
 
 
@@ -529,6 +747,17 @@ def test_guard_reads_is_stdlib_only_and_parses_as_python_3_9():
     assert sorted(imported - sys.stdlib_module_names) == []
 
 
+def test_guard_reads_docstring_does_not_promise_a_wall_that_is_not_built():
+    # 0d's sandbox contains the analyst's kernel, not an agent's tools; an OS
+    # sandbox for code the eval-author runs is deferred to 0d (D18), not built
+    # (#235)
+    doc = " ".join(
+        (ast.get_docstring(ast.parse(GUARD_READS.read_text())) or "").split()
+    )
+    assert "real wall" not in doc.lower(), "the docstring names a wall nothing builds"
+    assert "D18" in doc, "the docstring doesn't say the OS sandbox is deferred (D18)"
+
+
 SYSTEM_PYTHON = Path("/usr/bin/python3")
 
 
@@ -537,6 +766,8 @@ SYSTEM_PYTHON = Path("/usr/bin/python3")
     [
         ea("Read", "src/crivo/prompts.py", 2, "read-prompts"),
         ea("Read", "bench/corrupt.py", 0, "read-corrupt"),
+        ea("Bash", "git -C " + WORKTREE + " status", 0, "bash-C-wt-status"),
+        ea("Bash", PYTEST_CORRUPT, 0, "bash-pytest-corrupt"),
         bd("Bash", CLEAN, 2, "paid-clean"),
         bd("Bash", FAUX + CLEAN, 0, "faux-clean"),
     ],
@@ -711,6 +942,51 @@ def test_eval_author_body_keeps_the_bench_rule_and_never_quotes_cases():
         "loop.py, the referee, detect.py or autoclean.py"
     )
     assert NO_QUOTE.search(body), "eval-author.md never says not to quote cases"
+
+
+def guard_rules(name):
+    """One of guard_reads.py's path lists, read from its source (the hook runs
+    when imported)."""
+    for node in ast.parse(GUARD_READS.read_text()).body:
+        targets = [getattr(t, "id", None) for t in getattr(node, "targets", [])]
+        if targets == [name]:
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"guard_reads.py has no {name}")
+
+
+def eval_author_step(phrase):
+    """The numbered step of eval-author.md's body that says `phrase`, its lines
+    and bullets joined into one."""
+    _, body = agent_file(EVAL_AUTHOR)
+    steps = [" ".join(step.split()) for step in re.split(r"\n(?=\d+\. )", body)]
+    found = [step for step in steps if phrase in step.lower()]
+    assert len(found) == 1, f"eval-author.md has {len(found)} steps on {phrase!r}"
+    return found[0]
+
+
+def rule_name(rule):
+    """A path rule, or a path the prompt lists, as the file or folder it names."""
+    return re.sub(r"/(\*\*)?$", "", rule.lstrip("!"))
+
+
+def test_eval_author_read_list_drops_the_docs_that_describe_the_detector():
+    # the inventory and the stage specs quote detector lines, thresholds and
+    # misses; the eval tooling spec, its own design of record, stays by name
+    # (#235). The prompt's list is the hook's list.
+    step = eval_author_step("may read only")
+    sentence = re.search(r"may read only(.*?)\.(?:\s|$)", step, re.IGNORECASE)
+    listed = re.findall(r"`([^`]+)`", sentence.group(1))
+    assert "specs/2026-10-14-plan-inventory.md" not in listed
+    assert [name for name in listed if name.startswith("specs/2026-10-17-*")] == []
+    assert "specs/2026-10-17-eval-tooling.md" in listed
+    hook = sorted(map(rule_name, guard_rules("EVAL_AUTHOR_READS")))
+    assert sorted(map(rule_name, listed)) == hook
+
+
+def test_eval_author_run_list_names_git_on_its_own_worktree():
+    # git status and git diff from the main checkout miss the worktree's edits
+    step = eval_author_step("may run only")
+    assert "git -C" in step, "eval-author.md's run list has no git -C on its worktree"
 
 
 def run_frontmatter_hooks(front, payload, cwd):
