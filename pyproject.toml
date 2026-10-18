@@ -1,6 +1,6 @@
 [project]
 name = "crivo"
-version = "0.1.0"
+version = "0.2.0"
 description = "An AI analyst for messy data: diagnoses, cleans, and answers questions over your tables, re-checking every fix and answer before it counts."
 readme = "README.md"
 authors = [

@@ -295,7 +295,7 @@ file it could not read. As a GitHub Action:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: aarmens702-hub/crivo@v0.1.0
+- uses: aarmens702-hub/crivo@v0.2.0
   with:
     path: data/latest-export.csv
     fail-on: GATE
