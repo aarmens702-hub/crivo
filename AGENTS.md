@@ -114,5 +114,5 @@ Run from the repo root (or the worktree root).
 - **A pytest fixture error shows as ERROR, not FAILED.** A new failing test must fail inside its body, on its assertion.
 - **Refusing looks like rigour.** Wave 1.5 found that fixers taught to refuse began declining input crivo should repair, and the lower number read as caution. Pin the legitimate repair beside every new refusal.
 - **A docstring is not a fix.** Don't write that a hole is closed unless a test proves the whole of it.
-- **The bench smoke only knows 30 corruption shapes.** A change can score clean there and still regress. If your change handles a new shape, add a corpus case for it.
+- **The bench smoke only knows 31 corruption shapes.** A change can score clean there and still regress. If your change handles a new shape, add a corpus case for it.
 - **tdd-guard is off for this repo** (Aarmen, 2026-10-14). Test-first is enforced by the test-writer and builder split and the Stop hook instead. Don't turn it back on.

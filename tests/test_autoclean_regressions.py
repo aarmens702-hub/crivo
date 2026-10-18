@@ -19,6 +19,7 @@ Where a token really is two things, the refusal stays and says so - see
 import pandas as pd
 import pytest
 
+from crivo import load_example
 from crivo.autoclean import FIXERS, clean
 from crivo.detect import detect_all, detect_one
 
@@ -414,6 +415,363 @@ def test_a_human_finding_the_applied_fix_also_cleared_is_not_left_in_review(
     assert 7 in {a["disease"] for a in summary.applied}, summary.needs_review
     assert detect_one(cleaned, 7, ["state"]) is None, "the premise of this test"
     assert not _reviewed(summary, 7, ["state"]), summary.needs_review
+
+
+# --- #25. a residual of a different grade is a different finding ------------
+
+
+def test_a_case_fix_is_kept_beside_an_open_spelling_variant():
+    """Regression for #25. FIXERS[7] folds the three casings of California
+    onto one, which is the whole of the d07 AUTO finding. The re-check then
+    found the d07 HUMAN spelling finding on the same column, counted it as the
+    case finding still firing, and reverted the fold. No fixer may clear a
+    spelling judgement, so that refusal could never be satisfied: every case
+    fix on a column with a misspelling was lost."""
+    frame = _state_frame()
+
+    cleaned, summary = clean(frame)
+
+    applied = {(a["disease"], tuple(a["columns"]), a["grade"]) for a in summary.applied}
+    assert (7, ("state",), "AUTO") in applied, summary.needs_review
+    # hand-checked: the casings fold onto the majority spelling, and the two
+    # misspellings are left exactly as they were for a person to map
+    expected = (
+        ["California"] * 7
+        + ["Pennsylvania"] * 4
+        + ["Pensylvania"]
+        + ["Washington"] * 4
+        + ["Massachusetts"] * 3
+        + ["Massachusets"]
+    )
+    assert cleaned["state"].tolist() == expected, "the fold was not kept as is"
+    assert cleaned["account_id"].tolist() == frame["account_id"].tolist()
+    assert any(
+        r["disease"] == 7 and r["grade"] == "HUMAN" for r in summary.needs_review
+    ), summary.needs_review
+    assert not any(
+        r["disease"] == 7 and r["grade"] == "AUTO" for r in summary.needs_review
+    ), summary.needs_review
+
+
+def test_a_case_fix_that_leaves_a_casing_behind_is_still_refused(monkeypatch):
+    """Pin beside #25, the refusal that must survive it. A fold that misses
+    one casing leaves the d07 AUTO finding itself still firing, so the residual
+    is the same grade as the fix and the fix is reverted, spelling finding or
+    not. Only a residual of a different grade stops counting."""
+
+    def fold_only_upper(frame, cols):
+        out = frame.copy()
+        for c in cols:
+            out[c] = out[c].replace({"CALIFORNIA": "California"})
+        return out
+
+    monkeypatch.setitem(FIXERS, 7, fold_only_upper)
+    frame = _state_frame()
+
+    cleaned, summary = clean(frame)
+
+    assert not any(a["disease"] == 7 for a in summary.applied), summary.applied
+    assert cleaned["state"].tolist() == frame["state"].tolist(), "not reverted"
+    assert any(
+        r["disease"] == 7
+        and r["grade"] == "AUTO"
+        and r.get("reason") == "fix did not clear verification"
+        for r in summary.needs_review
+    ), summary.needs_review
+    assert any(
+        r["disease"] == 7 and r["grade"] == "HUMAN" for r in summary.needs_review
+    ), summary.needs_review
+
+
+def _cased_state_frame() -> pd.DataFrame:
+    """The CRM state column with three casings of Pennsylvania (d07 AUTO) and
+    every other state spelled right, so before any fix the column carries no
+    d07 HUMAN spelling finding at all."""
+    states = (
+        ["Pennsylvania"] * 5
+        + ["pennsylvania", "PENNSYLVANIA"]
+        + ["California"] * 4
+        + ["Washington"] * 4
+        + ["Massachusetts"] * 4
+    )
+    ids = [f"{n:06d}" for n in range(1041, 1041 + 7 * len(states), 7)]
+    return pd.DataFrame({"account_id": ids, "state": states})
+
+
+def test_a_case_fix_that_creates_a_spelling_variant_is_reverted(monkeypatch):
+    """Regression for #25. Counting only a residual of the fix's own grade
+    let a fix clear its grade by making a finding of another. The stand-in
+    fold maps the two odd casings of Pennsylvania onto a mistyped canonical,
+    'Pensylvania': the case finding (AUTO) is gone, and in its place is a
+    spelling finding (HUMAN) the column did not carry before the fix. The fix
+    damaged the column, so it is reverted like any fix that did not verify.
+    The legitimate side of the line, a spelling finding that was already open
+    before the fold, is pinned by
+    `test_a_case_fix_is_kept_beside_an_open_spelling_variant` and
+    `test_a_case_fix_is_kept_when_it_rewords_the_open_spelling_finding`."""
+
+    def fold_onto_a_typo(frame, cols):
+        out = frame.copy()
+        for c in cols:
+            out[c] = out[c].replace(
+                {"pennsylvania": "Pensylvania", "PENNSYLVANIA": "Pensylvania"}
+            )
+        return out
+
+    frame = _cased_state_frame()
+
+    def on_state(f):
+        return {
+            (x["disease"], x["grade"])
+            for x in detect_all(f)["findings"]
+            if x["columns"] == ["state"]
+        }
+
+    assert on_state(frame) == {(7, "AUTO")}, "the premise of this test"
+    assert on_state(fold_onto_a_typo(frame, ["state"])) == {(7, "HUMAN")}, (
+        "the premise of this test"
+    )
+    monkeypatch.setitem(FIXERS, 7, fold_onto_a_typo)
+
+    cleaned, summary = clean(frame)
+
+    assert not any(a["disease"] == 7 for a in summary.applied), (
+        "a fix that created a spelling finding was kept",
+        summary.applied,
+    )
+    assert cleaned["state"].tolist() == frame["state"].tolist(), "not reverted"
+    assert any(
+        r["disease"] == 7 and r["grade"] == "AUTO" and r.get("reason")
+        for r in summary.needs_review
+    ), summary.needs_review
+
+
+def test_a_case_fix_is_kept_when_it_rewords_the_open_spelling_finding():
+    """Pin beside #25. Here the spelling finding was open before the fold,
+    and the fold changes how it reads: one rep typed MASSACHUSETTS in capitals
+    on the first row, so before the fix the HUMAN finding quotes that casing
+    as its side of the pair, and after it quotes 'Massachusetts'. Same
+    disease, same grade, same column, the same finding reworded, not a new
+    one, so the correct fold is kept. A refusal keyed on the wording would
+    lose it."""
+    states = (
+        ["MASSACHUSETTS"]
+        + ["California"] * 5
+        + ["Pennsylvania"] * 4
+        + ["Washington"] * 4
+        + ["Massachusetts"] * 3
+        + ["massachusetts", "Massachusets"]
+    )
+    ids = [f"{n:06d}" for n in range(1041, 1041 + 7 * len(states), 7)]
+    frame = pd.DataFrame({"account_id": ids, "state": states})
+
+    def spelling(f):
+        return [
+            x
+            for x in detect_all(f)["findings"]
+            if x["disease"] == 7 and x["grade"] == "HUMAN"
+        ]
+
+    before, after = spelling(frame), spelling(FIXERS[7](frame, ["state"]))
+    assert len(before) == len(after) == 1, "the premise of this test"
+    assert before[0]["evidence"] != after[0]["evidence"], "the premise"
+
+    cleaned, summary = clean(frame)
+
+    applied = {(a["disease"], tuple(a["columns"]), a["grade"]) for a in summary.applied}
+    assert (7, ("state",), "AUTO") in applied, summary.needs_review
+    # hand-checked: both odd casings fold onto the majority 'Massachusetts';
+    # the misspelling on the last row is left for a person to map
+    expected = (
+        ["Massachusetts"]
+        + ["California"] * 5
+        + ["Pennsylvania"] * 4
+        + ["Washington"] * 4
+        + ["Massachusetts"] * 4
+        + ["Massachusets"]
+    )
+    assert cleaned["state"].tolist() == expected, "the fold was not kept as is"
+    assert any(
+        r["disease"] == 7 and r["grade"] == "HUMAN" for r in summary.needs_review
+    ), summary.needs_review
+
+
+def _resent_orders() -> pd.DataFrame:
+    """An orders export of 290 orders with zero-padded ids, ten of them sent
+    twice. Five re-sends carry a re-keyed amount ($10 more than the first
+    send), and five were keyed by a second rep who typed the region in lower
+    case. order_id is 290 of 300 unique, so d11 reads it as a damaged key
+    whose repeats contradict both region and amount; the lower-case regions
+    are d07's case finding (AUTO) on region as well."""
+    regions = ["West", "East", "North", "South", "Central"]
+    orders = [
+        (
+            f"{50113 + 17 * k:06d}",
+            regions[k % 5],
+            round(40 + (k * 37) % 460 + (k % 4) * 0.25, 2),
+        )
+        for k in range(290)
+    ]
+    rekeyed = [
+        (oid, region, round(amount + 10.0, 2))
+        for oid, region, amount in (orders[k] for k in (12, 71, 130, 188, 247))
+    ]
+    lowered = [
+        (oid, region.lower(), amount)
+        for oid, region, amount in (orders[k] for k in (25, 90, 151, 203, 266))
+    ]
+    return pd.DataFrame(
+        orders + rekeyed + lowered, columns=["order_id", "region", "amount"]
+    )
+
+
+def test_a_finding_a_kept_fix_narrows_is_listed_once():
+    """Regression for #25. The leftover pass matched each finding on the
+    cleaned frame to a review entry by its exact column list. Here the d07
+    fold on region is correct and kept, and it settles the five re-sends
+    that differed only by case, so the d11 key finding, open before the fixes
+    on order_id, region and amount, is left on order_id and amount: the same
+    finding about the same key, with one attribute fewer. It matched no entry
+    and was listed a second time, so a person read two key findings where
+    there is one."""
+    frame = _resent_orders()
+
+    def on_key(f):
+        return [
+            (x["grade"], x["columns"])
+            for x in detect_all(f)["findings"]
+            if x["disease"] == 11
+        ]
+
+    assert on_key(frame) == [("HUMAN", ["order_id", "region", "amount"])], (
+        "the premise of this test"
+    )
+
+    cleaned, summary = clean(frame)
+
+    applied = {(a["disease"], tuple(a["columns"]), a["grade"]) for a in summary.applied}
+    assert (7, ("region",), "AUTO") in applied, summary.needs_review
+    # hand-checked: each lower-case region folds onto its capitalised majority
+    assert cleaned["region"].tolist() == [r.capitalize() for r in frame["region"]]
+    assert on_key(cleaned) == [("HUMAN", ["order_id", "amount"])], (
+        "the premise of this test"
+    )
+    key = [r for r in summary.needs_review if r["disease"] == 11]
+    assert len(key) == 1, key
+    assert key[0]["grade"] == "HUMAN" and key[0]["columns"][0] == "order_id", key
+
+
+def _padded_state_header() -> pd.DataFrame:
+    """The CRM state frame read from a CSV whose header cell was ' state',
+    with a leading space: d18 (AUTO) renames it to 'state'."""
+    return _state_frame().rename(columns={"state": " state"})
+
+
+def _unnamed_state_beside_a_constant() -> pd.DataFrame:
+    """The CRM state frame read from a CSV whose state header cell was blank,
+    so pandas named the column 'Unnamed: 2', beside a country column that
+    reads 'US' on every row. d19 (AUTO) drops country, then d18 renames the
+    unnamed column, now at position 1."""
+    frame = _state_frame()
+    return pd.DataFrame(
+        {
+            "account_id": frame["account_id"],
+            "country": ["US"] * len(frame),
+            "Unnamed: 2": frame["state"],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("build", "fixes"),
+    [
+        (_padded_state_header, {(7, (" state",)), (18, (" state",))}),
+        (
+            _unnamed_state_beside_a_constant,
+            {(7, ("Unnamed: 2",)), (19, ("country",)), (18, ("Unnamed: 2",))},
+        ),
+    ],
+    ids=["padded-header", "unnamed-header-beside-a-dropped-constant"],
+)
+def test_a_finding_under_a_repaired_header_is_listed_once(build, fixes):
+    """Pin beside #25. The d18 header repair runs after every other fix (and
+    after d19's drops), so the d07 spelling finding the review lists under
+    the column's old name turns up on the cleaned frame under its new one.
+    The leftover pass maps the new name back to the old to match the two;
+    without that, the one spelling finding is listed twice. The case fold,
+    the drop and the rename are all correct, and all kept."""
+    frame = build()
+
+    cleaned, summary = clean(frame)
+
+    applied = {(a["disease"], tuple(a["columns"])) for a in summary.applied}
+    assert applied == fixes, summary.needs_review
+    # hand-checked: the casings fold onto the majority spelling, the two
+    # misspellings are left for a person, and the column ends up last
+    expected = (
+        ["California"] * 7
+        + ["Pennsylvania"] * 4
+        + ["Pensylvania"]
+        + ["Washington"] * 4
+        + ["Massachusetts"] * 3
+        + ["Massachusets"]
+    )
+    assert cleaned.iloc[:, -1].tolist() == expected, "the fold was not kept as is"
+    assert cleaned["account_id"].tolist() == frame["account_id"].tolist()
+    spelling = [
+        r for r in summary.needs_review if r["disease"] == 7 and r["grade"] == "HUMAN"
+    ]
+    assert len(spelling) == 1, summary.needs_review
+    assert not any(
+        r["disease"] == 7 and r["grade"] == "AUTO" for r in summary.needs_review
+    ), summary.needs_review
+
+
+def test_a_finding_a_later_fix_brings_back_is_listed_as_still_present(monkeypatch):
+    """Regression for #25. The leftover pass gives a finding on the cleaned
+    frame one of two reasons: "found once the fixes ran" when no diagnosis
+    of the original carried it, and "still present after the fixes ran" when
+    one did. Nothing told the two apart, so either reason could stand in for
+    the other unseen. The stand-in d01 fixer is the real number fix that then
+    re-pads `note` on every third row of the demo frame, as a fix that
+    rewrites a whole frame can: d06's whitespace fix on `note` is applied and
+    verified first, d01 verifies only `revenue`, and the cleaned frame carries
+    the d06 finding the original did. It was open before the fixes, so it is
+    left over, not uncovered."""
+    number_fix = FIXERS[1]
+
+    def fix_and_repad(frame, cols):
+        out = number_fix(frame, cols)
+        every_third = out.index % 3 == 0
+        out.loc[every_third, "note"] = "  " + out.loc[every_third, "note"] + "  "
+        return out
+
+    frame = load_example()
+    assert detect_one(frame, 6, ["note"], grade="AUTO") is not None, "the premise"
+    monkeypatch.setitem(FIXERS, 1, fix_and_repad)
+
+    cleaned, summary = clean(frame)
+
+    applied = {(a["disease"], tuple(a["columns"]), a["grade"]) for a in summary.applied}
+    assert {(6, ("note",), "AUTO"), (1, ("revenue",), "AUTO")} <= applied, (
+        "the premise of this test",
+        summary.needs_review,
+    )
+    assert detect_one(cleaned, 6, ["note"], grade="AUTO") is not None, "the premise"
+    whitespace = [
+        (r["disease"], r["grade"], r["columns"], r.get("reason"))
+        for r in summary.needs_review
+        if r["disease"] == 6
+    ]
+    assert whitespace == [(6, "AUTO", ["note"], "still present after the fixes ran")]
+    # the padding also makes "review" and "  review  " two spellings of one
+    # value, a d07 finding no diagnosis of the original carried
+    case = [
+        r.get("reason")
+        for r in summary.needs_review
+        if r["disease"] == 7 and r["columns"] == ["note"]
+    ]
+    assert case == ["found once the fixes ran"], summary.needs_review
 
 
 def _excel_damaged_ids() -> pd.DataFrame:

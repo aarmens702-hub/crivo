@@ -83,7 +83,7 @@ dataframe — 60 rows × 5 columns
 ```python
 cleaned, summary = cv.clean(df)   # applies the safe fixes, re-checks each one
 summary.samples()                 # the receipts: old value, new value, row, per fix
-summary.needs_review              # what it would not decide for you (here: dropping rows)
+summary.needs_review              # what it would not decide for you (here: dropping rows, and revenue outliers)
 cv.write(cleaned, "clean.parquet")
 ```
 

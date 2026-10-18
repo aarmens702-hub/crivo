@@ -1029,6 +1029,51 @@ def test_detect_one_refuses_a_fix_that_deletes_the_diseased_column() -> None:
     assert residual["disease"] == 6 and residual["grade"] == "HUMAN"
 
 
+def test_detect_one_counts_only_a_residual_of_the_given_grade() -> None:
+    """Regression for #25. A state column carries two d07 findings: three
+    casings of California (AUTO, which FIXERS[7] folds) and two misspellings
+    (HUMAN, which no fixer may clear). Checking the case fold must not count
+    the spelling finding as the case finding still firing. With no grade the
+    check is unchanged, and a vanished column is refused whatever grade is
+    asked, since autoclean always asks for one."""
+    import inspect
+
+    from crivo.autoclean import FIXERS
+
+    assert "grade" in inspect.signature(detect_one).parameters, (
+        "detect_one(df, disease, columns, grade=None) is the contract"
+    )
+    states = (
+        ["California"] * 5
+        + ["california", "CALIFORNIA"]
+        + ["Pennsylvania"] * 4
+        + ["Pensylvania"]
+        + ["Washington"] * 4
+        + ["Massachusetts"] * 3
+        + ["Massachusets"]
+    )
+    ids = [f"{n:06d}" for n in range(1041, 1041 + 7 * len(states), 7)]
+    frame = pd.DataFrame({"account_id": ids, "state": states})
+    grades = {f["grade"] for f in detect_all(frame)["findings"] if f["disease"] == 7}
+    assert grades == {"AUTO", "HUMAN"}, "the premise of this test"
+
+    # before the fold, the AUTO finding is there and a grade filter still sees it
+    assert detect_one(frame, 7, ["state"], grade="AUTO")["grade"] == "AUTO"
+
+    folded = FIXERS[7](frame, ["state"])
+
+    assert detect_one(folded, 7, ["state"], grade="AUTO") is None
+    human = detect_one(folded, 7, ["state"], grade="HUMAN")
+    assert human is not None and human["grade"] == "HUMAN"
+    assert detect_one(folded, 7, ["state"]) is not None, "the default changed"
+
+    dirty = pd.DataFrame(
+        {"city": ["  Vancouver", "Burnaby ", "Victoria", "Surrey "] * 5, "n": range(20)}
+    )
+    gone = detect_one(dirty.drop(columns=["city"]), 6, ["city"], grade="AUTO")
+    assert gone is not None, "a lost column read as a verified AUTO fix"
+
+
 def test_detect_one_still_verifies_rename_and_drop_repairs() -> None:
     """The exception the missing-column rule has to carry: d18's repair IS a
     rename and d19's IS a drop, so for those two the original name being gone

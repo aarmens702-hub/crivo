@@ -44,6 +44,20 @@ SMOKE: list[dict] = [
     {"name": "tx-suppression", "base": _TX, "diseases": [5], "seed": 105, "n": 250},
     {"name": "tx-whitespace", "base": _TX, "diseases": [6], "seed": 106, "n": 250},
     {"name": "tx-case-variants", "base": _TX, "diseases": [7], "seed": 107, "n": 250},
+    # d07 as the taxonomy draws it: one category column under re-casings and
+    # small misspellings ("Nrth"), then d06 on the same column adds stray
+    # whitespace; a cell both land on is the "NORTH " compound (3 at this seed)
+    {
+        "name": "tx-case-spelling",
+        "base": _TX,
+        "diseases": [7, 6],
+        "params": {
+            7: {"columns": ["category"], "misspell": True},
+            6: {"columns": ["category"]},
+        },
+        "seed": 130,
+        "n": 300,
+    },
     {"name": "tx-mojibake", "base": _TX, "diseases": [8], "seed": 108, "n": 250},
     {"name": "tx-dup-rows", "base": _TX, "diseases": [9], "seed": 109, "n": 250},
     {"name": "tx-near-dups", "base": _TX, "diseases": [10], "seed": 110, "n": 250},

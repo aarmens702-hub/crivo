@@ -461,6 +461,28 @@ def _case_variant(value: str, kind: int) -> str:
     return value.capitalize()
 
 
+_CASE_VARIANTS = 3
+_SPELLING_VARIANTS = 3
+
+
+def _spelling_variant(value: str, kind: int, rng: np.random.Generator) -> str:
+    """One small misspelling, the "Nrth" a hurried typist makes of "North":
+    kind 0 drops an inner letter, 1 doubles one, 2 swaps two neighbours. The
+    first and last characters stay put so the word still reads as itself.
+    Returns `value` unchanged when it is too short to misspell that way."""
+    inner = [i for i in range(1, len(value) - 1) if value[i].isalpha()]
+    if kind == 2:
+        inner = [i for i in inner if i + 1 in inner and value[i] != value[i + 1]]
+    if not inner:
+        return value
+    i = inner[int(rng.integers(0, len(inner)))]
+    if kind == 0:
+        return value[:i] + value[i + 1 :]
+    if kind == 1:
+        return value[: i + 1] + value[i:]
+    return value[:i] + value[i + 1] + value[i] + value[i + 2 :]
+
+
 @injector(7)
 def inject_d7(
     frame: pd.DataFrame,
@@ -468,11 +490,18 @@ def inject_d7(
     rng: np.random.Generator,
     columns: list[str] | None = None,
     rate: float = 0.1,
+    misspell: bool = False,
 ) -> pd.DataFrame:
     """case-spelling-variants: a REPEATED-vocab text column: rate of cells
     re-cased variants of the SAME value. The disease is one entity under
     several spellings, so it needs values that recur — a near-unique id
-    column recased is undetectable by construction and an unfair plant."""
+    column recased is undetectable by construction and an unfair plant.
+
+    misspell=True also plants small misspellings (a dropped, doubled or
+    swapped letter) of the same values, about half the planted cells. A
+    misspelling that lands on another value already in the column is a
+    different category, not a variant, so that cell is skipped. The default
+    draws exactly what it always drew, so existing entries don't move."""
     repeated = [
         c
         for c in _text_columns(frame)
@@ -483,17 +512,24 @@ def inject_d7(
     out = frame.copy()
     k = _count(rate, n)
     rows = rng.choice(n, size=k, replace=False)
-    variant_idx = rng.integers(0, 3, size=k)
+    kinds = _CASE_VARIANTS + (_SPELLING_VARIANTS if misspell else 0)
+    variant_idx = rng.integers(0, kinds, size=k)
+    vocab = {str(v).casefold() for v in frame[col].dropna().unique()}
     cells = []
     for row, v in zip(rows, variant_idx):
         row = int(row)
         original = frame[col].iat[row]
         text = str(original)
-        corrupted = _case_variant(text, int(v))
-        if corrupted == text:
-            corrupted = text.swapcase()  # always differs for alphabetic vocab
-        if corrupted == text:
-            continue  # no alphabetic material to recase — record no lie
+        if v >= _CASE_VARIANTS:
+            corrupted = _spelling_variant(text, int(v) - _CASE_VARIANTS, rng)
+            if corrupted.casefold() in vocab:
+                continue  # unchanged, or another real category — record no lie
+        else:
+            corrupted = _case_variant(text, int(v))
+            if corrupted == text:
+                corrupted = text.swapcase()  # always differs for alphabetic vocab
+            if corrupted == text:
+                continue  # no alphabetic material to recase — record no lie
         out.at[row, col] = corrupted
         cells.append(
             Cell(

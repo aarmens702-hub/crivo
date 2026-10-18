@@ -2419,7 +2419,7 @@ def _resolve_renames(df, wanted: list) -> dict:
     return resolved
 
 
-def detect_one(df, disease: int, columns) -> dict | None:
+def detect_one(df, disease: int, columns, grade: str | None = None) -> dict | None:
     """Re-run one signal scoped to one target. This is verification layer 1:
     the fix worked when the signal that found the disease stops firing (R4).
 
@@ -2460,6 +2460,10 @@ def detect_one(df, disease: int, columns) -> dict | None:
     residual that intersects the targets. What this does NOT cover, since
     intersection needs a name in common: a d17 split whose residual names only
     the new columns it created.
+
+    With `grade`, only a residual of that grade counts. The vanished-column
+    refusal above does not read `grade`: where it applies, it comes back
+    whatever grade was asked for.
     """
     if disease not in REGISTRY:
         raise ValueError(
@@ -2500,6 +2504,8 @@ def detect_one(df, disease: int, columns) -> dict | None:
     targets = set(wanted)
     anchor = wanted[0] if wanted else None
     for finding in findings:
+        if grade is not None and finding["grade"] != grade:
+            continue
         columns = finding["columns"]
         # Two ways a residual finding counts, and neither is equality.
         #

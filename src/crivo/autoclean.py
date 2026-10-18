@@ -648,6 +648,61 @@ def _why_deferred(finding: dict) -> dict:
     }
 
 
+_GRADES = ("AUTO", "GATE", "HUMAN")
+# the reasons on a finding the cleaned frame still carries that no review entry
+# names, so a summary never reads cleaner than the frame it returns: one no
+# pre-fix diagnosis carried (a correct fix made it readable), and a pre-fix
+# one left with no entry
+_UNCOVERED = "found once the fixes ran"
+_LEFT_OVER = "still present after the fixes ran"
+
+
+def _key(disease, grade, columns) -> tuple:
+    """A finding's identity across frames, the one detect_one reads: disease,
+    grade and leading column (d11's key, d25's first twin), or none for a
+    whole-table finding. Never its evidence or its other columns, which a
+    correct fix may change (a fold rewords the casings a spelling finding
+    quotes, or settles a key's repeats that differed only by case) without
+    making it a different finding."""
+    return (disease, grade, str(columns[0]) if columns else None)
+
+
+def _made_a_finding(before, after, disease, cols, grade) -> bool:
+    """True when a fix raised a finding of its own disease, on its target, at
+    another grade, that `before` did not carry. A residual of another grade
+    that was already open is a separate finding and does not fail the fix,
+    but one the fix created means it damaged the column: a case fold onto a
+    misspelling clears the case finding (AUTO) by coining a spelling one
+    (HUMAN). Re-runs only that disease on `before`, per grade with a
+    residual, never a full scan, and reads the first finding per grade;
+    clean()'s leftover pass lists whatever this misses."""
+    for other in _GRADES:
+        if other == grade:
+            continue
+        residual = detect_one(after, disease, cols, grade=other)
+        if residual is None:
+            continue
+        prior = detect_one(before, disease, cols, grade=other)
+        if prior is None or _key(disease, other, prior["columns"]) != _key(
+            disease, other, residual["columns"]
+        ):
+            return True
+    return False
+
+
+def _renamed_from(df, working, applied) -> dict:
+    """Final column name -> its name before the d18 header repair, which runs
+    after every other fix (and after d19's drops), so a leftover finding can
+    be matched to the review entry that named its column the old way. Empty
+    when no header repair applied, or when the columns don't line up."""
+    if not any(a["disease"] == 18 for a in applied):
+        return {}
+    dropped = {str(c) for a in applied if a["disease"] == 19 for c in a["columns"]}
+    kept = [str(c) for c in df.columns if str(c) not in dropped]
+    final = [str(c) for c in working.columns]
+    return dict(zip(final, kept)) if len(kept) == len(final) else {}
+
+
 def changed_cells(
     before: pd.DataFrame, after: pd.DataFrame, applied: list[dict], per_fix: int = 3
 ) -> list[dict]:
@@ -780,7 +835,12 @@ def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, CleanSummary]:
     """Deterministically clean a DataFrame. Returns (cleaned_frame, summary).
 
     The input is never mutated. Each auto-fix is verified — the detector must
-    re-run clean or the fix is discarded and the finding moved to review.
+    re-run clean at the fix's grade, and the fix must not raise a finding of
+    its disease at another grade on its columns, or the fix is discarded and
+    the finding moved to review. Every finding the cleaned frame still carries
+    has a needs_review entry of the same disease, grade and leading column:
+    one a correct fix uncovered gets the reason "found once the fixes ran",
+    and a pre-fix finding no entry names "still present after the fixes ran".
     """
     findings = detect_all(df)["findings"]
     working = df.copy()
@@ -810,7 +870,12 @@ def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, CleanSummary]:
         except Exception as exc:  # noqa: BLE001 — a broken fix is reported, not raised
             needs_review.append(_slim(finding, reason=f"fixer error: {exc}"))
             continue
-        if detect_one(candidate, disease, cols) is None:  # verified: signal gone
+        # a residual of the fix's own grade fails it; one of another grade
+        # fails it only if the fix created it (a HUMAN finding of the same
+        # disease already open on these columns is a different finding)
+        grade = finding["grade"]
+        cleared = detect_one(candidate, disease, cols, grade=grade) is None
+        if cleared and not _made_a_finding(working, candidate, disease, cols, grade):
             working = candidate
             applied.append(_slim(finding))
         else:
@@ -828,5 +893,21 @@ def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, CleanSummary]:
         ) is None:
             continue
         needs_review.append(_slim(finding, **_why_deferred(finding)))
+
+    # the fixed frame can carry findings the original did not show (typed
+    # zeros read as a placeholder, a footer bared by dropped columns), and
+    # every one no entry names is listed, matched by identity under its final
+    # or its pre-rename names, so a fix that changes a finding's other columns
+    # does not list it twice
+    listed = {_key(r["disease"], r["grade"], r["columns"]) for r in needs_review}
+    seen = {_key(f["disease"], f["grade"], f["columns"]) for f in findings}
+    back = _renamed_from(df, working, applied)
+    for finding in detect_all(working)["findings"]:
+        disease, grade, cols = finding["disease"], finding["grade"], finding["columns"]
+        old = [back.get(str(c), str(c)) for c in cols]
+        keys = {_key(disease, grade, cols), _key(disease, grade, old)}
+        if not listed & keys:
+            reason = _LEFT_OVER if seen & keys else _UNCOVERED
+            needs_review.append(_slim(finding, reason=reason))
 
     return working, CleanSummary(df, working, applied, needs_review)

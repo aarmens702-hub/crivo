@@ -233,14 +233,19 @@ def test_clean_makes_a_real_file_pass_its_own_detectors() -> None:
     assert df.equals(aa.read(src)), "the input frame was mutated"
 
 
-def test_clean_on_the_example_applies_the_safe_fixes_and_leaves_only_d09() -> None:
-    """Pins beside #24: a finding an applied fix cleared never comes back as a
-    review entry, so the README example still reads four fixes and one
-    deferral."""
+def test_clean_on_the_example_applies_the_safe_fixes_and_lists_what_is_left() -> None:
+    """Pins beside #24 and #25: a finding an applied fix cleared never comes
+    back as a review entry, and one the cleaned frame still carries is listed
+    (Aarmen, 2026-10-17). On the example, d01 makes revenue numeric, which
+    bares d15 outliers the string column hid; it is listed beside d09. diagnose
+    reports d15 checked and clean on the original, so the entry says the fixes
+    found it, not that it is still there (decided on #25, 2026-10-17)."""
     _cleaned, summary = aa.clean(aa.load_example())
 
     assert [a["disease"] for a in summary.applied] == [4, 6, 7, 1]
-    assert [r["disease"] for r in summary.needs_review] == [9]
+    assert [r["disease"] for r in summary.needs_review] == [9, 15]
+    d15 = next(r for r in summary.needs_review if r["disease"] == 15)
+    assert d15.get("reason") == "found once the fixes ran", d15
 
 
 def test_an_auto_finding_without_a_fixer_says_why() -> None:
