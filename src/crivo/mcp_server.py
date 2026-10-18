@@ -506,11 +506,12 @@ def build_server():
         policy: str = "auto",
         ctx: Context | None = None,
     ) -> dict:
-        """Clean a data file headlessly. Fixes are model-written, executed in
+        """Not sandboxed by default: this runs model-written Python as the
+        server user, with that user's files (including .env) and network. Set
+        CRIVO_MCP_SANDBOX=docker to run it in a container with no network.
+        Clean a data file headlessly. Fixes are model-written, executed in
         the server's kernel, and verified by re-running the detector plus row
-        and hash invariants; failures revert. That kernel is a host subprocess
-        with the server user's files and network unless the operator set
-        CRIVO_MCP_SANDBOX=docker, so the fixes it writes run with that access.
+        and hash invariants; failures revert.
         path must be inside the configured root (CRIVO_MCP_ROOT) and name,
         when given, must be a plain variable name. Only AUTO-grade fixes run:
         judgement-grade findings come back in needs_human for a person to
@@ -532,9 +533,11 @@ def build_server():
 
     @app.tool()
     def open_data(path: str) -> dict:
-        """Load a data file into a persistent kernel for conversational
-        analysis. That kernel is a host subprocess with the server user's
-        files and network unless the operator set CRIVO_MCP_SANDBOX=docker.
+        """Not sandboxed by default: the kernel this opens runs the
+        model-written Python that ask sends it, as the server user, with that
+        user's files (including .env) and network. Set CRIVO_MCP_SANDBOX=docker
+        to run it in a container with no network. Load a data file into a
+        persistent kernel for conversational analysis.
         The path must be inside the configured root (CRIVO_MCP_ROOT). Returns
         a session_id for ask/why/close_session and a schema/stats profile of
         the data. Use this when multiple questions will be asked over one
@@ -543,13 +546,15 @@ def build_server():
 
     @app.tool()
     def ask(session_id: str, question: str) -> dict:
-        """Ask a question over an open session. The inner analyst writes and
+        """Not sandboxed by default: this runs model-written Python as the
+        server user, with that user's files (including .env) and network. Set
+        CRIVO_MCP_SANDBOX=docker to run it in a container with no network.
+        Ask a question over an open session. The inner analyst writes and
         runs code cells against the loaded data and returns an answer card:
         the answer, the code, executed checks, and lineage back to the source
         file. Trust the card's checks, not the prose alone. Calling this runs
         model-authored code written from your question, un-gated, as the user
-        this server runs as — in a host subprocess with that user's files and
-        network unless the operator set CRIVO_MCP_SANDBOX=docker. Anything the
+        this server runs as. Anything the
         loop graded as a person's decision is skipped rather than approved on
         that person's behalf, and listed in unresolved_gates when it happens:
         if that list comes back, the answer was reached without it and a human

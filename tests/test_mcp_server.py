@@ -639,6 +639,93 @@ def test_no_tool_docstring_promises_a_sandbox_the_server_may_not_have() -> None:
         assert "CRIVO_MCP_SANDBOX" in tools[name].description
 
 
+def test_every_code_running_tool_opens_with_the_unsandboxed_default() -> None:
+    """#37: a calling agent reads "not sandboxed by default" as the first
+    sentence of every tool that runs model-written code, said once, up front,
+    instead of mid-paragraph. diagnose_file runs no model code, so it must not
+    carry the warning: a warning on every tool reads as boilerplate. ask keeps
+    its un-gated and unresolved_gates text."""
+    import asyncio
+
+    runs = (
+        "Not sandboxed by default: this runs model-written Python as the server "
+        "user, with that user's files (including .env) and network. Set "
+        "CRIVO_MCP_SANDBOX=docker to run it in a container with no network."
+    )
+    opens = (
+        "Not sandboxed by default: the kernel this opens runs the model-written "
+        "Python that ask sends it, as the server user, with that user's files "
+        "(including .env) and network. Set CRIVO_MCP_SANDBOX=docker to run it in "
+        "a container with no network."
+    )
+    openings = {
+        "clean_file": runs,
+        "open_data": opens,
+        "ask": runs,
+        "diagnose_file": None,
+        "why": None,
+        "close_session": None,
+    }
+    app = mcp_server.build_server()
+    tools = {t.name: t for t in asyncio.run(app.list_tools())}
+
+    wrong = []
+    for name, want in openings.items():
+        # the client sees the raw docstring; compare the words, not the wrap
+        text = " ".join(tools[name].description.split())
+        if want is None:
+            ok = "sandboxed by default" not in text.lower()
+        else:
+            ok = text.startswith(want) and "host subprocess" not in text
+        if not ok:
+            wrong.append({"tool": name, "opens": text[:80]})
+    assert not wrong, wrong
+
+    ask = " ".join(tools["ask"].description.split())
+    assert "un-gated" in ask
+    assert "unresolved_gates" in ask
+
+
+def _yaml_text(lines, at):
+    """The string value of the `key:` line at index `at`, inline or folded
+    (`>-`), the way a reader of action.yml sees it. The repo has no YAML
+    parser dependency, and action.yml only uses these two shapes."""
+    indent = len(lines[at]) - len(lines[at].lstrip())
+    inline = lines[at].split(":", 1)[1].strip()
+    parts = [] if inline in {">", ">-", "|", "|-"} else [inline.strip("\"'")]
+    for line in lines[at + 1 :]:
+        if not line.strip() or len(line) - len(line.lstrip()) <= indent:
+            break
+        parts.append(line.strip())
+    return " ".join(parts)
+
+
+def test_the_action_says_it_runs_no_model_code_and_lists_the_promised_formats() -> None:
+    """#37: the Action runs only `crivo diagnose`, so its description says
+    outright that it never runs model-written code, unlike the MCP tools. Its
+    path input lists the formats the issue chose to promise: csv, tsv and
+    parquet. diagnose reads more since #14; widening the promise is its own
+    change, and this assert moves with it."""
+    action = pathlib.Path(__file__).resolve().parents[1] / "action.yml"
+    text = action.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    top = next(i for i, line in enumerate(lines) if line.startswith("description:"))
+    path_key = lines.index("  path:")
+    path_desc = next(
+        i
+        for i in range(path_key + 1, len(lines))
+        if lines[i].strip().startswith("description:")
+    )
+
+    assert (
+        "Keyless: no model, no network, no configuration. "
+        "It never runs model-written code." in _yaml_text(lines, top)
+    )
+    assert _yaml_text(lines, path_desc) == "Data file to check (csv, tsv or parquet)"
+    assert "xlsx, json" not in text
+
+
 def test_the_file_tools_use_the_path_they_checked(tmp_path, monkeypatch) -> None:
     """The check resolved the path and then handed the client's ORIGINAL
     string downstream, so a symlink that pointed inside the root when it was
