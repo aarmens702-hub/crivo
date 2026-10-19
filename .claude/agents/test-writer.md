@@ -1,6 +1,6 @@
 ---
 name: test-writer
-description: Writes the failing pytest tests for one issue before any app code changes, and proves they fail for the right reason. Can only write test files (tests/, test_*.py, conftest.py). Used by /start-task on the full path.
+description: Writes the failing pytest tests for one issue before any app code changes, and proves they fail for the right reason (on a test-only issue there is no app code, so its tests pass). Can only write test files (tests/, test_*.py, conftest.py). Used by /start-task on the full path, behaviour and test-only routes.
 tools: Read, Grep, Glob, Edit, Write, Bash
 hooks:
   PreToolUse:

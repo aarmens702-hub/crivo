@@ -1,6 +1,6 @@
 ---
 name: start-task
-description: Begin work on a GitHub issue as its orchestrator - claim it, branch off dev in a worktree, size it, then run the specialist subagents (scout, test-writer, builder, reviewer) in order until it's ready for /ship. Use when the user says start/pick up/work on issue N, or asks what to work on next.
+description: Begin work on a GitHub issue as its orchestrator - claim it, branch off dev in a worktree, route it by type and size, then run the specialist subagents (scout, test-writer, builder, eval-author, reviewer) its route names until it's ready for /ship. Use when the user says start/pick up/work on issue N, or asks what to work on next.
 argument-hint: "[issue number] [full]"
 ---
 
@@ -28,7 +28,17 @@ The issue is an approved design, so don't brainstorm or write a spec. You are th
    - Branches always come off `dev` and stay local: `/ship` pushes the finished work straight to `dev`, then removes the worktree.
 
 ## 2. Size it (say which path and why, in one line)
-**Type first.** Read the issue's Type (AGENTS.md, "Work types"). `code` issues follow the paths below. For `behaviour`, `eval` or `experiment`, stop and tell the user: their tooling (the `/eval` skill, the eval-author agent, record and replay tests) lands before Stage 0.
+**Type first.** Read the issue's Type (AGENTS.md, "Work types"). It picks the route:
+
+| Type | Route |
+|---|---|
+| `code` | The full or lean path below, by size. |
+| `behaviour` | scout → test-writer (the harness change, on recorded model replies through `tests/replay.py`) → builder → `/eval` → reviewer. |
+| `eval` | eval-author → reviewer. |
+| `experiment` | builder (only if there is code) → `/eval` → reviewer → Aarmen decides. The ledger rows `/eval` committed reach `dev` through `/ship`; the rest of the branch is dropped unless he adopts it as a new issue. |
+| test-only: a `code` issue whose every file is under `tests/` (as in #66 and #79) | scout → test-writer → reviewer. The hook keeps the builder out of `tests/`. |
+
+`/eval` is never an agent's: you run it yourself.
 
 **Full path: scout → test-writer → builder → reviewer.** Use it if **any** of these is true:
 - The issue is labelled `core`, or would touch `loop.py`, `prompts.py`, `llm.py`, `card.py`, `skills.py`, `library.py`, `provenance.py` or `detect.py`.
@@ -44,18 +54,24 @@ The issue is an approved design, so don't brainstorm or write a spec. You are th
 If the user said `full`, or says it at any point, use the full path. Never go lean unless every lean rule holds.
 
 ## 3. Run the specialists
-Call each with the Agent tool, one at a time, and give it everything it needs, since it starts with no context:
-1. **scout** (full path only). Pass the issue text and the worktree path. If its map has Blockers, stop and show them to the user, and don't guess.
-2. **test-writer** (full path only). Pass the issue text, the change map and the worktree path. Check that it reports every new test failing for the right reason. If it can't make them fail properly, stop and show why.
-3. **builder**. Pass the issue text and the worktree path, plus the change map and test report on the full path.
+Call each one the route names with the Agent tool, one at a time, and give it everything it needs, since it starts with no context:
+1. **scout** (full path, behaviour, test-only). Pass the issue text and the worktree path. If its map has Blockers, stop and show them to the user, and don't guess.
+2. **test-writer** (full path, behaviour, test-only). Pass the issue text, the change map and the worktree path. Check that it reports every new test failing for the right reason. If it can't make them fail properly, stop and show why.
+   - **On test-only,** tell it there is no builder: its new tests must pass and `uv run pytest -q` must be green. Check that instead of fail-first.
+   - **On behaviour,** it tests the harness change. A change with no harness part (a prompt only) goes on to the builder as "Not testable automatically", and `/eval` measures it: a changed prompt gives a cassette only a `StaleCassette` warning, so a test that can't fail on it doesn't stop the route.
+3. **builder** (full and lean paths, behaviour, experiment with code). Pass the issue text and the worktree path, plus the change map and test report on the full path and behaviour.
    - It has 2 attempts to get the tests passing.
    - If it reports "Stuck" or a test it thinks is wrong, stop and show the user. They decide.
-4. **reviewer**. Pass the issue text, the branch name and the worktree path.
-   - **SHIP IT:** move on to the end.
-   - **FIX:** send the `[tests]` items to the **test-writer** first (the builder can't edit tests), then the rest to the builder, each **once**. Run the reviewer **once** more. If it still says FIX, stop and show the user both lists.
+4. **eval-author** (eval). Pass the issue text and the worktree path, and nothing that quotes the prompts, the loop, the referee, `detect.py` or `autoclean.py`. It never runs the bench on its own cases: run any bench line the issue asks for yourself.
+5. **`/eval`** (behaviour, experiment). Run the skill yourself, from the worktree root.
+   - On behaviour, run it again after any builder change, a reviewer FIX included, before the reviewer's next pass. An issue gets 2 results; a third needs Aarmen's yes (`/eval` step 3).
+   - A result that misses its rule goes back to the builder with only the dev split's totals and transcripts (`builder.md` rule 11), or to Aarmen.
+6. **reviewer** (every route). Pass the issue text, the branch name and the worktree path, plus on behaviour and experiment the transcripts `/eval` hands it.
+   - **SHIP IT:** move on to the end. On experiment, show Aarmen the result first: he decides.
+   - **FIX:** send the `[tests]` items to the **test-writer** first (the builder can't edit tests), then the rest to the builder, each **once**. On eval the eval-author takes the whole list, held to its step's filter: nothing that quotes the prompts, the loop, the referee, `detect.py` or `autoclean.py`. On test-only the test-writer takes it. Run the reviewer **once** more. If it still says FIX, stop and show the user both lists.
    - **Test notes** don't block. Pass them on to the user, and apply them only if they're cheap.
 
 Every subagent reply is a report: check it before passing anything on. Never fake a step. If an agent failed or was skipped, say so.
 
 ## 4. End
-Tell the user what was built, which tests prove it, the bench effect if any, and anything left for manual checking. If the reviewer listed core files, say plainly that `/ship` will stop for Aarmen's yes on the diff. Say that the reviewer already approved this diff, so `/ship` can skip its own review unless the code changes again.
+Tell the user what was built, which tests prove it, the bench effect if any, the ledger rows `/eval` reported on behaviour and experiment, and anything left for manual checking. If the reviewer listed core files, say plainly that `/ship` will stop for Aarmen's yes on the diff. If a reviewer said SHIP IT, say that it already approved this diff, so `/ship` can skip its own review unless the code changes again.

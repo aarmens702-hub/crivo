@@ -26,7 +26,7 @@ crivo is an agent, so a green test suite proves the code, not what the model doe
 | `eval` | Trap cases, graders, injectors, attacks | The oracle passes, no-op and cheating strategies fail, and the author never read the prompts, the loop or the referee. |
 | `experiment` | Bake-offs, loop runs, spikes | The hypothesis and decision rule are on the issue before the first paid call. The result is recorded, then adopted (as a new `code` or `behaviour` issue) or dropped. |
 
-- Until the eval tooling lands (before Stage 0), say plainly when a behaviour change is unmeasured. Never call it verified.
+- A behaviour change cites its adopted ledger row (`uv run python -m bench.ledger show --issue <n>`), or ships as `shipped-unmeasured` with Aarmen's yes (ED6). Never call it verified without an adopted result, and say plainly when it shipped unmeasured.
 - Never quote eval or trap cases in an issue, a prompt or a skill. Name the suite.
 
 ## Branches: dev is the workspace, main is tested
