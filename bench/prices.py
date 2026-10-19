@@ -33,6 +33,15 @@ PRICES: dict[str, dict] = {
         "it sends nothing anywhere, so it bills nothing",
         "checked": "2026-10-18",
     },
+    # Peak rates: off-peak is half, so a cost read off-peak is high, never low.
+    "deepseek:deepseek-v4-pro": {
+        "input": 1.32,
+        "cache_hit": 0.044,
+        "output": 3.96,
+        "source": "https://api-docs.deepseek.com/quick_start/pricing "
+        "(peak rates, model version DeepSeek-V4-Pro-0813)",
+        "checked": "2026-10-19",
+    },
 }
 
 
