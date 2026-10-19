@@ -1448,6 +1448,9 @@ def test_recording_a_smoke_case_the_deterministic_path_solves(tmp_path, monkeypa
     from crivo.kernel.client import KernelClient
 
     monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    # the loop flags at their defaults, whatever the shell holds (#233)
+    monkeypatch.delenv("CRIVO_M1", raising=False)
+    monkeypatch.delenv("CRIVO_PLAN_FIRST", raising=False)
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
     sessions: list = []
 
@@ -1510,6 +1513,8 @@ def test_recording_a_smoke_case_the_deterministic_path_solves(tmp_path, monkeypa
         "max_events": agent_run.DEFAULT_MAX_EVENTS,
         "wall_cap": agent_run.DEFAULT_WALL_CAP,
         "suffix": "",
+        "env": {"CRIVO_M1": None, "CRIVO_PLAN_FIRST": None},
+        "policy_records": [],
     }
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
@@ -1863,6 +1868,193 @@ def test_cassettes_written_into_the_checkout_do_not_mark_it_dirty(
 
     (checkout / "loop.py").write_text("STEP = 2\n")
     assert stamp("third_case")["dirty"] is True, "a changed tracked file is one"
+
+
+# --- what a replay needs to run the case as recorded (#233) -------------------
+# The loop shows each chunk of a reply as an event, and a dot every
+# HEARTBEAT_EVERY empty heartbeat chunks, so a replay has to send the chunks
+# the model sent. Each call keeps `chunks`: one int per chunk's length, and
+# each run of k heartbeats as one -k. The arm keeps the loop flags as they were
+# set (`env`) and the policy records the Session was handed.
+
+# A reply as a real model streams it: a cell in uneven pieces, then output the
+# model invented past the cell. The first piece names a branch with a
+# non-ASCII letter (56 characters, 57 bytes), so a length is in characters.
+_CELL_OPEN = "<execute>\nmask = df['branch'].str.strip() == 'São Paulo'"
+_CELL_BODY = "\ndf.loc[mask, 'amount'] = df.loc[mask, 'amount'].str.replace(',', '')"
+_CELL_CLOSE = "\n</execute>"
+_INVENTED = "\nOutput: 48213.07\n"
+
+# (what the provider sends, how many chunks reach the loop before a cap closes
+# the stream (None: drained, or until it raises), the chunks recorded). The
+# lengths are counted by hand: 56, 69, 11 and 18.
+CHUNKED_STREAMS = {
+    "drained to its end": (
+        [""] * 47 + [_CELL_OPEN, "", "", _CELL_BODY, _CELL_CLOSE, _INVENTED, ""],
+        None,
+        [-47, 56, -2, 69, 11, 18, -1],
+    ),
+    "failed after a run of heartbeats": (
+        ["", _CELL_OPEN, "", "", "", TimeoutError("gave up after 90s of silence")],
+        None,
+        [-1, 56, -3],
+    ),
+    "closed by a cap mid-reply": (
+        [""] * 21 + [_CELL_OPEN, _CELL_BODY, _CELL_CLOSE, _INVENTED],
+        23,
+        [-21, 56, 69],
+    ),
+    # a cap fires on an event, and mid-think the event is the loop's dot on
+    # the call's 20th heartbeat (HEARTBEAT_EVERY): 2 before the piece, 18 after
+    "closed by a cap mid-think": (
+        ["", "", _CELL_OPEN] + [""] * 25 + [_CELL_BODY],
+        21,
+        [-2, 56, -18],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", CHUNKED_STREAMS)
+def test_a_call_records_its_chunk_lengths_with_each_heartbeat_run_as_one_int(case):
+    """#233: a call keeps one int per chunk's length and each run of k
+    heartbeats as one -k, so a run of heartbeats costs one int, not one per
+    heartbeat (the 47-beat think below is one -47). The positive ints sum to the
+    reply's length whether the call was drained, failed or was closed by a
+    cap. A closed call keeps only the chunks that reached the loop, the run of
+    heartbeats the close cut short included. Lengths only, never the text."""
+    stream, take, expected = CHUNKED_STREAMS[case]
+
+    def provider_stream(messages, model=None):
+        for chunk in stream:
+            if isinstance(chunk, Exception):
+                raise chunk
+            yield chunk
+
+    calls: list = []
+    gen = _recorder()(provider_stream, calls)(
+        [{"role": "user", "content": "fix d01 on amount"}]
+    )
+    seen: list = []
+    try:
+        for chunk in gen:
+            seen.append(chunk)
+            if len(seen) == take:
+                gen.close()  # what a cap's close of the flow does to the call
+                break
+    except TimeoutError:
+        pass
+
+    sent = [c for c in stream if isinstance(c, str)][:take]
+    assert seen == sent, "every chunk reaches the loop unchanged"
+    (call,) = calls
+    assert call["reply"] == "".join(sent)
+    assert call.get("chunks") == expected
+    assert sum(n for n in call["chunks"] if n > 0) == len(call["reply"])
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {},
+        {"CRIVO_M1": "off"},
+        {"CRIVO_PLAN_FIRST": "on"},
+        {"CRIVO_M1": "off", "CRIVO_PLAN_FIRST": "ON"},
+    ],
+    ids=["both unset", "the pre-M1 flow", "plan first", "both set, one as typed"],
+)
+def test_the_arm_records_the_loop_flags_as_set_when_the_session_started(
+    tmp_path, monkeypatch, flags
+):
+    """#233: CRIVO_M1 and CRIVO_PLAN_FIRST change the clean flow, so the arm
+    keeps each as the shell held it (raw: "ON" stays "ON", which the loop
+    reads as off) and None when unset, for a replay to set back. Taken before
+    the Session starts: a flag changed mid-case is not the one the case
+    started with."""
+    import json
+
+    from crivo.events import StreamText
+
+    monkeypatch.delenv("CRIVO_M1", raising=False)
+    monkeypatch.delenv("CRIVO_PLAN_FIRST", raising=False)
+    for flag, value in flags.items():
+        monkeypatch.setenv(flag, value)
+
+    def clean(session):
+        monkeypatch.setenv("CRIVO_M1", "on")  # moved mid-case
+        monkeypatch.delenv("CRIVO_PLAN_FIRST", raising=False)
+        yield StreamText("stdout", "done")
+
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+
+    agent_run._run_case({"name": "flag_case", "diseases": [1]}, _record_args(rec_dir))
+
+    arm = json.loads((rec_dir / "flag_case.json").read_text())["arm"]
+    assert arm.get("env") == {
+        "CRIVO_M1": flags.get("CRIVO_M1"),
+        "CRIVO_PLAN_FIRST": flags.get("CRIVO_PLAN_FIRST"),
+    }
+
+
+def test_the_recorded_loop_flags_are_every_flag_the_loop_reads():
+    """#233: the arm records agent_run.LOOP_FLAGS. A CRIVO_ flag the loop reads
+    and the list leaves out would change a replay's flow unrecorded."""
+    import re
+    from pathlib import Path
+
+    from crivo import loop
+
+    source = Path(loop.__file__).read_text()
+    read = set(
+        re.findall(
+            r"""(?:os\.environ\.get\(|os\.getenv\(|os\.environ\[)\s*["'](CRIVO_\w+)""",
+            source,
+        )
+    )
+    assert read, "the loop reads no CRIVO_ flag: this test no longer finds them"
+    assert set(getattr(agent_run, "LOOP_FLAGS", ())) == read
+
+
+def test_the_arm_records_the_policy_records_the_session_was_handed(
+    tmp_path, monkeypatch
+):
+    """#233: `--policies auto` mints its record in `main`, so the arm keeps
+    each record the Session was handed, as PolicyRecord.to_dict writes it,
+    and PolicyRecord.from_dict rebuilds the same record from the cassette.
+    The default arm hands none and keeps [] (the smoke recording above)."""
+    import json
+
+    from crivo.events import StreamText
+    from crivo.policy import PolicyRecord
+
+    record = PolicyRecord(
+        id="bench-auto",
+        disease_ids=tuple(sorted(agent_run.FIXERS)),
+        approver="bench",
+        expires="2099-01-01",
+        mode="ENFORCE",
+        valid_disease_ids=set(agent_run.FIXERS),
+    )
+
+    def clean(session):
+        yield StreamText("stdout", "done")
+
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+
+    agent_run._run_case(
+        {"name": "pol_case", "diseases": [1]},
+        _record_args(rec_dir, policies="auto", policy_records=[record]),
+    )
+
+    arm = json.loads((rec_dir / "pol_case.policies-auto.json").read_text())["arm"]
+    assert arm.get("policy_records") == [record.to_dict()]
+    rebuilt = [
+        PolicyRecord.from_dict(d, set(agent_run.FIXERS)) for d in arm["policy_records"]
+    ]
+    assert rebuilt == [record]
 
 
 # --- the per-case dollar cap (EV9, #72) ---------------------------------------

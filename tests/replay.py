@@ -10,10 +10,14 @@ ledger, not here.
 A cassette (`bench.agent_run --record`, EV2) keeps each model reply and only
 digests of the rest, so a replay rebuilds the data from the corpus seed. The
 live corpus entry is the one that runs, never the JSON copy in the cassette (a
-JSON round trip turns int keys into strings). The recorded replies are queued
-on the faux provider, a recorded provider error is raised again at its call's
-index, and the case runs through `bench.agent_run._run_case`, exactly as the
-bench runs it.
+JSON round trip turns int keys into strings). The case runs through
+`bench.agent_run._run_case`, exactly as the bench runs it, on the arm the
+cassette recorded: the loop flags set from `arm.env` and the policy records
+rebuilt from `arm.policy_records`. Each recorded reply is sent in the chunks
+the model sent, heartbeats included (`calls[].chunks`), so the loop yields the
+same events, and a recorded provider error is raised again at its call's
+index. A cassette recorded before #233 has none of those fields and replays as
+it did then: each reply in one chunk, both flags unset, no policy records.
 
 - Hard failures: a different number of model calls, a call that completes or
   fails differently, a different outcome (status, gates, records, cleaned
@@ -54,6 +58,7 @@ from bench.truth import frame_sha256
 from crivo import llm, pii
 from crivo.events import Notice
 from crivo.kernel.client import KernelClient
+from crivo.policy import PolicyRecord
 from crivo.readers.remote import READER_ENV_VARS
 
 CASSETTES = Path(__file__).resolve().parent / "cassettes"
@@ -61,9 +66,6 @@ CASSETTES = Path(__file__).resolve().parent / "cassettes"
 # model, or one with scripted faux replies. Nothing else until a licence list
 # exists (D24)
 KINDS = ("corpus", "fixture")
-# The arm does not record these yet, so every cassette is recorded and
-# replayed with both unset (the loop's defaults).
-PINNED_UNSET = ("CRIVO_M1", "CRIVO_PLAN_FIRST")
 MAX_BYTES = 200_000
 _EXEC_KEYS = (
     "code_sha256",
@@ -222,26 +224,54 @@ def bench_args(record_dir, **arm) -> argparse.Namespace:
     return argparse.Namespace(**{**base, **arm})
 
 
+def _policy_records(cassette: dict, label: str) -> list:
+    """The policy records the arm handed its Session, rebuilt as `main` mints
+    them: PolicyRecord.from_dict over the registered fixers' disease ids. A
+    policies arm recorded before #233 kept none, so there is nothing to
+    rebuild it from and it is refused; a value that is not a list, or a
+    record that no longer validates, is refused too. No refusal quotes a
+    record."""
+    arm = cassette.get("arm") or {}
+    policies = arm.get("policies") or "none"
+    kept = arm.get("policy_records")
+    if kept is None:
+        if policies != "none":
+            raise AssertionError(
+                f"{label}: recorded with a policies arm and no policy records "
+                "(before #233); " + rerecord_hint(cassette)
+            )
+        return []
+    if not isinstance(kept, list):
+        # an empty {} or "" would rebuild as none; refused as a bad cassette
+        raise AssertionError(  # noqa: TRY004
+            f"{label}: arm.policy_records is not a list; " + rerecord_hint(cassette)
+        )
+    try:
+        return [PolicyRecord.from_dict(d, set(agent_run.FIXERS)) for d in kept]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AssertionError(
+            f"{label}: arm.policy_records no longer rebuild "
+            f"({type(exc).__name__}); " + rerecord_hint(cassette)
+        ) from None
+
+
 def arm_args(cassette: dict, record_dir) -> argparse.Namespace:
-    """The arm the cassette recorded, rebuilt.
+    """The arm the cassette recorded, rebuilt, its policy records included.
 
     A recorded abort replays with the event cap one below the recorded event
-    count and no wall cap: the cap fires on the event after max_events. For a
-    faux-recorded cassette, which streams one chunk per reply live and on
-    replay alike, the replay stops where the live run did, whichever cap fired
-    then. A real-model reply arrives in many chunks, each one an event, and
-    replays as one, so placing a real-model abort waits for #233 (the recorder
-    keeping chunk counts) and EV16 (#79)."""
+    count and no wall cap: the cap fires on the event after max_events. The
+    replay sends each reply in the chunks recorded live (#233), so it stops
+    on the event the live run stopped on, whichever cap fired then. A
+    cassette recorded before #233 keeps no chunks and replays each reply as
+    one, which is how faux sent it live; a real-model abort on such a
+    cassette cannot be placed (EV16, #79)."""
     label = _label(cassette)
     arm = cassette.get("arm") or {}
     if arm.get("docker"):
         raise AssertionError(
             f"{label}: recorded with --docker; replay runs the host kernel only"
         )
-    if (arm.get("policies") or "none") != "none":
-        raise AssertionError(
-            f"{label}: recorded with a policies arm; replay has no policy records"
-        )
+    records = _policy_records(cassette, label)
     max_events, wall_cap = arm["max_events"], arm["wall_cap"]
     outcome = cassette.get("outcome") or {}
     if str(outcome.get("status", "")).startswith("aborted"):
@@ -261,16 +291,42 @@ def arm_args(cassette: dict, record_dir) -> argparse.Namespace:
         max_events=max_events,
         wall_cap=wall_cap,
         human_gates=arm.get("human_gates", "skip"),
+        policies=arm.get("policies") or "none",
         autonomy=autonomy,
+        policy_records=records,
     )
 
 
 def offline_env(monkeypatch) -> None:
     """Keyless and offline, whatever the shell holds: the faux provider, no
     credential or tuning variable, and the loop flags at their defaults."""
-    for var in (*llm.KEY_ENV_VARS, *READER_ENV_VARS, *PINNED_UNSET):
+    for var in (*llm.KEY_ENV_VARS, *READER_ENV_VARS, *agent_run.LOOP_FLAGS):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+
+
+def loop_env(cassette: dict, monkeypatch) -> None:
+    """The loop flags as the arm recorded them, after `offline_env` unset
+    them: a string is set as it was typed, None stays unset. A cassette from
+    before #233 keeps no arm.env and replays with every flag unset, as it was
+    recorded. Only agent_run.LOOP_FLAGS are read, so a cassette sets no other
+    variable (a provider or a key least of all). An arm.env that is there and
+    not an object, or a flag that is neither a string nor null, is refused."""
+    label = _label(cassette)
+    env = (cassette.get("arm") or {}).get("env")
+    if env is None:  # missing or null; [], "" and 0 are not absent, so refused
+        env = {}
+    if not isinstance(env, dict):
+        # refused like any other bad cassette, so it fails the replay as one
+        raise AssertionError(f"{label}: arm.env is not an object")  # noqa: TRY004
+    for flag in agent_run.LOOP_FLAGS:
+        value = env.get(flag)
+        if value is None:
+            monkeypatch.delenv(flag, raising=False)
+        elif isinstance(value, str):
+            monkeypatch.setenv(flag, value)
+        else:
+            raise AssertionError(f"{label}: arm.env.{flag} is not a string or null")
 
 
 # --- the seams ---------------------------------------------------------------
@@ -288,21 +344,90 @@ def _exception(error: dict) -> Exception:
     return type(name, (Exception,), {})(error.get("message", ""))
 
 
+# A heartbeat is one streamed reasoning delta, a token or more, and a call
+# lasts at most llm.MAX_CALL_S (420 s by default): a million in one call is
+# over 2,000 a second for the whole of it, far past what a provider crivo calls
+# streams (Claude's whole budget is llm.CLAUDE_MAX_TOKENS, 32,000). A million
+# empty chunks is 8 MB of list; a hand-made -10**9 would be gigabytes, so a
+# call over the bound is refused before anything is built.
+MAX_HEARTBEATS = 1_000_000
+
+
+def _checked_chunks(call: dict, i: int) -> list[int] | None:
+    """Call `i`'s recorded chunks, checked without building them: None for a
+    call recorded before #233, which keeps none. Fails naming calls[i], never
+    the text (a reply can quote what the model saw), when they are not a list
+    of whole numbers, when the positive ones do not add up to the reply, or
+    when the heartbeats are more than MAX_HEARTBEATS."""
+    reply = call.get("reply") or ""
+    chunks = call.get("chunks")
+    if chunks is None:
+        return None
+    if not isinstance(chunks, list) or not all(
+        isinstance(n, int) and not isinstance(n, bool) for n in chunks
+    ):
+        raise AssertionError(f"calls[{i}].chunks is not a list of whole numbers")
+    total = sum(n for n in chunks if n > 0)
+    if total != len(reply):
+        raise AssertionError(
+            f"calls[{i}].chunks add up to {total} characters, "
+            f"its reply has {len(reply)}"
+        )
+    beats = -sum(n for n in chunks if n < 0)
+    if beats > MAX_HEARTBEATS:
+        raise AssertionError(
+            f"calls[{i}].chunks hold {beats} heartbeats, over the "
+            f"{MAX_HEARTBEATS} one call can stream"
+        )
+    return chunks
+
+
+def _recorded_chunks(call: dict, i: int) -> list[str]:
+    """The chunks recorded call `i` sent, cut from its reply: each positive
+    int is the next that many characters, each -k is k empty heartbeat
+    chunks. A call with no `chunks` (recorded before #233) is sent whole, as
+    faux sent it. Chunks `_checked_chunks` refuses are never built."""
+    reply = call.get("reply") or ""
+    chunks = _checked_chunks(call, i)
+    if chunks is None:
+        return [reply]
+    out: list[str] = []
+    start = 0
+    for n in chunks:
+        if n < 0:
+            out.extend([""] * -n)
+        else:
+            out.append(reply[start : start + n])
+            start += n
+    return out
+
+
 def _replaying_generate(orig, recorded: list, asked: list):
-    """`orig` (llm.generate on the faux provider) behind a call counter. A
-    recorded call with an error sends what arrived before it, then raises it
-    again; every other call, an unrecorded one included, goes to `orig`, so
-    one the cassette does not have meets the empty faux queue."""
+    """`orig` (llm.generate on the faux provider) behind a call counter.
+
+    A recorded call sends its recorded chunks, heartbeats included. One that
+    did not fail drains `orig` first, so its queued faux reply is used up and
+    the faux path (the watchdog, the telemetry span) runs as for a live call;
+    what reaches the loop is the recorded chunks. A recorded error is raised
+    again after its chunks, without reaching `orig`. A call the cassette does
+    not have goes to `orig` and meets the empty faux queue. `run` checks every
+    call's chunks before the case starts: raised here, a mismatch would reach
+    the loop as a provider error and the case would go on."""
 
     def generate(messages, model=None):
         i = len(asked)
         asked.append(i)
-        call = recorded[i] if i < len(recorded) else {}
+        if i >= len(recorded):
+            yield from (orig(messages) if model is None else orig(messages, model))
+            return
+        call = recorded[i]
+        chunks = _recorded_chunks(call, i)
         if call.get("error"):
-            if call.get("reply"):
-                yield call["reply"]
+            yield from chunks
             raise _exception(call["error"])
-        yield from (orig(messages) if model is None else orig(messages, model))
+        for _ in orig(messages) if model is None else orig(messages, model):
+            pass  # the queued faux reply, used up; the recorded chunks are sent
+        yield from chunks
 
     return generate
 
@@ -353,17 +478,29 @@ def run(cassette: dict, tmp_path, monkeypatch) -> dict:
     """Replay `cassette` once and return what happened, compared with nothing:
     the cassette the replay recorded, how many model calls it made, how many
     recorded replies were never asked for, the notices the flow showed, and
-    the code digests of cells that embed the run's own tmp path."""
+    the code digests of cells that embed the run's own tmp path.
+
+    Every call's chunks are checked before the case starts, without building
+    them, so a cassette whose chunks do not add up to a reply, or hold more
+    heartbeats than a call can stream, is refused rather than replayed."""
     tmp_path = Path(tmp_path)
+    recorded = cassette.get("calls") or []
+    for i, call in enumerate(recorded):
+        try:
+            _checked_chunks(call, i)
+        except AssertionError as exc:
+            raise AssertionError(
+                f"{_label(cassette)}: {exc}; " + rerecord_hint(cassette)
+            ) from None
     entry, _, _ = rebuild(cassette)
     record_dir = tmp_path / "replayed"
     record_dir.mkdir(parents=True, exist_ok=True)
     args = arm_args(cassette, record_dir)
 
     offline_env(monkeypatch)
+    loop_env(cassette, monkeypatch)
     monkeypatch.setattr(llm, "_faux_responses", [])  # isolate the queue
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
-    recorded = cassette.get("calls") or []
     llm.faux_enqueue(*(c.get("reply") or "" for c in recorded if not c.get("error")))
     asked: list = []
     monkeypatch.setattr(

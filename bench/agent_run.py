@@ -42,6 +42,11 @@ RESULTS_DIR = Path("bench/results/agent")
 DEFAULT_MAX_EVENTS = 8000
 DEFAULT_WALL_CAP = 300.0
 
+# The env flags that change the clean flow (crivo/loop.py). A cassette's arm
+# keeps each as set when the case started (None when unset), so a replay can
+# set them back.
+LOOP_FLAGS = ("CRIVO_M1", "CRIVO_PLAN_FIRST")
+
 
 class CaseAborted(Exception):
     """A cap fired; the case is recorded and the run moves on (R4).
@@ -338,7 +343,10 @@ def _recording_generate(orig, calls: list):
     starts, so a call that never finishes is still in `calls`. The loop
     drains a stream to its end, so `reply` is the whole raw text, past any
     `</execute>` cut. A stream closed mid-reply (a cap's `gen.close()`) is
-    incomplete, not an error: GeneratorExit is not an Exception."""
+    incomplete, not an error: GeneratorExit is not an Exception. `chunks`
+    keeps each chunk's length in characters, and each run of k empty
+    heartbeat chunks as one -k, so a replay can send the chunks the model
+    sent; its positive ints sum to len(reply). Lengths only, never text."""
 
     def generate(messages, model=None):
         messages = list(messages)  # listed once, and this same list passed on
@@ -356,24 +364,34 @@ def _recording_generate(orig, calls: list):
             "model": name,
             "params": params,
             "reply": "",
+            "chunks": [],
             "complete": False,
             "error": None,
             "dur_s": None,
         }
         calls.append(call)
         parts: list = []
+        beats = 0  # the open run of heartbeats, written out as one -k
         t0 = time.monotonic()
         try:
             stream = orig(messages) if model is None else orig(messages, model)
             for chunk in stream:
                 if chunk:
+                    if beats:
+                        call["chunks"].append(-beats)
+                        beats = 0
                     parts.append(chunk)
+                    call["chunks"].append(len(chunk))
+                else:
+                    beats += 1
                 yield chunk
             call["complete"] = True
         except Exception as exc:
             call["error"] = {"type": type(exc).__name__, "message": str(exc)}
             raise
         finally:
+            if beats:  # a cap can close the call mid-think
+                call["chunks"].append(-beats)
             call["reply"] = "".join(parts)
             call["dur_s"] = round(time.monotonic() - t0, 3)
 
@@ -615,6 +633,12 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     over_cap = (lambda: spend["tripped"]) if cap is not None else None
     calls: list = []
     execs: list = []
+    # #233: what the Session starts with, taken before it is built: a flag
+    # moved mid-case is not the one the case ran under
+    flags = {n: os.environ.get(n) for n in LOOP_FLAGS}
+    policy_records = [
+        p.to_dict() for p in (getattr(args, "policy_records", None) or [])
+    ]
     cleaned = None
     abort_events = None
     real_generate = llm.generate
@@ -690,6 +714,8 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
             "max_events": args.max_events,
             "wall_cap": args.wall_cap,
             "suffix": suffix,
+            "env": flags,
+            "policy_records": policy_records,
         }
         outcome = {
             "status": row["status"],
