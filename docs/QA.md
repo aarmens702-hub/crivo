@@ -36,7 +36,7 @@
   import crivo as cv, pandas as pd
   df = cv.load_example(); r = cv.diagnose(df); cleaned, s = cv.clean(df)
   ```
-- **No key needed for INST, LIB, CLI, MCP and BENCH.** The analyst cases (AN) run free on the faux provider (`CRIVO_PROVIDER=faux`), which replays canned replies queued with `crivo.llm.faux_enqueue()` in the same process. Cases marked **costs money** call a real model and need a real `DEEPSEEK_API_KEY`; run them only when Aarmen asks.
+- **No key needed for INST, LIB, CLI, MCP and BENCH.** The analyst cases (AN) run free on the faux provider (`CRIVO_PROVIDER=faux`), which replays canned replies queued with `crivo.llm.faux_enqueue()` in the same process. On faux they test the plumbing, not what the model does. Cases marked **costs money** call a real model and need a real `DEEPSEEK_API_KEY`; run them only when Aarmen asks. When the result of a paid case (AN-07, AN-08) will be cited, run it through the `/eval` skill so it lands in the ledger (`bench/ledger.jsonl`).
 - **Never** run `--docker` or `pytest -m docker`. Docker is not allowed on Aarmen's Mac.
 
 ## Install (INST)

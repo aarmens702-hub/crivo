@@ -16,3 +16,5 @@ None
 - [ ] `uv run ruff check .` and `uv run pytest -q` pass locally
 - [ ] Bench smoke run if detection, fixing or the bench changed (before → after in the body)
 - [ ] No secrets, no raw dataset rows in any output, no stray debug code
+- [ ] Ledger rows since the last promotion: <row ids, or none>
+- [ ] Behaviour commits without an adopted or shipped-unmeasured row: none
