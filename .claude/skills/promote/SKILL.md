@@ -14,6 +14,14 @@ description: Promote dev to main after a quick test - run the local checks on de
      - **Both are there but the README's "In CI" example doesn't show `crivo@vX.Y.Z`:** step 4 pins it.
    - If there's nothing on `dev` that isn't on `main` (`git log --oneline origin/main..dev` is empty): with the tag missing, go straight to step 5's tag substeps (no PR); with nothing to resume, say so and stop.
 2. **Checks locally.** `uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest -q` and `uv run python -m bench.run --smoke`. Stop on any failure.
+   - **Re-measure behaviour.** If `git log --oneline origin/main..dev -- src/crivo/llm.py $(uv run python -c "from bench import ledger; print(*ledger.PROMPT_FILES, *ledger.REFEREE_FILES, *ledger.SCORER_FILES)")` (the model calls, plus the prompt, referee and scorer files the ledger hashes) is not empty, run `/eval` on the regression split, `agent-clean-smoke` on dev until 0a, at k = 3.
+     - A run costs money: Aarmen names the caps after `/eval`'s dry run, as it says. `/eval` also needs an `experiment` issue whose Measurement is this check: file one with `/new-task` and run it in that issue's worktree off `dev`. `/ship` its rows once this promotion is done, so `dev` doesn't move under it.
+     - Compare it with the last adopted row on `main` for that suite, on pass@1 over model cases, the measure the A/A floor uses (not pass@1 over all cases). This prints a result's scorer and suite hashes, then each arm's model, served models and model-case pass@1, or "none" and why. Run it on `main`'s ledger for the adopted row (the file is empty when `main` has no ledger yet), and from the issue's worktree as `… bench/ledger.jsonl <result row>` for the new run:
+       ```
+       git show origin/main:bench/ledger.jsonl > <scratchpad>/main-ledger.jsonl
+       uv run python -c "import sys; from bench import ledger; p = sys.argv[1]; by = {r['row_id']: r for r in ledger.read(p)}; ad = [d['result'] for d in ledger.rows(kind='decision', suite='agent-clean-smoke', path=p) if d['decision'] == 'adopted']; res = by.get(sys.argv[2] if sys.argv[2:] else (ad or [None])[-1]); print(res['row_id'], 'scorer', res['fingerprints']['scorer']['sha256'][:12], 'suite', res['suite_hash']['sha256'][:12]) if res else print('no adopted row for agent-clean-smoke'); [print(' ', a['name'], a['provider'] + ':' + a['model'], 'served', ','.join(res['served_models'].get(a['name']) or ['none']), 'model-case pass@1', (lambda s: s['model_cases']['pass_at_1'] if s['model_cases'] else 'none (' + s['model_cases_reason'] + ')')(res['arms'][a['name']])) for a in (by[res['registered']]['arms'] if res else [])]" <scratchpad>/main-ledger.jsonl
+       ```
+     - Compare only like with like: the same scorer hash, suite hash and models. A drop larger than the A/A noise floor (`/eval`'s Judge step) stops the promotion. On a mismatch, a "none", no adopted row or no floor, say so plainly and ask Aarmen.
 3. **Walk the demo story** in `docs/PRD.md`, the way a new user would:
    - Install `dev` into a fresh venv in the scratchpad (`uv venv --python 3.12` then `uv pip install <repo root>`), not the repo's own `.venv`.
    - Run the README quickstart exactly as written, then `crivo diagnose` on the example with `--fail-on GATE` (exit 0) and `--fail-on AUTO` (exit 1).
@@ -35,7 +43,8 @@ description: Promote dev to main after a quick test - run the local checks on de
 5. **Decide.**
    - **Demo story works:**
      - Record the sha to promote: `git rev-parse HEAD`, which is step 4's push, or step 1's pull when step 4 committed nothing.
-     - Open `gh pr create --base main --head dev --title "Promote dev → main (<date>)" --body "<what's new since the last promotion, from git log origin/main..dev; the checks and the demo walk results>"`. After a restart, reuse the open dev → main PR instead of running `gh pr create` again.
+     - Open `gh pr create --base main --head dev --title "Promote dev → main (<date>)" --body "<what's new since the last promotion, from git log origin/main..dev; the ledger rows added since then; the checks, the re-measure and the demo walk results>"`. After a restart, reuse the open dev → main PR instead of running `gh pr create` again.
+       - The ledger rows, one line each: `n=$(git show origin/main:bench/ledger.jsonl 2>/dev/null | wc -l)`, then `uv run python -m bench.ledger show | tail -n +$((n + 1))`. Never the raw diff of `bench/ledger.jsonl`: its result rows name cases.
      - Wait for CI on the PR: `gh pr checks <pr> --watch`. If it goes red, don't merge: show the failure.
      - Then merge it: `gh pr merge <pr> --merge --match-head-commit <that sha>`. This keeps `dev`'s commits as they are, and never deletes `dev`. If gh refuses because the head moved, treat it like a rejected push (step 4's last bullet): start again from step 1.
      - If step 4 cut a release or resumed an untagged one, tag it and publish it:
@@ -43,4 +52,4 @@ description: Promote dev to main after a quick test - run the local checks on de
        - `gh release create vX.Y.Z --title "crivo X.Y.Z" --notes-file <that CHANGELOG section saved to the scratchpad>`
      - Then run `git switch dev && git pull`.
    - **Something broke:** don't promote. List what broke. Offer to file each as a `bug` issue.
-6. **Report.** Say what went to `main`, with the PR link, or why not, and the release link if one was cut or resumed. If the README's bench block changed on `dev`, say the published numbers changed too.
+6. **Report.** Say what went to `main`, with the PR link, or why not, and the release link if one was cut or resumed. If step 2 re-measured, give its result row id and how it stood against the floor. If the README's bench block changed on `dev`, say the published numbers changed too.
