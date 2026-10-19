@@ -41,6 +41,13 @@ EV9 (#72), where the issue leaves it open:
   registered caps; decide --adopted hashes the files committed at HEAD and
   refuses when the working tree drifts from them; an A/A pair whose arms ran
   unequal numbers of runs gets no noise floor.
+
+#73, the scout's calls taken on the issue:
+- Each run's Session output (its data profile among it) goes to
+  bench/results/eval/<row id>/<arm>/logs/<case>.r<run>.log, never to the
+  terminal; stdout keeps the per-case lines, the per-arm screens and the
+  summary. The closing lines, and the refusal when a case raises, name a logs
+  dir by a path that holds the row id.
 """
 
 import copy
@@ -1201,6 +1208,149 @@ def test_run_prints_one_screen_per_arm(tmp_path, monkeypatch, capsys):
     assert secret not in text, "the key was printed"
 
 
+# --- run: where each case's Session output goes (#73) -------------------------
+
+
+def _said(ev, argv, capsys):
+    """Run the CLI: (exit code, its stdout, its stderr), kept apart, since
+    _call merges them. A refusal's text is the exit code."""
+    try:
+        code = ev.main(argv)
+    except SystemExit as exc:
+        code = exc.code
+    said = capsys.readouterr()
+    return code, said.out, said.err
+
+
+def _profile_text(marker: str) -> str:
+    """A stand-in for what a Session prints while it boots, loads and profiles
+    a case: schema, stats and truncated samples (ids with leading zeros, a
+    sentinel, mixed date and decimal formats), marked with `marker`."""
+    return "\n".join(
+        [
+            "starting kernel (subprocess) …",
+            f"profile of df [{marker}]: 1,204 rows x 4 columns",
+            "  account_id  object  1,204 non-null  e.g. 00417, 00981, 01133",
+            "  posted_on   object  1,198 non-null  e.g. 2026-03-04, 04/03/2026",
+            "  amount      object  1,204 non-null  e.g. 1.204,50, -99999, N/A",
+            "  memo        object    611 non-null  e.g. ' ACH  REF', 'wire'",
+            f"loaded df.parquet → df (ev 1) [{marker}]",
+        ]
+    )
+
+
+def _chatty(monkeypatch, arms: dict) -> dict:
+    """agent_run._run_case as it is set now (_fake_run_case's fake), made to
+    print a stand-in data profile first, as a Session does. `arms` maps each
+    arm's CRIVO_MODEL to its name; each (arm, case) counts its runs from 1.
+    Returns each run's marker, keyed by (arm, case, run)."""
+    inner = agent_run._run_case
+    markers, seen = {}, {}
+
+    def case(entry, args):
+        arm, name = arms[os.environ.get("CRIVO_MODEL")], entry["name"]
+        run = seen[(arm, name)] = seen.get((arm, name), 0) + 1
+        marker = markers[(arm, name, run)] = f"session-output-{arm}-{name}-r{run}"
+        print(_profile_text(marker))
+        return inner(entry, args)
+
+    monkeypatch.setattr(agent_run, "_run_case", case)
+    return markers
+
+
+def _logs_holding(top: Path, marker: str) -> list[Path]:
+    """Every .log file under `top` whose text holds `marker`."""
+    return [p for p in sorted(top.rglob("*.log")) if marker in p.read_text()]
+
+
+def _per_case(lines) -> list[str]:
+    """The `<arm> <case> r<run>` heading each per-case line among `lines`."""
+    heads = []
+    for line in lines:
+        head, sep, _ = line.partition(": ")
+        parts = head.split(" ")
+        run = parts[-1] if len(parts) == 3 else ""
+        if sep and run.startswith("r") and run[1:].isdigit():
+            heads.append(head)
+    return heads
+
+
+def _names_the_logs(text: str, reg: dict) -> bool:
+    """Whether `text` names a logs dir by a path that holds the run's row id."""
+    return any(reg["row_id"] in word and "logs" in word for word in text.split())
+
+
+def test_each_cases_session_output_goes_to_its_log_not_the_terminal(
+    tmp_path, monkeypatch, capsys
+):
+    """#73: each case's Session prints its data profile, about 2,800 lines
+    for the full suite at k=3 with 2 arms, and the /eval skill reads what a
+    run prints. So each run's Session output goes to its own log,
+    <row id>/<arm>/logs/<case>.r<run>.log, and the terminal keeps every
+    per-case line, every arm's screen and the summary, whose closing lines
+    say where the logs are."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=CASES)
+    reg = _register(ev, capsys, *SPLIT_ARMS)
+    _fake_run_case(monkeypatch, _split_row)
+    markers = _chatty(monkeypatch, {"m1": "a1", "m2": "a2"})
+    code, out, err = _said(ev, ["run", "--registered", reg["row_id"]], capsys)
+    assert _ok(code), "run was refused"
+    assert len(markers) == 2 * len(CASES) * 3, "not every run printed"
+
+    loud = [m for m in markers.values() if m in out or m in err]
+    assert len(loud) == 0, f"{len(loud)} runs' Session output reached the terminal"
+    assert "account_id" not in out + err, "a data profile reached the terminal"
+
+    lines = out.splitlines()
+    want = sorted(f"{a} {c} r{r}" for a, c, r in markers)
+    assert sorted(_per_case(lines)) == want, "a per-case line went missing"
+    for arm in ("a1 (faux:m1)", "a2 (faux:m2)"):
+        assert arm in lines, f"no screen for {arm}"
+    assert any(line.startswith("result ") for line in lines), "no summary"
+
+    top = _eval_dir(root, reg)
+    for (arm, case, run), marker in markers.items():
+        log = top / arm / "logs" / f"{case}.r{run}.log"
+        assert _logs_holding(top, marker) == [log], f"{arm} {case} r{run}'s log"
+    tail = "\n".join(lines[lines.index("a1 (faux:m1)") :])
+    assert _names_the_logs(tail, reg), "the closing lines never say where the logs are"
+
+
+def test_a_case_that_prints_then_raises_leaves_its_output_in_its_log(
+    tmp_path, monkeypatch, capsys
+):
+    """#73: a case whose Session printed, then raised, still keeps that output
+    in its log and off the terminal; the refusal still says what raised and
+    names the logs dir, and stdout is the terminal's again afterwards."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=CASES)
+    reg = _register(ev, capsys, "a1=faux:m")
+
+    def raising(model, name, i):
+        if name == "tx-dates-mixed":
+            raise KeyError(f"acct {LEAKED_VALUE}")
+        return _row(name, "ok", 1.0, 0, 5.0)
+
+    _fake_run_case(monkeypatch, raising)
+    markers = _chatty(monkeypatch, {"m": "a1"})
+    code, out, err = _said(ev, ["run", "--registered", reg["row_id"]], capsys)
+    assert not _ok(code), "a run whose case raised exited 0"
+    refusal = code if isinstance(code, str) else ""
+    assert "raised KeyError" in refusal
+
+    marker = markers[("a1", "tx-dates-mixed", 1)]
+    leaked = marker in out + err + refusal
+    assert not leaked, "the raising case's Session output reached the terminal"
+    top = _eval_dir(root, reg)
+    assert _logs_holding(top, marker) == [top / "a1" / "logs" / "tx-dates-mixed.r1.log"]
+    assert _per_case(out.splitlines()) == ["a1 tx-whitespace r1"]
+    assert _names_the_logs(refusal, reg), "the refusal never says where the logs are"
+    assert LEAKED_VALUE not in out + err + refusal, "the exception's text was printed"
+
+    assert not getattr(sys.stdout, "closed", False), "stdout was left closed"
+    print("after the refusal")
+    assert "after the refusal" in capsys.readouterr().out, "stdout was not put back"
+
+
 def test_served_models_count_the_runs_whose_telemetry_was_unread(
     tmp_path, monkeypatch, capsys
 ):
@@ -1894,12 +2044,27 @@ def test_one_faux_run_on_a_smoke_case_writes_a_registered_and_a_result_row(
     """Done when 3: the real agent_run._run_case on a real subprocess kernel,
     under faux. tx-whitespace is solved by the registered whitespace fixer
     behind one plain gate, so no model call is made (one would raise on the
-    empty faux queue): the arm has no model cases."""
+    empty faux queue): the arm has no model cases. #73: the real Session's
+    output goes to each run's log, so stdout before the arm's screen is the
+    per-case lines alone (counted, never quoted: they are the Session's)."""
     ev, root = _setup(tmp_path, monkeypatch, cases=("tx-whitespace",))
     t0 = time.monotonic()
     reg = _register(ev, capsys, "a1=faux:m")
-    result, _ = _run(ev, capsys, reg)
+    code, out, _ = _said(ev, ["run", "--registered", reg["row_id"]], capsys)
     took = time.monotonic() - t0
+    assert _ok(code), "run was refused"
+    (result,) = _results_of(reg)
+
+    lines = out.splitlines()
+    assert "a1 (faux:m)" in lines, "no screen for a1"
+    before = [line for line in lines[: lines.index("a1 (faux:m)")] if line.strip()]
+    stray = len(before) - len(_per_case(before))
+    assert stray == 0, f"{stray} lines of Session output reached stdout"
+    runs = [f"a1 tx-whitespace r{run}" for run in (1, 2, 3)]
+    assert _per_case(before) == runs
+    for run in (1, 2, 3):
+        log = _eval_dir(root, reg) / "a1" / "logs" / f"tx-whitespace.r{run}.log"
+        assert log.is_file() and log.stat().st_size > 0, f"run {run} has no log"
 
     assert [r["kind"] for r in ledger.read()] == ["registered", "result"]
     cases = sorted(result["cases"], key=lambda c: c["run"])

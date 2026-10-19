@@ -28,12 +28,18 @@ the later arms, and the arm it stops in has a partial k: its cases ran
 different numbers of times. `register --dry` prints the worst case and
 appends nothing. Run from the repo root: the ledger and the fingerprints
 read from it.
+
+`run` prints one line per case and run, then one screen per arm and the
+summary. What each run's Session prints, its data profile among it, goes to
+bench/results/eval/<row>/<arm>/logs/<case>.r<run>.log instead (#73), and the
+closing lines say so.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import json
 import math
 import os
@@ -462,8 +468,10 @@ def _run_arms(reg: dict, entries: list, out: Path, record) -> tuple:
     because it may have spent that much too, and going on would let each
     unread case add another call. Each finished case's outcome and the spend
     so far land in <out>/cases.jsonl as they finish, so a case that raises
-    loses none of what ran. Returns the rows per arm, the outcomes, the cases
-    not run and the spend."""
+    loses none of what ran. What each run's Session prints (its data profile
+    among it) goes to <out>/<arm>/logs/<case>.r<run>.log, a case that raises
+    included, so stdout keeps only the per-case lines (#73). Returns the rows
+    per arm, the outcomes, the cases not run and the spend."""
     rows, cases, not_run = {}, [], []
     cap, budget = reg["per_case_usd"], reg["budget_usd"]
     spend = {"spent_usd": 0.0, "unread": 0}
@@ -481,15 +489,23 @@ def _run_arms(reg: dict, entries: list, out: Path, record) -> tuple:
                     not_run.append({"arm": name, "case": entry["name"], "run": run})
                     continue
                 args.run_tag = f".{name}.r{run}"  # one cassette per arm and run
+                # #73: the Session prints its data profile, so each run's goes
+                # to its own log, outside work/ (_run_case clears that per run)
+                log = out / name / "logs" / f"{entry['name']}.r{run}.log"
+                log.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    row = agent_run._run_case(entry, args)
+                    with (
+                        open(log, "w", encoding="utf-8") as fh,
+                        contextlib.redirect_stdout(fh),
+                    ):
+                        row = agent_run._run_case(entry, args)
                 except Exception as exc:  # noqa: BLE001 — its text can quote data
                     _refuse(
                         f"arm {name}, {entry['name']} run {run} raised "
                         f"{type(exc).__name__}: the run stopped and wrote no result. "
                         f"{_spent_text(spend)} spent before it (its own spend is "
                         f"unread); the {len(cases)} cases run are kept in "
-                        f"{out / 'cases.jsonl'}"
+                        f"{out / 'cases.jsonl'}, and its Session output in {log}"
                     )
                 rows[name].append(row)
                 case = _outcome(name, run, row)
@@ -640,6 +656,8 @@ def run(args: argparse.Namespace) -> int:
             else f"spent plus the {cap} per-case cap could cross the budget"
         )
         print(f"budget hit: {len(not_run)} cases not run, since {since}")
+    logs = EVAL_DIR / reg["row_id"] / "<arm>" / "logs"  # repo-relative, as the ledger
+    print(f"each run's Session output: {logs}/<case>.r<run>.log")
     print(f"result {result['row_id']} appended to {ledger.LEDGER}")
     return 0
 
