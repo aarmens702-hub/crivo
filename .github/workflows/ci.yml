@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
@@ -27,6 +28,10 @@ jobs:
         run: uv run ruff format --check .
       - name: Tests (keyless suite; container tests are opt-in)
         run: uv run pytest -q
+      - name: Ledger locks (append-only, linked, true to the code it ran)
+        run: uv run python scripts/check_locks.py
+      - name: Leak scan (suite material in prompts, tool descriptions, skills)
+        run: uv run python scripts/leak_scan.py
       - name: Fresh install (what users get, no lock)
         run: |
           uv venv --python 3.12 .fresh

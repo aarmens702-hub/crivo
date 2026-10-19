@@ -1,0 +1,2 @@
+# leak_scan's allow file (#75). One match per line, added by Aarmen:
+# <protected file>:<item id>:<sha256 of the match, casefolded, whitespace collapsed>  # reason

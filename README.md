@@ -78,6 +78,8 @@ dataframe — 60 rows × 5 columns
         safe to fix automatically · confidence 1.00
 
   checked and clean: 2-3, 5, 8, 10-19, 21-26
+  (25 signals run on every file; absence is a checked
+   claim here, not a silence)
 ```
 
 ```python
@@ -184,11 +186,12 @@ through namespace snapshots.
 <br>
 
 After a clean run, each fix the model wrote is rewritten as a general
-`fix(df, columns)` and has to earn its place. On the original frozen case it
-has to trip the detector, clear it, and leave the rows that were never broken
+`fix(df, columns)` and has to earn its place. A person reads it and its test
+and says yes before any of it runs. On the original frozen case it then has
+to trip the detector, clear it, and leave the rows that were never broken
 alone. That last part matters: a "fix" that blanks the whole column also
 clears the detector. Its own shipped test has to pass in the kernel. Then a
-person says yes.
+person says yes again, to admit it.
 
 New skills start on probation: retrieved and applied, but always gated. Three
 wins across two different datasets promote a skill; two failures in a row

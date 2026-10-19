@@ -46,7 +46,7 @@ Run from the repo root (or the worktree root).
 |---|---|
 | Install | `uv sync` |
 | One test | `uv run pytest tests/test_x.py::test_name -q` |
-| Unit and integration tests | `uv run pytest -q` (about 1,050 tests, about 70 s; keyless and offline) |
+| Unit and integration tests | `uv run pytest -q` (about 1,700 tests, about 2 minutes; keyless and offline) |
 | Lint and format | `uv run ruff check --fix . && uv run ruff format .` |
 | Bench smoke | `uv run python -m bench.run --smoke` (what CI runs) |
 | Full bench | `uv run python -m bench.run --full` (the published numbers; `--write-readme` refreshes the README block) |

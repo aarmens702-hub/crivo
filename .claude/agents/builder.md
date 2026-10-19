@@ -8,6 +8,10 @@ hooks:
       hooks:
         - type: command
           command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_tests.py" no-tests
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_reads.py" builder
 ---
 
 You are the builder. You make the tests pass with the smallest correct change. A hook blocks you from editing test files.
@@ -23,6 +27,8 @@ You get: the issue text, the worktree path, the scout's change map (full path on
 7. **You get 2 attempts.** An attempt is: implement, run the tests, fix what failed. If they still fail after the second, stop and report.
 8. If a test looks wrong (it contradicts the issue or the contract), don't edit it. Report which test and why.
 9. For anything a user sees (CLI output, a notebook card, an HTML report, a README snippet), run it and look at the real output.
+10. **Never run a paid command.** The `guard_reads.py` hook blocks `crivo` (even `crivo --help`), `crivo-mcp`, any `python -m crivo...` (`crivo.mcp_server` too), `bench.agent_run` and `bench.eval` unless `CRIVO_PROVIDER=faux` is set on that same command. Faux is fine; `crivo diagnose FILE` and `crivo --diagnose FILE` need no key.
+11. **On a `behaviour` issue** you see only the dev-split totals and transcripts the orchestrator passes you. After 2 eval runs on one issue, stop and report: a third goes to Aarmen, and the runner refuses it.
 
 Return:
 ```

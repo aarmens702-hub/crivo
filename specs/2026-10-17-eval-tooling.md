@@ -3,7 +3,7 @@
 **Status: filed 2026-10-17** as issues #64 to #83 (EV1 to EV20). ED1 to ED4
 and ED6 were taken as recommended under Aarmen's standing instruction to take
 the recommended option on design calls and record it; he may overturn any of
-them. ED5, ED7 and ED8 are his, and EV15 (#78) and EV20 (#83) wait on them.
+them. ED5, ED7 and ED8 were Aarmen's; he took all three as recommended on 2026-10-18.
 
 2026-10-17. The WRAP spec for the eval tooling that lands before Stage 0 of
 `specs/2026-10-14-the-plan.md`. It turns the proposal Aarmen approved on
@@ -136,10 +136,10 @@ Core review for Aarmen: EV1 (one diff in `llm.py`, under about 15 lines).
 | EV2, EV3 | ED2: how a cassette replays the kernel | a real subprocess kernel on data rebuilt from the corpus seed (so the real in-kernel verification runs and cassettes hold no data); recorded-kernel replay only when a kernel-death cassette needs it | taken |
 | EV5, EV6 | ED3: the eval-author's read limit | an allowlist (`bench/` without `bench/results/`, the bench tests, the contract, the plan and the brief), not the approved blocklist, because docs and tests quote the code a blocklist protects | taken |
 | EV5, EV6 | ED4: what the eval-author may write | `bench/traps/**`, the injectors, `bench/corpus.py` and the injector tests; not `bench/attacks/`, which loop 1's attacker owns under its own mode | taken |
-| EV15 (#78) | ED5: D21 pulled forward, the paid budget before Stage 0 | an explicit `--budget-usd` on every run with no default; Aarmen names the A/A cap after its dry run; the weekly canary starts with Stage 1 | **owed** |
+| EV15 (#78) | ED5: D21 pulled forward, the paid budget before Stage 0 | an explicit `--budget-usd` on every run with no default; Aarmen names the A/A cap after its dry run; the weekly canary starts with Stage 1 | decided by Aarmen 2026-10-18, as recommended |
 | EV14; #48, #50 | ED6: behaviour changes no suite measures yet | ship with Aarmen's yes as a `shipped-unmeasured` ledger row, as #30, #37 and #39 shipped, now on the record | taken |
-| 0a, Stage 1 | ED7: where held-out and sealed sets live | outside the public repo, with only their hash committed (EV11 checks either way) | **owed** (before 0a's split) |
-| EV20 (#83) | ED8: rule 10 names the work types (proposal item 20) | reword rule 10 as drafted in EV20, with a changelog line | **owed** |
+| 0a, Stage 1 | ED7: where held-out and sealed sets live | outside the public repo, with only their hash committed (EV11 checks either way) | decided by Aarmen 2026-10-18, as recommended |
+| EV20 (#83) | ED8: rule 10 names the work types (proposal item 20) | reword rule 10 as drafted in EV20, with a changelog line | decided by Aarmen 2026-10-18, as recommended |
 
 ## Cut, with reasons
 

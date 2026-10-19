@@ -2,10 +2,10 @@
 
 Drives the real `Session.clean` loop headlessly over the same corpus as the
 deterministic bench, then scores the cleaned frame with the same
-`score_end_to_end`. Plain gates are auto-approved; HUMAN gates (skill
-admissions, judgement calls) are skipped, never fake-approved. Sampled runs
-print to the terminal only; storefront numbers come from a full, blessed
-run (R6).
+`score_end_to_end`. Plain gates are auto-approved; HUMAN gates (a proposed
+skill's test and its admission, judgement calls) are skipped, never
+fake-approved. Sampled runs print to the terminal only; storefront numbers
+come from a full, blessed run (R6).
 
 `uv run python -m bench.agent_run --sample 2`
 """
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from bench import corpus
+from bench import corpus, prices
 from bench.score import score_end_to_end
 from bench.truth import frame_sha256
 from crivo import llm
@@ -82,14 +82,19 @@ def _drive(
     t0: float,
     gates: list | None = None,
     human_gates: str = "skip",
+    over_cap=None,
 ) -> int:
     """repl._drive, headless: run plain gates, swallow the rendering.
 
     HUMAN gates default to skip — a person's authorisation is not the bench's
     to give. `human_gates="approve"` applies the owner's standing
-    pre-authorisation to judgement-call fixes (the ceiling arm), but a skill
-    admission (title "admit skill …") is governance and stays skipped in
-    every mode."""
+    pre-authorisation to judgement-call fixes (the ceiling arm), but the
+    skill gates are governance and stay skipped in every mode: a proposed
+    skill's test (title "test skill …", #85), so its code never runs, and its
+    admission (title "admit skill …").
+
+    `over_cap()`, when given, is asked on each event after the event and wall
+    caps: a reason (the per-case dollar cap's, EV9) aborts the case with it."""
     from crivo.events import GateDecision, GateRequest
 
     events = 0
@@ -103,10 +108,14 @@ def _drive(
             if time.monotonic() - t0 > wall_cap:
                 gen.close()
                 raise CaseAborted(f"wall cap {wall_cap:.0f}s hit", events)
+            over = over_cap() if over_cap is not None else None
+            if over:
+                gen.close()
+                raise CaseAborted(over, events)
             answer = None
             if isinstance(event, GateRequest):
                 approved = human_gates == "approve" and not event.title.startswith(
-                    "admit skill "
+                    ("test skill ", "admit skill ")
                 )
                 action = "run" if event.grade != "HUMAN" or approved else "skip"
                 answer = GateDecision(action)
@@ -164,15 +173,26 @@ def _call_stats(path: Path) -> dict:
         knowably short as if it were complete. The span is emitted from
         telemetry.span's `finally` while llm.generate maps usage only after
         the stream finishes, so a cancelled or failed call leaves one behind.
+
+    served_models is the sorted, distinct gen_ai.response.model ids the
+    provider said answered the case's calls (EV1), with the same honesty:
+    None when no telemetry was readable, [] when spans were read and none
+    named a model.
     """
     try:
         lines = path.read_text().splitlines()
     except OSError:
-        return {"count": None, "model_wait_s": None, "new_work_tokens": None}
+        return {
+            "count": None,
+            "model_wait_s": None,
+            "new_work_tokens": None,
+            "served_models": None,
+        }
     count = 0
     unpriced = 0
     wait = 0.0
     sums: dict = {}
+    served: set = set()
     for line in lines:
         try:
             span = json.loads(line)
@@ -185,6 +205,9 @@ def _call_stats(path: Path) -> dict:
         if isinstance(dur, (int, float)):
             wait += dur
         attrs = span.get("attrs") or {}
+        model = attrs.get("gen_ai.response.model")
+        if isinstance(model, str) and model:
+            served.add(model)
         if not all(isinstance(attrs.get(a), (int, float)) for a in _NEW_WORK_ATTRS):
             unpriced += 1
         for key, attr in _TOKEN_ATTRS:
@@ -192,6 +215,7 @@ def _call_stats(path: Path) -> dict:
             if isinstance(value, (int, float)):
                 sums[key] = sums.get(key, 0) + value
     stats = {"count": count, "model_wait_s": round(wait, 2), **sums}
+    stats["served_models"] = sorted(served)
     if unpriced:
         stats["new_work_tokens"] = None  # a call of unknown cost is in there
     else:
@@ -356,6 +380,73 @@ def _recording_generate(orig, calls: list):
     return generate
 
 
+# --- the per-case dollar cap (EV9) -------------------------------------------
+OVER_CAP = "per-case budget"
+SPEND_UNREAD = "per-case budget (spend unread)"
+# One fixed text for every refused call: it quotes nothing the case saw.
+SPEND_REFUSED = "the case spent its per-case budget: this call was not sent"
+
+
+class SpendRefused(RuntimeError):
+    """A call the per-case cap refused before it reached the provider."""
+
+
+def _case_cost(path: Path, key: str, calls: int) -> float | None:
+    """What the case's gen_ai.client.call spans cost at bench.prices'
+    PRICES[key]. None when the spend can't be read: a model with no price, a
+    span that can't be priced (no usage: a call that died mid-stream), or
+    fewer spans than the `calls` the guard sent. An all-zero price (faux)
+    costs 0.0 whatever the spans say."""
+    if key not in prices.PRICES:
+        return None
+    if prices.cost_usd({}, key) == 0.0:  # only an all-zero price prices {}
+        return 0.0
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        lines = []
+    costs = []
+    for line in lines:
+        try:
+            span = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(span, dict) and span.get("name") == "gen_ai.client.call":
+            costs.append(prices.cost_usd(span.get("attrs"), key))
+    if len(costs) < calls or None in costs:
+        return None
+    return sum(costs)
+
+
+def _spend_guard(orig, path: Path, key: str, cap: float, spend: dict):
+    """`orig` (llm.generate) behind the per-case cap. After each call it
+    re-reads the case's telemetry (a span is written when a call ends) and
+    prices it: once the case costs more than `cap`, or its spend can't be
+    read, `spend["tripped"]` names why and every later call raises
+    SpendRefused before it is sent. The loop turns a raise from generate into
+    an llm_error notice and goes on, so the guard refuses each call, not just
+    the next. The call that crosses the cap has already gone out, so a case
+    can spend its cap plus at most one call: bounding a call before it is
+    sent would need a max_tokens on every provider, and llm.py (core) sends
+    none to DeepSeek. A call that raises leaves a span with no usage, so it
+    reads as unread and stops the case: fail closed."""
+
+    def generate(messages, model=None):
+        if spend["tripped"]:
+            raise SpendRefused(SPEND_REFUSED)
+        spend["calls"] += 1
+        try:
+            yield from (orig(messages) if model is None else orig(messages, model))
+        finally:
+            cost = _case_cost(path, key, spend["calls"])
+            if cost is None:
+                spend["tripped"] = SPEND_UNREAD
+            elif cost > cap:
+                spend["tripped"] = OVER_CAP
+
+    return generate
+
+
 def _recording_execute(orig, execs: list):
     """`orig` (a client's bound execute) with a recorder in front: per cell,
     digests of the code, the value and the cell's text, plus the status, the
@@ -513,16 +604,25 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     prev_tele = os.environ.get("CRIVO_TELEMETRY")
     os.environ["CRIVO_TELEMETRY"] = str(tele_path)
     # EV2: with --record, every model call and every cell of this case is
-    # recorded. The swaps are undone in a finally, a case that raises included
+    # recorded. EV9: with a per-case cap, every call goes through the spend
+    # guard, inside the recorder so a refused call is in the cassette. The
+    # swaps are undone in a finally, a case that raises included
     record = getattr(args, "record", None)
+    cap = getattr(args, "per_case_usd", None)
+    key = prices.price_key(row["model"].get("provider"), row["model"].get("model"))
+    # no price, no call: an unpriced model's spend could never be read
+    spend = {"calls": 0, "tripped": None if key in prices.PRICES else SPEND_UNREAD}
+    over_cap = (lambda: spend["tripped"]) if cap is not None else None
     calls: list = []
     execs: list = []
     cleaned = None
     abort_events = None
     real_generate = llm.generate
     try:
+        if cap is not None:
+            llm.generate = _spend_guard(llm.generate, tele_path, key, cap, spend)
         if record:
-            llm.generate = _recording_generate(real_generate, calls)
+            llm.generate = _recording_generate(llm.generate, calls)
         session = Session(
             workspace=str(work / "ws"),
             data_dir=str(work / "data"),
@@ -548,7 +648,10 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
                 t0,
                 gates=gates,
                 human_gates=human_gates,
+                over_cap=over_cap,
             )
+            if over_cap is not None and over_cap():  # crossed on the last call
+                raise CaseAborted(over_cap(), row["events"])
             cleaned_path = Path(session.session_dir) / "cleaned" / "df.parquet"
             if cleaned_path.exists():
                 cleaned = pd.read_parquet(cleaned_path)
@@ -565,7 +668,7 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
                 client.execute = real_execute
             session.close()
     finally:
-        if record:
+        if record or cap is not None:
             llm.generate = real_generate
         # restore, never leak: the next case (and the test suite) must see
         # the environment it started with
@@ -574,6 +677,8 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
         else:
             os.environ["CRIVO_TELEMETRY"] = prev_tele
     row["calls"] = _call_stats(tele_path)
+    if cap is not None:  # None when unread, never 0 (_case_cost)
+        row["cost_usd"] = _case_cost(tele_path, key, spend["calls"])
     row["gates"] = {"run": gates.count("run"), "skip": gates.count("skip")}
     row["wall_secs"] = round(time.monotonic() - t0, 1)
     if record:
@@ -635,7 +740,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("skip", "approve"),
         default="skip",
         help="approve = owner pre-authorises judgement-call fixes (ceiling arm); "
-        "skill admissions are skipped in every mode",
+        "skill gates are skipped in every mode",
     )
     parser.add_argument(
         "--only",

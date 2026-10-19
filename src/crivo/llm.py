@@ -16,7 +16,8 @@ from collections.abc import Callable, Generator, Iterable, Iterator
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 
-from openai import APIConnectionError, OpenAI, Timeout
+from openai import APIConnectionError as _OpenAIAPIConnectionError
+from openai import OpenAI, Timeout
 
 # Overflow shapes for the providers generate() actually speaks to, each with
 # the real error message it came from:
@@ -307,7 +308,7 @@ def _is_retryable_provider_error(error: Exception) -> bool:
         return False
     if getattr(error, "status_code", None) in RETRYABLE_HTTP_STATUS_CODES:
         return True
-    if isinstance(error, (APIConnectionError, ConnectionError, TimeoutError)):
+    if isinstance(error, (_OpenAIAPIConnectionError, ConnectionError, TimeoutError)):
         return True
     if _provider() == "claude":
         import anthropic
@@ -398,8 +399,9 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
     The provider switch changes which client produces the stream and how one
     stream item becomes text; the watchdog around them is shared, because a
     hung stream hangs identically whoever serves it. Every call emits one
-    telemetry span (A0 R4) carrying model, duration, usage when the provider
-    reports it, and provider retry attempts and wait time.
+    telemetry span (A0 R4) carrying the requested and served model, duration,
+    usage when the provider reports it, and provider retry attempts and wait
+    time. Cache hit/miss tokens use DeepSeek's meaning on every provider.
     """
     from crivo import telemetry
 
@@ -416,7 +418,13 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
     ) as extra:
         extra["crivo.retry.attempts"] = 0
         extra["crivo.retry.wait_s"] = 0.0
-        yield from _generate(messages, model, usage_box.append, extra)
+        yield from _generate(  # served id kept on arrival, so a dead call names it
+            messages,
+            model,
+            usage_box.append,
+            extra,
+            lambda m: extra.setdefault("gen_ai.response.model", m),
+        )
         if _provider() == "claude":
             extra.update(_claude_usage(usage_box))
             return
@@ -437,6 +445,7 @@ def _generate(
     model: str | None,
     usage_sink: Callable[[object], None],
     retry_stats: dict[str, int | float],
+    model_sink: Callable[[str], None] | None = None,
 ) -> Iterator[str]:
     _cancel.clear()  # before create(), so a cancel while it opens still lands
     started_at, call_budget = time.monotonic(), call_budget_s()
@@ -452,6 +461,7 @@ def _generate(
             iter([_faux_responses.pop(0)]),
             lambda item: item,
             usage_sink,
+            model_sink,
             started_at=started_at,
             call_budget=call_budget,
         )
@@ -483,6 +493,7 @@ def _generate(
             stream,
             _claude_text,
             usage_sink,
+            model_sink,
             started_at=started_at,
             call_budget=call_budget,
         )
@@ -517,6 +528,7 @@ def _generate(
         stream,
         _deepseek_text,
         usage_sink,
+        model_sink,
         started_at=started_at,
         call_budget=call_budget,
     )
@@ -526,6 +538,7 @@ def _watched[T](
     stream: Iterable[T],
     extract: Callable[[T], str | None],
     usage_sink: Callable[[object], None] | None = None,
+    model_sink: Callable[[str], None] | None = None,
     started_at: float | None = None,
     call_budget: float | None = None,
 ) -> Iterator[str]:
@@ -591,6 +604,12 @@ def _watched[T](
                     usage = getattr(getattr(item, "message", None), "usage", None)
                 if usage is not None:
                     usage_sink(usage)
+            if model_sink is not None:
+                served = getattr(item, "model", None)
+                if served is None:  # Claude's message_start nests it
+                    served = getattr(getattr(item, "message", None), "model", None)
+                if isinstance(served, str) and served:
+                    model_sink(served)
             text = extract(item)
             if text is not None:
                 yield text

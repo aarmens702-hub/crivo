@@ -10,13 +10,17 @@
   - `/demo-check`: walk the demo story on `main` the way a new user would.
   - `/crivo`: drive the crivo CLI on a data file (the product skill, not a workflow one).
 - **QA:** `/qa-pass` is the full `docs/QA.md` run against `dev`, black-box, at checkpoints. It files failures as `bug` issues.
-- **Route by work type first** (AGENTS.md, "Work types"). `code` issues take the paths below. `behaviour`, `eval` and `experiment` issues need tooling that lands before Stage 0 (the `/eval` skill, an eval-author agent that cannot read the prompts, record and replay tests); until it exists, `/start-task` stops and asks Aarmen.
+- **Route by work type first** (AGENTS.md, "Work types"). `code` issues take the paths below. `behaviour`, `eval` and `experiment` issues need tooling that lands before Stage 0 (the `/eval` skill, the eval-author agent (landed; `/start-task` routing to it is #82), record and replay tests); until it exists, `/start-task` stops and asks Aarmen.
 - **`/start-task` is an orchestrator.** It sizes the issue, then runs the specialists in `.claude/agents/`:
   - **Full path** (logic, the contract, the core, bugs, more than 2 files): scout → test-writer → builder → reviewer.
   - **Lean path** (at most 2 files of docs or text): builder → reviewer.
-- **Write limits are enforced, not trusted. Read limits are not enforced yet:** the bench rule (injector authors don't read `detect.py` or `autoclean.py`) lives in the agents' prompts only, so the reviewer checks it.
+  - **eval-author** writes traps, injectors and corpus cases for `eval` issues without reading what they test. `/start-task` doesn't route to it yet (see "Route by work type first" above).
+- **Write limits are enforced, not trusted, and so are some read limits:**
   - scout and reviewer can't edit files; qa-tester can't edit files either.
   - A hook keeps the test-writer inside test files (`tests/`, `test_*.py`, `conftest.py`), and keeps the builder out of them.
+  - `.claude/hooks/guard_reads.py` keeps the eval-author's reads, writes and commands on an allowlist: it reads `bench/` (not `bench/results/`), the bench tests, the contract, the plan and a few other docs, and nothing under `src/`. That enforces the bench rule (injector authors don't read `detect.py` or `autoclean.py`) on the eval-author; a builder or test-writer who touches `bench/corrupt.py` or `bench/bases.py` is held to it by its prompt and the reviewer.
+  - The same hook keeps the builder and test-writer off the held-out and sealed trap sets, stops shell redirects and copy-style commands (`tee`, `cp`, `sed -i` and the like) from writing `bench/ledger.jsonl`, and runs a paid command (`crivo`, `crivo-mcp`, `python -m crivo`, `bench.agent_run`, `bench.eval`) only with `CRIVO_PROVIDER=faux` on it.
+  - The hole: the hook reads tool calls, not what runs. Code an agent writes and runs (a script, a test, `python -c`) can read any file, write the ledger and reach a model. In the builder's mode, Bash wildcards, variables and recursive searches (`grep -r`, `find`) get past its path checks, `rm` of the ledger or `mv` of it elsewhere is not blocked, and a builder can edit `.claude/`, this hook included. The docstring of `.claude/hooks/guard_reads.py` lists every limit. The reviewer still checks the diff; nothing else stops that yet (an OS sandbox for code the eval-author runs is deferred to 0d, D18; not built).
 - **Other hooks:**
   - `.env` files are blocked for every agent.
   - Every edited `.py` file is formatted with ruff.

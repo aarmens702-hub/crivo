@@ -140,11 +140,14 @@ def test_key_env_vars_registry_covers_every_env_var_the_module_reads():
     assert reads <= set(llm.KEY_ENV_VARS), f"unregistered env reads: {reads}"
 
 
-def chunk(content=None, reasoning=None):
-    """A double for one `ChatCompletionChunk`: only `.choices[0].delta` is
-    ever read by generate(), so that's all this needs to have."""
+def chunk(content=None, reasoning=None, model=None):
+    """A double for one `ChatCompletionChunk`. generate() reads the text from
+    `.choices[0].delta` and the served model id from `.model`. Without a
+    `model` the double has no such field at all, the shape of an endpoint
+    that does not report one; `model=""` is an endpoint that sends it empty."""
     delta = SimpleNamespace(content=content, reasoning_content=reasoning)
-    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+    served = {} if model is None else {"model": model}
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], **served)
 
 
 def fake_client(stream):
@@ -590,10 +593,13 @@ _USAGE_ATTRS = (
 )
 
 
-def _claude_stream(start_usage: dict | None, output_tokens: int = 57) -> list:
+def _claude_stream(
+    start_usage: dict | None, output_tokens: int = 57, model: str = "claude-opus-5-5"
+) -> list:
     """The event sequence a real Messages API stream sends, built from the
-    SDK's own types. Input and cache counts arrive once, on message_start;
-    message_delta carries the running output count."""
+    SDK's own types. Input and cache counts arrive once, on message_start,
+    and so does the served model id (`message.model`); message_delta carries
+    the running output count. No start_usage means no message_start at all."""
     events: list = []
     if start_usage is not None:
         events.append(
@@ -603,7 +609,7 @@ def _claude_stream(start_usage: dict | None, output_tokens: int = 57) -> list:
                     id="msg_01XFDUDYJgAACzvnptvVoYEL",
                     type="message",
                     role="assistant",
-                    model="claude-opus-5-5",
+                    model=model,
                     content=[],
                     stop_reason=None,
                     stop_sequence=None,
@@ -681,9 +687,10 @@ def test_claude_usage_reaches_the_telemetry_span(
     assert agent_run._call_stats(path)["new_work_tokens"] == new_work
 
 
-def _deepseek_stream() -> list:
+def _deepseek_stream(model: str = "deepseek-v4-pro") -> list:
     """DeepSeek's final chunk: no choices, usage only. prompt_tokens already
-    includes the cache hits; the hit/miss split is DeepSeek's own extension."""
+    includes the cache hits; the hit/miss split is DeepSeek's own extension.
+    The final chunk names the model that served the call, as `model`."""
     return [
         chunk(content="RS-1 grew most."),
         ChatCompletionChunk.model_validate(
@@ -691,7 +698,7 @@ def _deepseek_stream() -> list:
                 "id": "a3f1c9e2-5b7d-4e8a-9c0f-1d2e3f4a5b6c",
                 "object": "chat.completion.chunk",
                 "created": 1760700000,
-                "model": "deepseek-v4-pro",
+                "model": model,
                 "choices": [],
                 "usage": {
                     "prompt_tokens": 1400,
@@ -751,6 +758,265 @@ def test_usage_mapping_the_claude_change_leaves_alone(
     attrs = _call_attrs(path)
     assert {a: attrs[a] for a in _USAGE_ATTRS if a in attrs} == expected
     assert agent_run._call_stats(path)["new_work_tokens"] == new_work
+
+
+_SERVED = "gen_ai.response.model"
+# Each served id differs from the id crivo asks for (DEFAULT_MODEL,
+# CLAUDE_DEFAULT_MODEL), so a span that copied the request model cannot pass
+# for one that read the stream.
+_DEEPSEEK_SERVED = "deepseek-v4-pro-0926"
+_CLAUDE_SERVED = "claude-opus-5-5-20261001"
+_START_USAGE = {"input_tokens": 1200, "output_tokens": 1}
+
+
+def _call_spans(path) -> list[dict]:
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    return [r["attrs"] for r in rows if r["name"] == "gen_ai.client.call"]
+
+
+def _client_serving(*streams):
+    """A client double for either SDK that answers each call with the next
+    stream in line, so one test can make several calls through one seam."""
+    queued = iter(streams)
+
+    def create(**_):
+        return iter(next(queued))
+
+    return SimpleNamespace(
+        messages=SimpleNamespace(create=create),
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "seam", "env", "stream", "served"),
+    [
+        # DeepSeek repeats the id on its chunks, the final usage-only one
+        # included
+        pytest.param(
+            "deepseek",
+            "_get_client",
+            {},
+            lambda: [
+                chunk(reasoning="weighing the medians", model=_DEEPSEEK_SERVED),
+                *_deepseek_stream(_DEEPSEEK_SERVED),
+            ],
+            _DEEPSEEK_SERVED,
+            id="deepseek",
+        ),
+        # an OpenRouter arm: the endpoint resolves the name crivo asked for
+        # to a dated snapshot, and only the stream says which
+        pytest.param(
+            "openai",
+            "_get_openai_client",
+            {"CRIVO_MODEL": "qwen/qwen3-32b"},
+            lambda: [
+                chunk(reasoning="weighing the medians", model="qwen/qwen3-32b-04-28"),
+                chunk(content="RS-1 grew most.", model="qwen/qwen3-32b-04-28"),
+            ],
+            "qwen/qwen3-32b-04-28",
+            id="openrouter",
+        ),
+        # an empty id names nothing, and a later chunk naming another id does
+        # not replace the first one seen (decided on #64)
+        pytest.param(
+            "deepseek",
+            "_get_client",
+            {},
+            lambda: [
+                chunk(reasoning="weighing the medians", model=""),
+                chunk(reasoning="the medians, by district", model=_DEEPSEEK_SERVED),
+                *_deepseek_stream("deepseek-v4-pro-1015"),
+            ],
+            _DEEPSEEK_SERVED,
+            id="first-non-empty-id-wins",
+        ),
+    ],
+)
+def test_an_openai_compatible_span_names_the_model_that_served_it(
+    tmp_path, monkeypatch, provider, seam, env, stream, served
+):
+    """EV1 (#64): the span recorded only gen_ai.request.model, the id crivo
+    asked for. An eval row has to record the model that answered, so it can
+    notice a provider changing the model behind a name, and every
+    OpenAI-compatible chunk carries that id as `model`."""
+    path = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("CRIVO_TELEMETRY", str(path))
+    monkeypatch.setenv("CRIVO_PROVIDER", provider)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(llm, seam, lambda: fake_client(iter(stream())))
+
+    reply = "".join(llm.generate([{"role": "user", "content": "q"}]))
+    assert reply == "RS-1 grew most."
+
+    attrs = _call_attrs(path)
+    assert attrs.get(_SERVED) == served
+    assert attrs["gen_ai.request.model"] == llm.model_name(), "still what we asked"
+
+
+def test_a_claude_span_names_the_model_message_start_reports(tmp_path, monkeypatch):
+    """EV1 (#64): Anthropic names the served model once, as message_start's
+    `message.model`, on the same event that carries the input and cache
+    counts. No other event in the stream carries it."""
+    path = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("CRIVO_TELEMETRY", str(path))
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    stream = _claude_stream(_START_USAGE, model=_CLAUDE_SERVED)
+    monkeypatch.setattr(
+        llm, "_get_claude_client", lambda: fake_claude_client(iter(stream))
+    )
+
+    reply = "".join(llm.generate([{"role": "user", "content": "q"}]))
+    assert reply == "RS-1 grew most."
+
+    attrs = _call_attrs(path)
+    assert attrs.get(_SERVED) == _CLAUDE_SERVED
+    assert attrs["gen_ai.request.model"] == llm.CLAUDE_DEFAULT_MODEL
+
+
+@pytest.mark.parametrize(
+    ("provider", "seam", "reported", "served", "unreported"),
+    [
+        pytest.param(
+            "deepseek",
+            "_get_client",
+            [chunk(content="RS-1 grew most.", model=_DEEPSEEK_SERVED)],
+            _DEEPSEEK_SERVED,
+            [chunk(content="RS-1 grew most.")],
+            id="openai-chunk-without-a-model-field",
+        ),
+        pytest.param(
+            "deepseek",
+            "_get_client",
+            [chunk(content="RS-1 grew most.", model=_DEEPSEEK_SERVED)],
+            _DEEPSEEK_SERVED,
+            [chunk(content="RS-1 grew most.", model="")],
+            id="openai-chunk-with-an-empty-model",
+        ),
+        # no message_start reached us, so nothing named the model
+        pytest.param(
+            "claude",
+            "_get_claude_client",
+            _claude_stream(_START_USAGE, model=_CLAUDE_SERVED),
+            _CLAUDE_SERVED,
+            _claude_stream(None),
+            id="claude-without-message-start",
+        ),
+        pytest.param(
+            "claude",
+            "_get_claude_client",
+            _claude_stream(_START_USAGE, model=_CLAUDE_SERVED),
+            _CLAUDE_SERVED,
+            _claude_stream(_START_USAGE, model=""),
+            id="claude-message-start-with-an-empty-model",
+        ),
+    ],
+)
+def test_a_call_whose_stream_names_no_model_leaves_the_attribute_out(
+    tmp_path, monkeypatch, provider, seam, reported, served, unreported
+):
+    """EV1 (#64): a call whose stream names no model, or an empty one,
+    records no gen_ai.response.model at all: not "", not "unknown", and not
+    the id that served the call before it. An eval reads a present value as
+    what the provider said, so a placeholder or a carried-over id is a false
+    record. The first call, whose stream does name its model, is the control
+    that the attribute is recorded at all."""
+    path = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("CRIVO_TELEMETRY", str(path))
+    monkeypatch.setenv("CRIVO_PROVIDER", provider)
+    client = _client_serving(reported, unreported)
+    monkeypatch.setattr(llm, seam, lambda: client)
+
+    for _ in range(2):
+        reply = "".join(llm.generate([{"role": "user", "content": "q"}]))
+        assert reply == "RS-1 grew most."
+
+    first, second = _call_spans(path)
+    assert first.get(_SERVED) == served
+    assert _SERVED not in second, (
+        f"recorded {second[_SERVED]!r} for a call whose stream named no model"
+    )
+
+
+def _peer_drops(release):
+    raise ConnectionError(
+        "peer closed connection without sending complete message body"
+    )
+
+
+def _goes_silent(release):
+    time.sleep(0.5)  # bounded, so a regression fails fast instead of hanging
+
+
+def _waits_for_cancel(release):
+    release.wait(5)
+
+
+@pytest.mark.parametrize(
+    ("provider", "seam", "head", "served"),
+    [
+        pytest.param(
+            "deepseek",
+            "_get_client",
+            [chunk(reasoning="weighing the medians", model=_DEEPSEEK_SERVED)],
+            _DEEPSEEK_SERVED,
+            id="deepseek",
+        ),
+        pytest.param(
+            "claude",
+            "_get_claude_client",
+            [
+                _claude_stream(_START_USAGE, model=_CLAUDE_SERVED)[0],
+                claude_event(thinking="weighing the medians"),
+            ],
+            _CLAUDE_SERVED,
+            id="claude",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("then", "error"),
+    [
+        pytest.param(_peer_drops, ConnectionError, id="raises"),
+        pytest.param(_goes_silent, TimeoutError, id="stalls"),
+        pytest.param(_waits_for_cancel, llm.CallCancelled, id="cancelled"),
+    ],
+)
+def test_a_call_that_dies_after_the_model_arrived_still_names_it(
+    tmp_path, monkeypatch, provider, seam, head, served, then, error
+):
+    """EV1 (#64): telemetry.span emits from a `finally`, so a call that is
+    cancelled, times out or fails mid-stream still leaves a span, and those
+    are often the longest and costliest calls in a run. Once the stream has
+    named its model, the span keeps that id whatever ends the call (decided
+    on #64: the first id is recorded when it arrives, not after the stream
+    completes)."""
+    path = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("CRIVO_TELEMETRY", str(path))
+    monkeypatch.setenv("CRIVO_PROVIDER", provider)
+    if error is TimeoutError:
+        monkeypatch.setattr(llm, "STALL_S", 0.05)
+    release = threading.Event()
+
+    def stream():
+        yield from head
+        then(release)
+
+    client = _client_serving(stream())
+    monkeypatch.setattr(llm, seam, lambda: client)
+
+    reply = llm.generate([{"role": "user", "content": "q"}])
+    try:
+        assert next(reply) == "", "the model-bearing item arrives as a heartbeat"
+        if error is llm.CallCancelled:
+            llm.request_cancel()  # the REPL's Ctrl-C, mid-think
+        with pytest.raises(error):
+            next(reply)
+    finally:
+        release.set()
+
+    assert _call_attrs(path).get(_SERVED) == served
 
 
 def test_content_chunks_pass_through_unchanged(monkeypatch):

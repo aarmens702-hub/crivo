@@ -28,6 +28,9 @@ FIX_A = (
 )
 FIX_B = FIX_A.replace("-999", "-998")
 
+# what a gate shows in place of a preview when the cell is model-written (#84)
+AFTER_APPROVAL = "(no preview: model-written code runs only after you say yes)"
+
 
 class FakeClient:
     script: ClassVar[list] = []
@@ -740,7 +743,7 @@ def test_the_admission_gate_shows_the_skills_effect_on_the_frozen_case(
     FakeClient.script = [
         diag([finding()]),
         baseline(),
-        [StreamOut("stdout", "a: 2 of 4 cells change\n"), ok()],  # fix preview
+        # no fix preview: the model's fix waits for its gate (#84)
         [ok()],  # the fix
         [ok()],  # verify
         case(),
@@ -1118,26 +1121,33 @@ def test_a_verified_fix_is_snapshotted_before_the_next_one_runs(session, monkeyp
     assert "kernel_state" in snapshots[0]
 
 
-def test_the_gate_carries_a_preview_of_the_consequence(session, monkeypatch):
-    """R3/AC2: the gate showed only code, so the operator executed pandas in
-    their head. Before each gate the fix runs against a sampled scratch copy
-    in-kernel and the rendered consequence rides the GateRequest."""
+def test_a_model_fix_gate_has_no_preview_and_runs_only_once_approved(
+    session, monkeypatch
+):
+    """Regression for #84. R3/AC2 put the consequence on the gate by running
+    the fix on a sampled scratch copy first, which for a model-written fix
+    meant running model code before anyone approved it. With previews on, a
+    model fix gate now says it has no preview, nothing past the baseline has
+    run when it shows, and approving still runs the fix."""
     session.preview = True
     monkeypatch.setattr(llm, "generate", gen([FIX_A]))
     FakeClient.script = [
         diag([finding()]),
         baseline(),
-        [StreamOut("stdout", "a: 2 of 4 cells change\n"), ok()],  # the preview cell
-        [ok()],  # the fix itself
+        [ok()],  # the fix itself, once approved
         [ok()],  # verify
         case(),
         baseline(),
         saved(),
     ]
-    events = drive(session.clean("df"))
+    turn = session.clean("df")
+    gate = next(e for e in turn if isinstance(e, GateRequest))
 
-    gate = next(e for e in events if isinstance(e, GateRequest))
-    assert "2 of 4 cells change" in gate.preview
+    assert gate.preview == AFTER_APPROVAL
+    assert len(FakeClient.executed) == 2, "only diagnose and the baseline ran"
+    turn.send(GateDecision("run"))
+    for _ in turn:
+        pass
     rep = report_of(session)
     assert rep["fixes"][0]["status"] == "fixed"
 
