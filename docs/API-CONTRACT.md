@@ -100,9 +100,9 @@ One shared masker in `pii.py`, keyless. Each surface under "Masked when rendered
 | `redact_text` | `redact_text(text, columns, flagged)` | `str`. Every quoted literal (Python repr quoting, single or double) becomes its masked form, quotes kept, when a name in `columns` (as `str`) is in `flagged` (the first flagged name in `columns` order sets the type), or else when the literal is PII on its own. A quote mark right after a word character (the apostrophe in `Excel's`, or a `"` stuck to a word) does not open a literal. All other text is unchanged. |
 | `redact_findings` | `redact_findings(findings, flagged)` | `list[dict]`: shallow copies with `evidence` passed through `redact_text(f["evidence"], f["columns"], flagged)`. Never mutates its input; `flagged` is precomputed so a caller scans once. |
 
-**Masked when rendered** (surfaces a person may send on): `Report.to_html` and `_repr_html_`, the clean card, `print(summary)` and `export_notebook`, `reconcile_report`, `Report.cross_column` examples, `crivo diagnose` text output and `Report.__repr__` (`print(report)`).
+**Masked when rendered** (surfaces a person may send on, and the profile the model reads): `Report.to_html` and `_repr_html_`, the clean card, `print(summary)` and `export_notebook`, `reconcile_report`, `Report.cross_column` examples, `crivo diagnose` text output and `Report.__repr__` (`print(report)`), and the dataset profile (`profile.profile_df`, the `<dataset>` block the model reads after a load, and MCP `open_data`'s `profile`). In the profile, an object or string column is flagged when any of its first 10,000 non-null values (by position) is PII, and every sample and top value of a flagged column is masked as the most common type in that window. In an unflagged column, a shown `str` value that is PII on its own is masked; numbers are never checked. Top values are masked one by one (each keeps its raw count). `nunique`, non-null %, counts and stats are computed on the raw values, and column names are not masked.
 
-**Exempt** (programmatic or interactive by design): `Report.findings`, `to_dict`, `to_json`, `crivo diagnose --json`, the `reconcile()` and `drivers()` dicts, `CleanSummary.diff()` and `samples()`, gate previews, MCP tool results.
+**Exempt** (programmatic or interactive by design): `Report.findings`, `to_dict`, `to_json`, `crivo diagnose --json`, the `reconcile()` and `drivers()` dicts, `CleanSummary.diff()` and `samples()`, gate previews, MCP tool results other than `open_data`'s `profile`.
 
 ## CLI
 Entry points: `crivo` and `python -m crivo` (same `main`), and `crivo-mcp`.
@@ -122,7 +122,7 @@ Every tool returns its errors as data (`{"error": ...}` or an error string), nev
 |---|---|---|
 | `diagnose_file` | `path: str` | JSON string, the `crivo diagnose --json` shape. Keyless, read-only. |
 | `clean_file` | `path: str, name: str \| None = None` | dict, the headless clean summary above. Runs at `careful`. Only AUTO runs unattended. GATE fixes are asked one by one whenever the client supports elicitation; every other judgement call comes back in `needs_human`. |
-| `open_data` | `path: str` | `{session_id, variable, profile}`. Idle sessions close after 30 minutes. |
+| `open_data` | `path: str` | `{session_id, variable, profile}`. `profile` is the dataset profile, with PII in its sample and top values masked (see "PII masking"). Idle sessions close after 30 minutes. |
 | `ask` | `session_id: str, question: str` | the `AnswerCard` as a dict, plus `unresolved_gates` when a person's decision was skipped. On failure, `{error, notices}`. |
 | `why` | `session_id: str` | str, the provenance chain as markdown. |
 | `close_session` | `session_id: str` | bool, true when the session existed. |

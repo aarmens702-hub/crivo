@@ -1,17 +1,27 @@
 """P0 dataset profiler: schema, per-type stats, and truncated samples — never raw dumps.
 
 Runs inside the IPython kernel (profiles kernel-resident DataFrames), so it may
-import only pandas + stdlib. The rendered markdown is what the LLM sees in
-place of the data itself.
+import only pandas, the stdlib and crivo.pii (itself pandas and stdlib). The
+rendered markdown is what the LLM sees in place of the data itself, and what
+MCP open_data returns.
+
+Sample and top values from a PII-flagged text column are masked
+(pii.mask_cell), and so is any shown str value that is PII on its own. A
+column is flagged by a bounded scan of its first _PII_WINDOW non-null values.
+Counts, nunique, non-null % and stats are computed on the raw values. Headers,
+numeric columns and anything outside the profile are not masked here.
 """
 
 from __future__ import annotations
 
 import pandas as pd
 
+from crivo import pii
+
 _SAMPLES = 3
 _VALUE_CHARS = 80
 _TOP_CHARS = 30
+_PII_WINDOW = 10_000
 
 
 def _cell(text: str, limit: int = _VALUE_CHARS) -> str:
@@ -25,8 +35,38 @@ def _fmt_num(value: object) -> str:
     return f"{float(value):g}"
 
 
-def _extras(series: pd.Series) -> str:
-    """Per-dtype stats for one column."""
+def _pii_kind(series: pd.Series, nonnull: pd.Series) -> str | None:
+    """The PII type of a text column, read from its first _PII_WINDOW non-null
+    values by position, or None. One hit flags the column and the most common
+    type wins, as in pii.scan; only str values are checked."""
+    if not (
+        pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)
+    ):
+        return None
+    counts: dict[str, int] = {}
+    kinds: dict[str, str | None] = {}  # repeated values are typed once
+    for value in nonnull.iloc[:_PII_WINDOW].tolist():
+        if not isinstance(value, str):
+            continue
+        if value not in kinds:
+            kinds[value] = pii._cell_type(value)
+        kind = kinds[value]
+        if kind is not None:
+            counts[kind] = counts.get(kind, 0) + 1
+    return max(counts, key=lambda k: counts[k]) if counts else None
+
+
+def _shown(value: object, kind: str | None) -> str:
+    """repr of one shown value: masked as `kind` when its column is flagged,
+    or as its own type when it is a str that is PII on its own."""
+    if kind is None and isinstance(value, str):
+        kind = pii._cell_type(value)
+    return repr(pii.mask_cell(value, kind)) if kind else repr(value)
+
+
+def _extras(series: pd.Series, kind: str | None) -> str:
+    """Per-dtype stats for one column. Top values are masked one by one (each
+    keeps its raw count)."""
     if pd.api.types.is_numeric_dtype(series.dtype):
         return (
             f"min={_fmt_num(series.min())} · median={_fmt_num(series.median())}"
@@ -38,20 +78,22 @@ def _extras(series: pd.Series) -> str:
     if top.empty:
         return "—"
     return "top: " + " · ".join(
-        f"{_cell(repr(v), _TOP_CHARS)}×{int(c)}" for v, c in top.items()
+        f"{_cell(_shown(v, kind), _TOP_CHARS)}×{int(c)}" for v, c in top.items()
     )
 
 
 def _row(col_name: object, series: pd.Series, n_rows: int) -> str:
     """Render one profile table row for a column."""
     pct = 100.0 * int(series.notna().sum()) / n_rows if n_rows else 0.0
+    nonnull = series.dropna()
+    kind = _pii_kind(series, nonnull)
     samples = (
-        " · ".join(_cell(repr(v)) for v in series.dropna().iloc[:_SAMPLES].tolist())
+        " · ".join(_cell(_shown(v, kind)) for v in nonnull.iloc[:_SAMPLES].tolist())
         or "—"
     )
     return (
         f"| {_cell(str(col_name))} | {series.dtype} | {pct:.1f}% | {series.nunique()}"
-        f" | {samples} | {_extras(series)} |"
+        f" | {samples} | {_extras(series, kind)} |"
     )
 
 

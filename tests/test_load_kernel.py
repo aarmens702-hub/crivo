@@ -39,6 +39,39 @@ def test_a_windows_encoded_export_loads_into_the_kernel(tmp_path) -> None:
         session.close()
 
 
+def test_a_loaded_email_column_reaches_the_model_masked(tmp_path) -> None:
+    """Regression for #114. profile_df runs inside the kernel, so its masking
+    needs crivo.pii to import there: the <dataset> block the model reads after
+    a load carries masked addresses, never a raw one."""
+    csv = tmp_path / "contacts.csv"
+    csv.write_text(
+        "customer_id,email,amount\n"
+        "00412,jane.doe@acme.co.uk,1200.50\n"
+        "00077, Raj.Patel@Acme.co.uk ,N/A\n"
+        "01999,m.okafor@northwind-traders.com,-999\n"
+        "00500,jane.doe@acme.co.uk,42.00\n"
+    )
+    session = Session(
+        workspace=tmp_path / "ws",
+        data_dir=tmp_path,
+        transport_argv=SUBPROCESS_ARGV,
+        skills_dir=tmp_path / "skills",
+    )
+    try:
+        session.load(str(csv), "contacts")
+        blocks = [
+            m["content"]
+            for m in session.history
+            if m["content"].startswith("<dataset variable='contacts'>")
+        ]
+        assert len(blocks) == 1, "the load never reached the model's history"
+        for local in ("jane.doe", "raj.patel", "m.okafor"):
+            assert local not in blocks[0].lower()
+        assert "***@acme.co.uk" in blocks[0]
+    finally:
+        session.close()
+
+
 def test_resume_rebuilds_a_usable_session(tmp_path) -> None:
     """P5 R9/AC6: no daemon, no socket — a resumed session is a new process
     reading an old log. It must come back with its datasets loaded into a
