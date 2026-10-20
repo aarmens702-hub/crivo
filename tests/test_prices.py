@@ -221,3 +221,137 @@ def test_every_price_names_its_source_and_the_day_it_was_read():
         date.fromisoformat(checked)
     faux = prices.PRICES["faux"]
     assert (faux["input"], faux["cache_hit"], faux["output"]) == (0.0, 0.0, 0.0)
+
+
+# --- #239: refused counts, and the bound on a call whose spend is unread -----
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"gen_ai.usage.input_tokens": -12480, "gen_ai.usage.output_tokens": 1037},
+        {"gen_ai.usage.input_tokens": 12480, "gen_ai.usage.output_tokens": -1037},
+        {
+            "gen_ai.usage.input_tokens": 12480,
+            "gen_ai.usage.output_tokens": 1037,
+            "crivo.cache.hit_tokens": -9216,
+        },
+        # more cache hits than input: input minus hits would bill a negative
+        {
+            "gen_ai.usage.input_tokens": 12480,
+            "gen_ai.usage.output_tokens": 1037,
+            "crivo.cache.hit_tokens": 12481,
+        },
+    ],
+    ids=["negative input", "negative output", "negative hits", "hits above input"],
+)
+def test_cost_usd_refuses_a_negative_count_and_hits_above_input(monkeypatch, usage):
+    """#239 (from #72's review): a span reporting a negative count, or more
+    cache hits than input, is no reading: None, so it reads as unread, never a
+    cost below what was spent."""
+    prices = _prices()
+    monkeypatch.setitem(prices.PRICES, TEST_KEY, dict(TEST_PRICE))
+    assert prices.cost_usd({**NAMED, **usage}, TEST_KEY) is None
+
+
+def test_cost_usd_still_prices_a_span_whose_whole_input_hit_the_cache(monkeypatch):
+    """The legitimate case beside the refusal: hits equal to input are a fully
+    warm cache, priced. Hand-checked: 0 * 0.27 + 12480 * 0.07 + 1037 * 1.10
+    = 873.6 + 1140.7 = 2014.3 per million -> $0.0020143."""
+    prices = _prices()
+    monkeypatch.setitem(prices.PRICES, TEST_KEY, dict(TEST_PRICE))
+    attrs = {
+        **NAMED,
+        "gen_ai.usage.input_tokens": 12480,
+        "gen_ai.usage.output_tokens": 1037,
+        "crivo.cache.hit_tokens": 12480,
+        "crivo.cache.miss_tokens": 0,
+    }
+    got = prices.cost_usd(attrs, TEST_KEY)
+    assert got == pytest.approx(0.0020143, rel=1e-9, abs=1e-12)
+
+
+def _bound():
+    """bench.prices and its call_bound_usd, looked up so that a missing one
+    fails on this assertion rather than on an AttributeError."""
+    prices = _prices()
+    bound = getattr(prices, "call_bound_usd", None)
+    assert callable(bound), "bench.prices.call_bound_usd does not exist yet (#239)"
+    return prices, bound
+
+
+# TEST_PRICE with a documented output limit, as an entry names it.
+BOUNDED_PRICE = {**TEST_PRICE, "max_output_tokens": 8000}
+
+
+@pytest.mark.parametrize(
+    "input_bytes, want",
+    [
+        # 2000 * 0.27 + 8000 * 1.10 = 540 + 8800 per million -> $0.00934
+        (2000, 0.00934),
+        # nothing sent still risks the whole output: 8800 per million
+        (0, 0.0088),
+    ],
+    ids=["2000 bytes sent", "nothing sent"],
+)
+def test_call_bound_usd_is_the_input_sent_plus_the_documented_output_limit(
+    monkeypatch, input_bytes, want
+):
+    """#239 step 1: the most one call can cost is every byte sent priced as an
+    input token (a token covers at least one byte) plus the entry's
+    max_output_tokens at the output rate, per million."""
+    prices, bound = _bound()
+    monkeypatch.setitem(prices.PRICES, TEST_KEY, dict(BOUNDED_PRICE))
+    assert bound(input_bytes, TEST_KEY) == pytest.approx(want, rel=1e-9, abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    "input_bytes, key, entry",
+    [
+        (2000, TEST_KEY, TEST_PRICE),
+        (2000, "deepseek-v9-unpriced", BOUNDED_PRICE),
+        (-1, TEST_KEY, BOUNDED_PRICE),
+        (math.nan, TEST_KEY, BOUNDED_PRICE),
+        (math.inf, TEST_KEY, BOUNDED_PRICE),
+        (True, TEST_KEY, BOUNDED_PRICE),
+        (2000, TEST_KEY, {**TEST_PRICE, "max_output_tokens": 0}),
+        (2000, TEST_KEY, {**TEST_PRICE, "max_output_tokens": -1}),
+        (2000, TEST_KEY, {**TEST_PRICE, "max_output_tokens": True}),
+        (2000, TEST_KEY, {**BOUNDED_PRICE, "output": math.nan}),
+    ],
+    ids=[
+        "no output limit",
+        "unknown key",
+        "negative bytes",
+        "NaN bytes",
+        "infinite bytes",
+        "True as bytes",
+        "a zero limit",
+        "a negative limit",
+        "True as a limit",
+        "a NaN output rate",
+    ],
+)
+def test_call_bound_usd_is_none_when_the_call_cant_be_bounded(
+    monkeypatch, input_bytes, key, entry
+):
+    """An entry with no output limit can't bound a call, so the spend guard
+    keeps #72's fail-closed stop: None, never 0. A count that is not a finite
+    amount of 0 or more, a limit that is not a positive whole number of
+    tokens, or a rate that is not finite bounds nothing either."""
+    prices, bound = _bound()
+    monkeypatch.setitem(prices.PRICES, TEST_KEY, dict(entry))
+    assert bound(input_bytes, key) is None
+
+
+def test_the_deepseek_entry_names_its_documented_output_limit():
+    """#239: DeepSeek's pricing page (read 2026-10-19) gives deepseek-v4-pro a
+    384K maximum output, so its calls can be bounded. Where an entry names a
+    limit, it is a positive whole number of tokens."""
+    prices = _prices()
+    entry = prices.PRICES["deepseek:deepseek-v4-pro"]
+    assert entry.get("max_output_tokens") == 384_000
+    for key, entry in prices.PRICES.items():
+        if "max_output_tokens" in entry:
+            limit = entry["max_output_tokens"]
+            assert type(limit) is int and limit > 0, f"{key}.max_output_tokens"

@@ -2142,16 +2142,17 @@ def _billed_faux(monkeypatch, usage=lambda i: BILLED_USAGE, price=BILLED_PRICE):
     return reached
 
 
-def _calling_flow(attempts=ATTEMPTS):
+def _calling_flow(attempts=ATTEMPTS, messages=None):
     """The body of a CLEAN flow that asks the model `attempts` times before it
     yields any event, as one turn's nested calls can, so only the guard can
     stop a call. A raise is caught as the loop catches it, and the flow goes
-    on. Returns the flow and the refusals it caught."""
+    on. Returns the flow and the refusals it caught. `messages` None sends
+    the two below."""
     from crivo import llm
     from crivo.events import StreamText
 
     refusals: list = []
-    messages = [
+    messages = messages or [
         {"role": "system", "content": "You are crivo's cleaning analyst."},
         {
             "role": "user",
@@ -2286,3 +2287,309 @@ def test_a_refused_call_lands_in_the_cassette_as_an_error(tmp_path, monkeypatch)
         assert call["error"] is not None, "a refused call was recorded as no error"
     assert len({json.dumps(c["error"], sort_keys=True) for c in refused}) == 1
     assert "00417" not in json.dumps(recorded)
+
+
+# --- an unread call charged its bound (#239) -----------------------------------
+# A call whose span can't be priced (no usage: DeepSeek reports usage only in a
+# stream's last chunk, so a call cut off mid-stream leaves none; or no span at
+# all) is charged the most one call can cost when its price entry names
+# max_output_tokens: every UTF-8 byte of the messages the guard was handed
+# (json.dumps, ensure_ascii=False, the recorder's serialization) priced as an
+# input token, plus the limit at the output rate. The case's cap compares
+# measured plus bounded. Without the limit the case stops as before
+# (test_a_priced_case_whose_spend_cant_be_read_fails_closed pins it).
+
+# A turn's messages as the loop sends them: ids with leading zeros, a padded
+# id, a sentinel and a non-ASCII value. Serialized, hand-checked: the system
+# message is 10 + 6 + 15 + 33 + 2 = 66 bytes ({"role": "|system|", "content":
+# "|its 33 characters|"}), the user one 10 + 4 + 15 + 101 + 2 = 132 (its 97
+# characters, ã two bytes and three newlines escaped to two each: 101), and
+# [ + 66 + ", " + 132 + ] = 202 bytes. Counting characters gives 201 and
+# escaping to ASCII 206, so the bound below tells all three apart.
+BOUNDED_MESSAGES = [
+    {"role": "system", "content": "You are crivo's cleaning analyst."},
+    {
+        "role": "user",
+        "content": "<dataset variable='df'>\nacct: '00417', ' 00982', 'N/A'\n"
+        "branch: 'São Paulo', 'Curitiba'\n</dataset>",
+    },
+]
+SENT_BYTES = 202
+# BILLED_PRICE with a documented output limit. One unread call's bound:
+# 202 * 0.27 + 8000 * 1.10 = 54.54 + 8800 = 8854.54 per million, $0.00885454.
+LIMITED_PRICE = {**BILLED_PRICE, "max_output_tokens": 8000}
+BOUND_USD = 0.00885454
+
+
+def _bounded_row(row):
+    """The three cost fields a capped row carries, absent ones as "absent"."""
+    return {
+        key: row.get(key, "absent")
+        for key in ("cost_usd", "cost_bound_usd", "cost_bounded_calls")
+    }
+
+
+@pytest.mark.parametrize(
+    "spans, bounded, measured, bound_usd",
+    [
+        ("no usage", ATTEMPTS, 0.0, ATTEMPTS * BOUND_USD),
+        ("no span", ATTEMPTS, 0.0, ATTEMPTS * BOUND_USD),
+        (
+            "usage, then none",
+            ATTEMPTS - 1,
+            PER_CALL_USD,
+            PER_CALL_USD + (ATTEMPTS - 1) * BOUND_USD,
+        ),
+    ],
+    ids=["no usage", "no span", "usage, then none"],
+)
+def test_an_unread_call_on_a_limited_price_is_charged_its_bound_and_the_case_goes_on(
+    tmp_path, monkeypatch, spans, bounded, measured, bound_usd
+):
+    """#239 Done when 1, the case: a priced model whose entry names
+    max_output_tokens. Each unread call is charged its bound ($0.00885454,
+    202 bytes sent), so under a $1 cap every call goes out and the case does
+    not abort. Nothing measured the whole spend, so cost_usd is None, and
+    cost_bound_usd is measured plus bounded: five bounds, or the one priced
+    call ($0.0346) plus four. The measured part is kept apart, as
+    cost_measured_usd ($0.0346 or nothing), so the run can add it to what it
+    measured (the reviewer's fix 4 on #239). Only a byte count is kept: no
+    value from the messages reaches the row or the telemetry."""
+    usage = {
+        "no usage": lambda i: {},
+        "no span": lambda i: None,
+        "usage, then none": lambda i: BILLED_USAGE if i == 0 else {},
+    }[spans]
+    calls = _billed_faux(monkeypatch, usage=usage, price=LIMITED_PRICE)
+    clean, refusals = _calling_flow(messages=BOUNDED_MESSAGES)
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    args = _record_args(tmp_path, record=None, per_case_usd=1.0)
+
+    row = agent_run._run_case({"name": "acct_case", "diseases": [6]}, args)
+
+    assert len(calls) == ATTEMPTS, "a bounded call stopped the case's later calls"
+    assert refusals == []
+    assert not row["status"].startswith("aborted"), "a case under its cap aborted"
+    got = _bounded_row(row)
+    assert got["cost_usd"] is None, "a bounded spend was reported as measured"
+    assert got["cost_bounded_calls"] == bounded
+    assert got["cost_bound_usd"] == pytest.approx(bound_usd, rel=1e-9, abs=1e-12)
+    assert row.get("cost_measured_usd", "absent") == pytest.approx(measured), (
+        "the measured part of a bounded case is not on its row"
+    )
+
+    import json
+
+    tele = tmp_path / "res" / "telemetry" / "acct_case.jsonl"
+    written = (tele.read_text() if tele.exists() else "") + json.dumps(
+        row, ensure_ascii=False, default=str
+    )
+    for value in ("00417", "São Paulo", "Curitiba"):
+        assert value not in written, "a value from the messages was kept"
+
+
+@pytest.mark.parametrize(
+    "spans, reached, bound_usd",
+    [
+        # 202 * 0.27 + 400000 * 1.10 = 440054.54 per million, $0.44005454 a
+        # call: one is under $0.50, two ($0.88010908) cross it
+        ("no usage", 2, 2 * 0.44005454),
+        # $0.0346 measured, plus one bound is $0.47465454; a second crosses
+        ("usage, then none", 3, PER_CALL_USD + 2 * 0.44005454),
+    ],
+    ids=["no usage", "usage, then none"],
+)
+def test_a_bound_that_crosses_the_cap_stops_the_case_as_over_budget(
+    tmp_path, monkeypatch, spans, reached, bound_usd
+):
+    """#239 step 2: the cap compares measured plus bounded, so a case whose
+    bounds cross it stops as any case over its cap does, "aborted: per-case
+    budget", not "spend unread" (its spend is bounded, not unknown), and every
+    later call is refused before it is sent."""
+    usage = {
+        "no usage": lambda i: {},
+        "usage, then none": lambda i: BILLED_USAGE if i == 0 else {},
+    }[spans]
+    price = {**BILLED_PRICE, "max_output_tokens": 400_000}
+    calls = _billed_faux(monkeypatch, usage=usage, price=price)
+    clean, refusals = _calling_flow(messages=BOUNDED_MESSAGES)
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    args = _record_args(tmp_path, record=None, per_case_usd=0.5)
+
+    row = agent_run._run_case({"name": "acct_case", "diseases": [6]}, args)
+
+    assert row["status"] == "aborted: per-case budget"
+    assert len(calls) == reached, "a call past the cap reached the provider"
+    assert len(refusals) == ATTEMPTS - reached, "a later call was not refused"
+    assert len({str(exc) for exc in refusals}) == 1, "the refusal is one text"
+    got = _bounded_row(row)
+    assert got["cost_usd"] is None
+    assert got["cost_bounded_calls"] == 2
+    assert got["cost_bound_usd"] == pytest.approx(bound_usd, rel=1e-9, abs=1e-12)
+
+
+def _streaming_flow(messages):
+    """The body of a CLEAN flow that streams one model call, yielding each
+    chunk as the loop's _complete does, so the wall cap can fire mid-stream
+    and close the call before its span gets usage."""
+    from crivo import llm
+    from crivo.events import StreamText
+
+    def clean(session):
+        for chunk in llm.generate(messages):
+            yield StreamText("model", chunk)
+        yield StreamText("model", "\n")
+
+    return clean
+
+
+@pytest.mark.parametrize("spans", ["no usage", "no span"])
+@pytest.mark.parametrize("limited", [True, False], ids=["limit", "no limit"])
+def test_a_call_cut_by_the_wall_cap_is_bounded_only_where_the_price_names_a_limit(
+    tmp_path, monkeypatch, spans, limited
+):
+    """#239 Context: the wall cap closing a stream is how a DeepSeek call is
+    left with no usage. The case ends "aborted: wall cap" either way. With
+    max_output_tokens on the entry its one call is charged its bound; without
+    it the spend stays unread: cost_bound_usd None, never 0."""
+    usage = {"no usage": lambda i: {}, "no span": lambda i: None}[spans]
+    price = LIMITED_PRICE if limited else BILLED_PRICE
+    calls = _billed_faux(monkeypatch, usage=usage, price=price)
+    _recorded_fake_session(tmp_path, monkeypatch, _streaming_flow(BOUNDED_MESSAGES))
+    args = _record_args(tmp_path, record=None, per_case_usd=1.0, wall_cap=1e-6)
+
+    row = agent_run._run_case({"name": "acct_case", "diseases": [6]}, args)
+
+    assert len(calls) == 1
+    assert row["status"].startswith("aborted: wall cap"), row["status"]
+    got = _bounded_row(row)
+    assert got["cost_usd"] is None
+    if limited:
+        assert got["cost_bounded_calls"] == 1
+        assert got["cost_bound_usd"] == pytest.approx(BOUND_USD, rel=1e-9, abs=1e-12)
+    else:
+        assert got["cost_bound_usd"] is None, "an unbounded unread spend got a number"
+
+
+# A turn's history as the loop grows it: BOUNDED_MESSAGES (202 bytes), then
+# the model's cell, then what the cell printed. Hand-checked: the assistant
+# message is 10 + 9 + 15 + 58 + 2 = 94 bytes (its 56 characters, two newlines
+# escaped to two bytes each), 96 with its ", ", so 298; the output message 10 +
+# 4 + 15 + 44 + 2 = 75 (42 characters, two newlines), 77 with its ", ", so 375.
+GROWN = [
+    BOUNDED_MESSAGES,
+    [
+        *BOUNDED_MESSAGES,
+        {
+            "role": "assistant",
+            "content": "<execute>\ndf['acct'] = df['acct'].str.strip()\n</execute>",
+        },
+    ],
+]
+GROWN.append(
+    [
+        *GROWN[1],
+        {"role": "user", "content": "<output>\n1 value changed in acct\n</output>"},
+    ]
+)
+# Bounds at LIMITED_PRICE: 298 * 0.27 + 8800 = 8880.46 per million, $0.00888046;
+# 375 * 0.27 + 8800 = 8901.25, $0.00890125.
+BOUND_298, BOUND_375 = 0.00888046, 0.00890125
+
+
+def _history_flow(histories):
+    """The body of a CLEAN flow that makes one call per message list in
+    `histories`, in order, then yields one event."""
+    from crivo import llm
+    from crivo.events import StreamText
+
+    def clean(session):
+        for messages in histories:
+            "".join(llm.generate(messages))
+        yield StreamText("model", "done")
+
+    return clean
+
+
+@pytest.mark.parametrize(
+    "priced",
+    [2, 0],
+    ids=["the largest call priced, two smaller unread", "the smallest priced"],
+)
+def test_unread_calls_are_bounded_by_the_largest_messages_sent(
+    tmp_path, monkeypatch, priced
+):
+    """#239 (agent_run._case_cost): spans don't say which call wrote them, so
+    two unread calls among three are charged the bounds of the two largest
+    messages sent (375 and 298 bytes), whichever calls left them: never the
+    smaller ones a priced call may have sent. Both ways round the case costs
+    $0.0346 measured plus $0.00890125 + $0.00888046 bounded = $0.05238171.
+    With the largest call priced, bounding the calls that went unread (202
+    and 298 bytes) would charge less; with the smallest priced, bounding the
+    smallest two would."""
+    calls = _billed_faux(
+        monkeypatch,
+        usage=lambda i: BILLED_USAGE if i == priced else {},
+        price=LIMITED_PRICE,
+    )
+    _recorded_fake_session(tmp_path, monkeypatch, _history_flow(GROWN))
+    args = _record_args(tmp_path, record=None, per_case_usd=1.0)
+
+    row = agent_run._run_case({"name": "acct_case", "diseases": [6]}, args)
+
+    assert len(calls) == 3
+    assert not row["status"].startswith("aborted"), row["status"]
+    got = _bounded_row(row)
+    assert got["cost_usd"] is None
+    assert got["cost_bounded_calls"] == 2
+    want = PER_CALL_USD + BOUND_375 + BOUND_298
+    assert got["cost_bound_usd"] == pytest.approx(want, rel=1e-9, abs=1e-12), (
+        "the unread calls were not bounded by the largest messages sent"
+    )
+
+
+def test_more_unread_spans_than_calls_sent_fails_closed_even_with_a_limit(
+    tmp_path, monkeypatch
+):
+    """#239 (agent_run._case_cost, unread > calls): a call that leaves two
+    spans with no usage, as a provider retrying inside one call would, is
+    more unread spend than the one call the guard sent and can bound. The
+    price names max_output_tokens, but a bound can only cover calls the guard
+    saw, so the case fails closed as #72's does: "aborted: per-case budget
+    (spend unread)", every later call refused, cost_bound_usd None."""
+    from crivo import llm, telemetry
+
+    _prices()
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    monkeypatch.setitem(_prices().PRICES, "faux", dict(LIMITED_PRICE))
+    reached: list = []
+
+    def generate(messages, model=None):
+        reached.append(len(reached))
+
+        def stream():
+            try:
+                yield "<execute>\ndf['acct'] = df['acct'].str.strip()\n</execute>"
+            finally:  # two attempts inside one call, neither read its usage
+                for _ in range(2):
+                    telemetry.emit(
+                        "gen_ai.client.call",
+                        dur_s=0.8,
+                        **{"gen_ai.system": "faux", "gen_ai.request.model": "m"},
+                    )
+
+        return stream()
+
+    monkeypatch.setattr(llm, "generate", generate)
+    clean, refusals = _calling_flow(messages=BOUNDED_MESSAGES)
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    args = _record_args(tmp_path, record=None, per_case_usd=1.0)
+
+    row = agent_run._run_case({"name": "acct_case", "diseases": [6]}, args)
+
+    assert len(reached) == 1, "a call after the unread spend reached the provider"
+    assert row["status"] == "aborted: per-case budget (spend unread)"
+    assert len(refusals) == ATTEMPTS - 1
+    got = _bounded_row(row)
+    assert got["cost_usd"] is None
+    assert got["cost_bound_usd"] is None, "spend no bound covers was given a number"

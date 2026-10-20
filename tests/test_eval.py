@@ -1737,18 +1737,21 @@ def test_run_refuses_an_unpriced_arm_and_runs_a_priced_one(
     assert sorted({c["provider"] for c in log}) == ["claude", "faux"]
 
 
-def _raw_registered(issue, ev, budget, per_case):
+def _raw_registered(issue, ev, budget, per_case, wall_cap=None):
     """A registration on the cut suite written straight into the ledger file,
     past ledger.append (which refuses NaN), as a hand edit or an older writer
-    could leave it."""
+    could leave it. `wall_cap` set replaces its arm's."""
     entries = ev.SUITES[SUITE]["splits"]["dev"]
+    arm = _arm("a1", "faux", "m", price=_prices().PRICES["faux"])
+    if wall_cap is not None:
+        arm["wall_cap"] = wall_cap
     row = ledger.new_row(
         "registered",
         issue,
         type="code",
         suite=SUITE,
         split="dev",
-        arms=[_arm("a1", "faux", "m", price=_prices().PRICES["faux"])],
+        arms=[arm],
         k=3,
         hypothesis=HYPOTHESIS,
         primary="pass_at_1",
@@ -2086,3 +2089,395 @@ def test_one_faux_run_on_a_smoke_case_writes_a_registered_and_a_result_row(
     _commit(root, "ledger: an eval")
     assert _check_locks().check(str(root)) == []
     print(f"end to end: register and run in {took:.1f}s")
+
+
+# --- #239: a bounded case, and the wall cap -----------------------------------
+# A case whose spend went unread is charged a bound when its price names
+# max_output_tokens (agent_run's spend guard): its row carries cost_usd None
+# (nothing measured the whole spend), cost_bound_usd (measured plus bounded)
+# and cost_bounded_calls. The run adds the bound to what it checks against the
+# budget and goes on; only an unread case with no bound stops it
+# (test_a_run_stops_at_the_first_case_whose_spend_is_unread pins that path,
+# on rows that carry no bound fields). spent_usd stays measured only, with
+# spent_bound_usd and spent_bounded_calls beside it.
+
+BOUNDED = "bounded, not measured"
+
+
+def _bounded_first(model, name, i):
+    """a1's first case (tx-whitespace, run 1) was cut by the wall cap with its
+    one call unread and charged a $0.40 bound; every other case was measured
+    at $0.10. Rows as the capped _run_case writes them: all three fields."""
+    if (model, name, i) == ("m1", "tx-whitespace", 0):
+        status = "aborted: wall cap 300s hit"
+        row = _row(name, status, None, 3, 300.4, (model,), cost=None)
+        return {**row, "cost_bound_usd": 0.4, "cost_bounded_calls": 1}
+    row = _row(name, "ok", 1.0, 3, 25.0, (model,), cost=0.1)
+    return {**row, "cost_bound_usd": 0.1, "cost_bounded_calls": 0}
+
+
+def _block(lines: list, head: str, until: str) -> str:
+    """The lines from `head` up to the first line starting with `until`."""
+    start = lines.index(head)
+    rest = lines[start + 1 :]
+    end = next((i for i, line in enumerate(rest) if line.startswith(until)), None)
+    return "\n".join(lines[start : start + 1 + (len(rest) if end is None else end)])
+
+
+@pytest.mark.parametrize(
+    "budget, ran", [(10.0, 18), (1.0, 5)], ids=["room for all", "the bound counts"]
+)
+def test_a_bounded_case_counts_its_bound_and_the_run_goes_on(
+    tmp_path, monkeypatch, capsys, budget, ran
+):
+    """#239 Done when 1, the run: the first case is bounded, not unread, so
+    the run goes on. With $10 all 18 run: spent_usd is the 17 measured cases
+    ($1.70), spent_bound_usd adds the bound ($2.10), and one call was bounded.
+    With $1 under a $0.25 cap the bound counts against the budget: before the
+    sixth case $0.40 + 4 x $0.10 = $0.80 is bounded, and 0.80 + 0.25 > 1.00
+    stops it, where the measured $0.40 alone would have run nine. The bounded
+    case's line, a1's screen and the closing spend line say "bounded, not
+    measured"; no measured case's line does."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=CASES)
+    log = _fake_run_case(monkeypatch, _bounded_first)
+    reg = _register(ev, capsys, "a1=faux:m1", "a2=faux:m2", budget=budget)
+    _, text = _call(ev, ["run", "--registered", reg["row_id"]], capsys)
+    results = _results_of(reg)
+    assert len(results) == 1, f"no result was written: {text}"
+    (result,) = results
+
+    assert len(log) == ran, "the bound did not count, or a bounded case stopped"
+    first, *rest = result["cases"]
+    assert (first["arm"], first["case"], first["run"]) == ("a1", "tx-whitespace", 1)
+    got = {k: first.get(k, "absent") for k in ("cost_usd", "cost_bounded_calls")}
+    assert got == {"cost_usd": None, "cost_bounded_calls": 1}
+    assert first.get("cost_bound_usd") == pytest.approx(0.4)
+    for case in rest:
+        assert case["cost_usd"] == pytest.approx(0.1)
+        assert case.get("cost_bound_usd") == pytest.approx(0.1)
+        assert case.get("cost_bounded_calls") == 0
+    assert result["spent_usd"] == pytest.approx(0.1 * (ran - 1))
+    assert result.get("spent_bound_usd") == pytest.approx(0.4 + 0.1 * (ran - 1))
+    assert result.get("spent_bounded_calls") == 1
+    assert not result.get("spent_usd_unread"), "a bounded case was counted unread"
+    assert result["arms"]["a1"].get("cost_bounded_runs") == 1
+    every = [(a, n, r) for a in ("a1", "a2") for r in (1, 2, 3) for n in CASES]
+    not_run = result.get("cases_not_run", [])
+    assert sorted((c["arm"], c["case"], c["run"]) for c in not_run) == sorted(
+        every[ran:]
+    )
+    assert result["budget_hit"] is (ran < len(every))
+
+    lines = text.splitlines()
+    per_case = [line for line in lines if _per_case([line])]
+    labelled = [line for line in per_case if BOUNDED in line]
+    assert [line.partition(": ")[0] for line in labelled] == ["a1 tx-whitespace r1"]
+    assert BOUNDED in _block(lines, "a1 (faux:m1)", "a2 (faux:m2)")
+    spent = [line for line in lines if line.startswith("spent ")]
+    assert len(spent) == 1 and BOUNDED in spent[0], "the spend line says no bound"
+    hit = [line for line in lines if line.startswith("budget hit")]
+    assert all("unread" not in line for line in hit), "a bounded case read unread"
+
+    _commit(root, "ledger: an eval")
+    assert _check_locks().check(str(root)) == []
+
+
+def _spend_row(name, status, count, wall, model, measured, bound, bounded):
+    """A capped row as _run_case writes it since the reviewer's fix 4 on #239:
+    cost_measured_usd is what its priced calls cost, cost_bound_usd that plus
+    the bounds, cost_usd the measured spend only when nothing was bounded.
+    `bound` None is a spend neither read nor bounded."""
+    cost = measured if bound is not None and not bounded else None
+    row = _row(name, status, None if cost is None else 1.0, count, wall, (model,), cost)
+    return {
+        **row,
+        "cost_measured_usd": measured,
+        "cost_bound_usd": bound,
+        "cost_bounded_calls": bounded,
+    }
+
+
+def test_a_run_with_a_bounded_and_an_unread_case_never_says_at_most(
+    tmp_path, monkeypatch, capsys
+):
+    """The reviewer's fix 2 on #239: a bound caps what the bounded calls could
+    cost, but an unread case with no bound could have cost anything up to its
+    cap plus a call, so once one is in the run the spend line can't say "at
+    most". a1's first case is bounded ($0.40, one call), its second unread
+    with no bound, which stops the run there. The line still says what was
+    bounded, "bounded, not measured", and that a run went unread."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=CASES)
+
+    def table(model, name, i):
+        if (name, i) == ("tx-whitespace", 0):
+            cut = "aborted: wall cap 300s hit"
+            return _spend_row(name, cut, 1, 300.4, model, 0.0, 0.4, 1)
+        if (name, i) == ("tx-dates-mixed", 0):
+            unread = "aborted: per-case budget (spend unread)"
+            return _spend_row(name, unread, 2, 41.0, model, None, None, 0)
+        return _spend_row(name, "ok", 3, 25.0, model, 0.1, 0.1, 0)
+
+    log = _fake_run_case(monkeypatch, table)
+    reg = _register(ev, capsys, "a1=faux:m1", budget=10.0)
+    _, text = _call(ev, ["run", "--registered", reg["row_id"]], capsys)
+    results = _results_of(reg)
+    assert len(results) == 1, f"no result was written: {text}"
+    (result,) = results
+
+    assert len(log) == 2, "the run went on past a case unread with no bound"
+    assert result.get("spent_usd_unread") == 1
+    assert result.get("spent_bounded_calls") == 1
+    spent = [line for line in text.splitlines() if line.startswith("spent ")]
+    assert len(spent) == 1, "no single closing spend line"
+    assert "at most" not in spent[0], "an unread run was summed as 'at most'"
+    assert BOUNDED in spent[0]
+    assert "unread" in spent[0]
+
+    _commit(root, "ledger: an eval")
+    assert _check_locks().check(str(root)) == []
+
+
+def test_a_bounded_cases_measured_calls_count_in_spent_usd(
+    tmp_path, monkeypatch, capsys
+):
+    """The reviewer's fix 4 on #239: a case can measure some calls and bound
+    others. tx-dates-mixed's first run measured $0.05 over three calls and
+    bounded a fourth, cut by the wall cap ($0.45 with the bound); the other
+    eight runs measured $0.10 each. Its measured $0.05 is money spent, so
+    spent_usd is 8 x $0.10 + $0.05 = $0.85, not the $0.80 of the fully
+    measured runs; spent_bound_usd is $0.80 + $0.45 = $1.25. The case's own
+    cost_usd stays null, since part of it is a bound."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=CASES)
+
+    def table(model, name, i):
+        if (name, i) == ("tx-dates-mixed", 0):
+            cut = "aborted: wall cap 300s hit"
+            return _spend_row(name, cut, 4, 300.6, model, 0.05, 0.45, 1)
+        return _spend_row(name, "ok", 3, 25.0, model, 0.1, 0.1, 0)
+
+    log = _fake_run_case(monkeypatch, table)
+    reg = _register(ev, capsys, "a1=faux:m1", budget=10.0)
+    result, text = _run(ev, capsys, reg)
+
+    assert len(log) == 9
+    cut = next(
+        c for c in result["cases"] if (c["case"], c["run"]) == ("tx-dates-mixed", 1)
+    )
+    assert cut["cost_usd"] is None, "a partly bounded case was reported as measured"
+    assert result["spent_usd"] == pytest.approx(0.85), (
+        "a bounded case's measured calls were left out of spent_usd"
+    )
+    assert result.get("spent_bound_usd") == pytest.approx(1.25)
+    assert result.get("spent_bounded_calls") == 1
+    spent = [line for line in text.splitlines() if line.startswith("spent ")]
+    assert len(spent) == 1 and "$0.85" in spent[0], "the spend line lost $0.05"
+
+    _commit(root, "ledger: an eval")
+    assert _check_locks().check(str(root)) == []
+
+
+# One turn's messages: ids with leading zeros, a padded id, a sentinel and a
+# non-ASCII value. 202 bytes serialized as the guard measures them (json.dumps,
+# ensure_ascii=False, UTF-8), hand-checked in test_agent_bench's
+# BOUNDED_MESSAGES. At TEST_PRICE with an 8000-token output limit, one unread
+# call's bound is 202 * 5.0 + 8000 * 25.0 = 1010 + 200000 per million, $0.20101.
+TURN = [
+    {"role": "system", "content": "You are crivo's cleaning analyst."},
+    {
+        "role": "user",
+        "content": "<dataset variable='df'>\nacct: '00417', ' 00982', 'N/A'\n"
+        "branch: 'São Paulo', 'Curitiba'\n</dataset>",
+    },
+]
+TURN_BOUND_USD = 0.20101
+
+
+def _model_calling_session(tmp_path, monkeypatch):
+    """crivo.loop.Session replaced by one with no kernel whose CLEAN flow
+    makes one real llm.generate call under faux, streamed as the loop streams
+    it. The faux provider reports no usage, so its span is the one a call cut
+    off mid-stream leaves. Returns the sessions made."""
+    from crivo.events import StreamText
+
+    made: list = []
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            self.session_dir = tmp_path / "sess" / str(len(made))
+            made.append(self)
+
+        def load(self, path, name):
+            pass
+
+        def clean(self, var):
+            llm.faux_enqueue(
+                "<execute>\ndf['acct'] = df['acct'].str.strip()\n</execute>"
+            )
+            for chunk in llm.generate(TURN):
+                yield StreamText("model", chunk)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(llm, "_faux_responses", [])
+    monkeypatch.setattr("crivo.loop.Session", FakeSession)
+    return made
+
+
+def test_a_span_with_no_usage_is_bounded_through_the_real_case_and_the_run_goes_on(
+    tmp_path, monkeypatch, capsys
+):
+    """#239 Done when 1, the whole chain with no kernel: the real
+    agent_run._run_case, its spend guard and telemetry, and the real
+    llm.generate under faux, priced at a test price that names
+    max_output_tokens. Every call leaves a span with no usage, so each case is
+    charged $0.20101, under its $0.25 cap, and the run goes on through both
+    cases, k=3: six runs, nothing measured, $1.20606 bounded, six calls. No
+    value from the messages reaches the ledger or the run's files."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=("tx-whitespace", "tx-dates-mixed"))
+    _price(monkeypatch, "faux", "m", {**TEST_PRICE, "max_output_tokens": 8000})
+    made = _model_calling_session(tmp_path, monkeypatch)
+    reg = _register(ev, capsys, "a1=faux:m", budget=2.0, per_case=0.25)
+    result, text = _run(ev, capsys, reg)
+
+    assert len(made) == 6, "the run stopped at a case whose span had no usage"
+    assert result["budget_hit"] is False
+    assert result.get("cases_not_run", []) == []
+    for case in result["cases"]:
+        assert not case["status"].startswith("aborted"), case["status"]
+        assert case["calls"] == 1
+        assert case["cost_usd"] is None, "a bounded spend was reported as measured"
+        assert case.get("cost_bounded_calls") == 1
+        assert case.get("cost_bound_usd") == pytest.approx(
+            TURN_BOUND_USD, rel=1e-9, abs=1e-12
+        )
+    assert result["spent_usd"] == 0.0
+    assert result.get("spent_bound_usd") == pytest.approx(6 * TURN_BOUND_USD)
+    assert result.get("spent_bounded_calls") == 6
+    assert BOUNDED in text
+
+    _, kept = _json_under(_eval_dir(root, reg))
+    written = ledger.LEDGER.read_text(encoding="utf-8") + kept + text
+    for value in ("00417", "São Paulo", "S\\u00e3o Paulo", "Curitiba"):
+        assert value not in written, "a value from the messages was kept"
+    _commit(root, "ledger: an eval")
+    assert _check_locks().check(str(root)) == []
+
+
+def test_without_an_output_limit_a_span_with_no_usage_still_stops_the_run(
+    tmp_path, monkeypatch, capsys
+):
+    """#239 Done when 2, pinned beside the bounded chain above: the same real
+    chain at a price with no max_output_tokens can't bound the call, so #72's
+    fail-closed stop stands. The first case is unread and ends "aborted:
+    per-case budget (spend unread)", the run stops there with the other five
+    not run, and nothing is labelled bounded."""
+    ev, root = _setup(tmp_path, monkeypatch, cases=("tx-whitespace", "tx-dates-mixed"))
+    _price(monkeypatch, "faux", "m", dict(TEST_PRICE))
+    made = _model_calling_session(tmp_path, monkeypatch)
+    reg = _register(ev, capsys, "a1=faux:m", budget=2.0, per_case=0.25)
+    result, text = _run(ev, capsys, reg)
+
+    assert len(made) == 1, "the run went on past a case whose spend was unread"
+    (case,) = result["cases"]
+    assert case["status"] == "aborted: per-case budget (spend unread)"
+    assert case["cost_usd"] is None
+    assert case.get("cost_bound_usd") is None, "an unbounded call got a bound"
+    assert result["budget_hit"] is True
+    assert len(result["cases_not_run"]) == 5
+    assert result["spent_usd"] == 0.0
+    assert result.get("spent_usd_unread") == 1
+    assert not result.get("spent_bound_usd")
+    assert BOUNDED not in text
+    _commit(root, "ledger: an eval")
+    assert _check_locks().check(str(root)) == []
+
+
+def test_register_dry_prints_the_wall_cap_and_the_floor_on_wall_time(
+    tmp_path, monkeypatch, capsys
+):
+    """#239 Done when 4, decision 1: `register --wall-cap 600 --dry` prints the
+    cap, and on the line naming the worst case wall time, cases x k x arms x
+    cap, 3 x 3 x 2 x 600 = 10800 s, as a floor (a call or a cell yields
+    nothing until it ends, so a case can run past its cap). It appends
+    nothing.
+
+    The reviewer's fix 1: what runs past the cap is not bounded by one call
+    or one cell (several can run in a row), so no "up to one call" or "or one
+    cell" is printed, and the call limit printed is the one in force,
+    llm.call_budget_s() as CRIVO_MAX_CALL_S sets it (1234 s here), not the
+    MAX_CALL_S default."""
+    monkeypatch.setenv("CRIVO_MAX_CALL_S", "1234")
+    ev, _ = _setup(tmp_path, monkeypatch, cases=CASES)
+    argv = _register_argv(
+        "a1=faux:m1", "a2=faux:m2", extra=["--wall-cap", "600", "--dry"]
+    )
+    code, text = _call(ev, argv, capsys)
+    assert _ok(code), f"register --wall-cap 600 --dry was refused: {text}"
+    assert ledger.read() == [], "a dry run appended a row"
+    assert "600" in text, "the wall cap is not printed"
+    wall = [line for line in text.splitlines() if "10800" in line.replace(",", "")]
+    assert wall, "3 x 3 x 2 x 600 s is not printed"
+    assert "worst case" in wall[0].lower(), "the wall line names no worst case"
+    said = text.lower()
+    assert "floor" in said or "at least" in said, "the wall time is not a floor"
+    for claim in ("up to one call", "or one cell"):
+        assert claim not in said, f"the overrun is bounded by {claim!r}"
+    assert "1234" in text, "the call limit printed is not llm.call_budget_s()"
+
+
+def test_a_registered_arm_carries_its_wall_cap_and_run_hands_it_to_every_case(
+    tmp_path, monkeypatch, capsys
+):
+    """#239 Done when 4: each registered arm records wall_cap 600, and run
+    hands it to every case as args.wall_cap."""
+    ev, _ = _setup(tmp_path, monkeypatch, cases=ONE)
+    log = _fake_run_case(monkeypatch, _solved_row)
+    reg = _register(ev, capsys, "a1=faux:m1", "a2=faux:m2", extra=["--wall-cap", "600"])
+    assert [arm.get("wall_cap") for arm in reg["arms"]] == [600, 600]
+    _run(ev, capsys, reg)
+    assert len(log) == 2 * 3
+    assert [call["args"].wall_cap for call in log] == [600] * 6
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "nan", "inf"])
+def test_register_refuses_a_wall_cap_that_is_not_a_finite_number_above_0(
+    tmp_path, monkeypatch, capsys, bad
+):
+    """No time is greater than NaN or infinity, so neither cap would fire, and
+    0 or less would cut every case at its first event. Each is refused; 600
+    registers."""
+    ev, _ = _setup(tmp_path, monkeypatch)
+    argv = _register_argv("a1=faux:m", extra=["--wall-cap", bad])
+    try:
+        code, _ = _call(ev, argv, capsys)
+    except ValueError as exc:
+        pytest.fail(f"register raised {type(exc).__name__} rather than refusing")
+    assert not _ok(code), f"register accepted --wall-cap {bad}"
+    assert ledger.read() == []
+
+    reg = _register(ev, capsys, "a1=faux:m", extra=["--wall-cap", "600"])
+    assert reg["arms"][0].get("wall_cap") == 600
+
+
+@pytest.mark.parametrize("bad", [0, True], ids=["0", "True"])
+def test_run_refuses_a_hand_written_arm_whose_wall_cap_is_no_cap(
+    tmp_path, monkeypatch, capsys, bad
+):
+    """A registration register never checked, its arm's wall_cap 0 or True
+    (which compares as 1 but is no number of seconds), is refused by run
+    before any case, saying it is the wall cap. The same hand-written arm
+    with 600 runs, and each case gets 600."""
+    ev, _ = _setup(tmp_path, monkeypatch, cases=ONE)
+    log = _fake_run_case(monkeypatch, _solved_row)
+    reg = _raw_registered(71, ev, 1.0, 0.25, wall_cap=bad)
+
+    code, text = _call(ev, ["run", "--registered", reg["row_id"]], capsys)
+    assert not _ok(code), f"run accepted wall_cap {bad!r}"
+    assert "wall" in text.lower(), "the refusal does not name the wall cap"
+    assert log == [], "a case ran under a wall cap register would have refused"
+    assert ledger.rows(kind="result") == []
+
+    sane = _raw_registered(71, ev, 1.0, 0.25, wall_cap=600)
+    _run(ev, capsys, sane)
+    assert [call["args"].wall_cap for call in log] == [600] * 3

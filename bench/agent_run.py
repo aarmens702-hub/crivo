@@ -409,16 +409,22 @@ class SpendRefused(RuntimeError):
     """A call the per-case cap refused before it reached the provider."""
 
 
-def _case_cost(path: Path, key: str, calls: int) -> float | None:
+def _case_cost(path: Path, key: str, sent_bytes: list) -> dict | None:
     """What the case's gen_ai.client.call spans cost at bench.prices'
-    PRICES[key]. None when the spend can't be read: a model with no price, a
-    span that can't be priced (no usage: a call that died mid-stream), or
-    fewer spans than the `calls` the guard sent. An all-zero price (faux)
-    costs 0.0 whatever the spans say."""
+    PRICES[key], in two parts: `measured`, the spans that can be priced, and
+    `bounded`, what the unread calls are charged at prices.call_bound_usd
+    (#239), with `bounded_calls` counting them. A call is unread when its
+    span can't be priced (no usage: a call that died mid-stream) or wrote
+    none (fewer spans than calls). `sent_bytes` holds one byte count per call
+    the guard sent; which call left which span is unknown, so the unread
+    ones are bounded by the largest. None when the spend can't be read or
+    bounded: a model with no price, more unread spans than calls, or an entry
+    that names no max_output_tokens. An all-zero price (faux) costs 0.0
+    whatever the spans say."""
     if key not in prices.PRICES:
         return None
     if prices.cost_usd({}, key) == 0.0:  # only an all-zero price prices {}
-        return 0.0
+        return {"measured": 0.0, "bounded": 0.0, "bounded_calls": 0}
     try:
         lines = path.read_text().splitlines()
     except OSError:
@@ -431,35 +437,48 @@ def _case_cost(path: Path, key: str, calls: int) -> float | None:
             continue
         if isinstance(span, dict) and span.get("name") == "gen_ai.client.call":
             costs.append(prices.cost_usd(span.get("attrs"), key))
-    if len(costs) < calls or None in costs:
+    priced = [cost for cost in costs if cost is not None]
+    calls = len(sent_bytes)
+    unread = len(costs) - len(priced) + max(0, calls - len(costs))
+    if unread > calls:
         return None
-    return sum(costs)
+    largest = sorted(sent_bytes, reverse=True)[:unread]
+    bounds = [prices.call_bound_usd(sent, key) for sent in largest]
+    if None in bounds:
+        return None
+    return {"measured": sum(priced), "bounded": sum(bounds), "bounded_calls": unread}
 
 
 def _spend_guard(orig, path: Path, key: str, cap: float, spend: dict):
-    """`orig` (llm.generate) behind the per-case cap. After each call it
-    re-reads the case's telemetry (a span is written when a call ends) and
-    prices it: once the case costs more than `cap`, or its spend can't be
-    read, `spend["tripped"]` names why and every later call raises
-    SpendRefused before it is sent. The loop turns a raise from generate into
-    an llm_error notice and goes on, so the guard refuses each call, not just
+    """`orig` (llm.generate) behind the per-case cap. Before each call it
+    keeps the UTF-8 byte count of the messages as json.dumps writes them, the
+    recorder's serialization (`spend["sent_bytes"]`: the int only, never the
+    text). After it, it re-reads the case's telemetry (a span is written when
+    a call ends) and prices it (_case_cost): once the case's measured plus
+    bounded spend is more than `cap`, or its spend can't be read or bounded,
+    `spend["tripped"]` names why and every later call raises SpendRefused
+    before it is sent. The loop turns a raise from generate into an
+    llm_error notice and goes on, so the guard refuses each call, not just
     the next. The call that crosses the cap has already gone out, so a case
     can spend its cap plus at most one call: bounding a call before it is
     sent would need a max_tokens on every provider, and llm.py (core) sends
-    none to DeepSeek. A call that raises leaves a span with no usage, so it
+    none to DeepSeek. A call that raises leaves a span with no usage: it is
+    charged its bound where the price names max_output_tokens, and otherwise
     reads as unread and stops the case: fail closed."""
 
     def generate(messages, model=None):
         if spend["tripped"]:
             raise SpendRefused(SPEND_REFUSED)
-        spend["calls"] += 1
+        messages = list(messages)  # listed once, and this same list passed on
+        sent = json.dumps(messages, ensure_ascii=False, default=str)
+        spend["sent_bytes"].append(len(sent.encode("utf-8")))
         try:
             yield from (orig(messages) if model is None else orig(messages, model))
         finally:
-            cost = _case_cost(path, key, spend["calls"])
+            cost = _case_cost(path, key, spend["sent_bytes"])
             if cost is None:
                 spend["tripped"] = SPEND_UNREAD
-            elif cost > cap:
+            elif cost["measured"] + cost["bounded"] > cap:
                 spend["tripped"] = OVER_CAP
 
     return generate
@@ -629,7 +648,10 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     cap = getattr(args, "per_case_usd", None)
     key = prices.price_key(row["model"].get("provider"), row["model"].get("model"))
     # no price, no call: an unpriced model's spend could never be read
-    spend = {"calls": 0, "tripped": None if key in prices.PRICES else SPEND_UNREAD}
+    spend = {
+        "sent_bytes": [],
+        "tripped": None if key in prices.PRICES else SPEND_UNREAD,
+    }
     over_cap = (lambda: spend["tripped"]) if cap is not None else None
     calls: list = []
     execs: list = []
@@ -702,7 +724,17 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
             os.environ["CRIVO_TELEMETRY"] = prev_tele
     row["calls"] = _call_stats(tele_path)
     if cap is not None:  # None when unread, never 0 (_case_cost)
-        row["cost_usd"] = _case_cost(tele_path, key, spend["calls"])
+        cost = _case_cost(tele_path, key, spend["sent_bytes"])
+        bounded = cost is not None and cost["bounded_calls"] > 0
+        # measured only: null once any call was charged a bound, never mixed
+        row["cost_usd"] = None if cost is None or bounded else cost["measured"]
+        # the calls that were measured, a bounded case's included, at the
+        # entry's rates; cost_bound_usd adds the bounds on the unread ones
+        row["cost_measured_usd"] = None if cost is None else cost["measured"]
+        row["cost_bound_usd"] = (
+            None if cost is None else cost["measured"] + cost["bounded"]
+        )
+        row["cost_bounded_calls"] = 0 if cost is None else cost["bounded_calls"]
     row["gates"] = {"run": gates.count("run"), "skip": gates.count("skip")}
     row["wall_secs"] = round(time.monotonic() - t0, 1)
     if record:

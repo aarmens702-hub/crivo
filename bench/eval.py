@@ -8,26 +8,38 @@ shipped-unmeasured call Aarmen made. Every row goes through bench.ledger.
 
     python -m bench.eval register --issue N --type behaviour \\
         --suite agent-clean-smoke --split dev --arm a1=faux:m --k 3 \\
-        --budget-usd 0 --per-case-usd 0 --hypothesis T --primary pass_at_1 \\
-        --guards aborted --rule T [--dry]
+        --budget-usd 0 --per-case-usd 0 [--wall-cap S] --hypothesis T \\
+        --primary pass_at_1 --guards aborted --rule T [--dry]
     python -m bench.eval run --registered ROW [--record DIR]
     python -m bench.eval decide --result ROW (--adopted | --dropped) --note T
     python -m bench.eval decide --shipped-unmeasured --issue N --note T
 
-The caps (EV9, #72): an arm whose model has no entry in bench.prices is
-refused, and its entry is copied onto the registered arm. Each case runs
-under --per-case-usd (agent_run's spend guard), and before each case `run`
-stops if what it spent plus that cap could cross --budget-usd. The guard
-reads the spend after each call, so a case can spend its cap plus at most
-one call, and a run its budget plus one call. A case whose spend can't be
-read stops the run there: it may have spent its cap plus a call, and going on
-would let each unread case add another call past the budget. Both stops set
-budget_hit and list the cases not run. Arms run one after another, so a stop
-starves
-the later arms, and the arm it stops in has a partial k: its cases ran
-different numbers of times. `register --dry` prints the worst case and
-appends nothing. Run from the repo root: the ledger and the fingerprints
-read from it.
+The caps (EV9, #72, #239): an arm whose model has no entry in bench.prices is
+refused, and its entry is copied onto the registered arm, as is --wall-cap
+(seconds a case may run, agent_run's default when unset). Each case runs
+under --per-case-usd (agent_run's spend guard) and its arm's wall cap, and
+before each case `run` stops if what it spent and bounded plus that cap could
+cross --budget-usd. The guard reads the spend after each call, so a case can
+spend its cap plus at most one call, and a run its budget plus one call.
+
+A call whose spend can't be read (no usage: a stream cut off before its last
+chunk) is charged its bound when its model's price names max_output_tokens
+(prices.call_bound_usd: at most what one call can cost), and the run goes on.
+The case's outcome then has cost_usd null, cost_measured_usd (its measured
+calls), cost_bound_usd (measured plus bounded) and cost_bounded_calls. The
+result's spent_usd is the measured calls of the runs read, priced at the
+entry's rates (peak, so it reads high off-peak); spent_bound_usd adds the
+bounds, the most the runs read could cost at those rates, with
+spent_bounded_calls beside it; a run left unread is in neither. Each line
+that shows a bound says "bounded, not measured". A case whose
+spend can't be read or bounded stops the run there: it may have spent its cap
+plus a call, and going on would let each unread case add another call past
+the budget. Both stops set budget_hit and list the cases not run. Arms run
+one after another, so a stop starves the later arms, and the arm it stops in
+has a partial k: its cases ran different numbers of times. `register --dry`
+prints the worst case and the worst-case wall time, which is a lower bound,
+not a ceiling (the wall cap is checked only between events), and appends
+nothing. Run from the repo root: the ledger and the fingerprints read from it.
 
 `run` prints one line per case and run, then one screen per arm and the
 summary. What each run's Session prints, its data profile among it, goes to
@@ -57,6 +69,8 @@ EVAL_DIR = Path("bench/results/eval")
 TYPES = ("code", "behaviour", "eval", "experiment")
 NO_VERDICTS = "no verdicts exist before 0b"
 NOT_RUN = "no case of this arm ran"
+# #239: every line that shows a bound says so; a bound is never a measurement
+BOUNDED = "bounded, not measured"
 CHECK_LOCKS = Path(__file__).resolve().parents[1] / "scripts" / "check_locks.py"
 
 # ED1: one provisional suite until 0a's dev split replaces it.
@@ -162,7 +176,16 @@ def _resolve(arm: dict) -> dict:
             "rates from the provider's own pricing page, with its URL and the "
             "date read"
         )
-    return {**arm, "model": info["model"], **control, **BASELINE, "price": dict(entry)}
+    # the arm's own wall cap (#239) survives BASELINE's default
+    wall_cap = arm.get("wall_cap", BASELINE["wall_cap"])
+    return {
+        **arm,
+        "model": info["model"],
+        **control,
+        **BASELINE,
+        "wall_cap": wall_cap,
+        "price": dict(entry),
+    }
 
 
 def _parse_arms(specs: list[str]) -> list[dict]:
@@ -220,17 +243,44 @@ def _amounts(budget, per_case) -> None:
         )
 
 
+def _wall_cap(value, flag: str) -> None:
+    """No time is greater than NaN or infinity, so neither would fire; 0 or
+    less cuts every case at its first event; True compares as 1 but is no
+    number of seconds. register checks the flag, and run each arm again."""
+    number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if not number or not math.isfinite(value) or value <= 0:
+        _refuse(f"{flag} {value!r}: a wall cap is a finite number of seconds above 0")
+
+
 def _dry(args: argparse.Namespace, arms: list[dict], cases: int) -> None:
-    """ED5: the worst case before any registration exists, and what each arm's
-    model cost a case in an earlier result on this suite."""
+    """ED5: the worst case before any registration exists, the worst-case wall
+    time, and what each arm's model cost a case in an earlier result on this
+    suite. The wall time is no ceiling: _drive checks the cap only between
+    events, and calls that stream nothing and quiet cells yield none."""
+    from crivo.loop import EXEC_TIMEOUT_S  # a cell's timeout, read, not copied
+
     worst = cases * args.k * len(arms) * args.per_case_usd
+    wall = cases * args.k * len(arms) * args.wall_cap
+    cap = agent_run._cap_text(args.wall_cap)
+    call_s = agent_run._cap_text(llm.call_budget_s())  # CRIVO_MAX_CALL_S moves it
     print(
         f"worst case: {cases} cases x k={args.k} x {len(arms)} arms x "
         f"{_usd(args.per_case_usd)} a case = {_usd(worst)}; the run stops before "
         f"a case that could cross the {_usd(args.budget_usd)} budget",
         "the spend is read after each call, so a case can overshoot its cap by "
-        "one call, and the run its budget by one call: a case whose spend can't "
-        "be read stops the run, so no unread case adds another",
+        "one call, and the run its budget by one call. A call whose spend can't "
+        "be read is charged its bound, at most what one call can cost (the bytes "
+        "sent plus the model's documented output limit), labelled bounded, not "
+        "measured, and the run goes on; on a model whose price names no output "
+        "limit, a case whose spend can't be read stops the run, so no unread case "
+        "adds another",
+        f"worst case wall time: {cases} cases x k={args.k} x {len(arms)} arms x "
+        f"the {cap}s wall cap = {wall:,.0f}s ({wall / 3600:.1f} h) at least, not "
+        "at most: the cap is checked only between events, so a case runs past it "
+        "by whatever runs between two of them. A model call that streams nothing "
+        f"can take up to {call_s}s (llm.call_budget_s, set by CRIVO_MAX_CALL_S) "
+        f"and a quiet kernel cell up to {EXEC_TIMEOUT_S}s, and several can run "
+        "in a row",
         sep="\n",
     )
     regs = {r["row_id"]: r for r in ledger.rows(kind="registered", path=ledger.LEDGER)}
@@ -269,7 +319,8 @@ def register(args: argparse.Namespace) -> int:
     if args.k < 3:
         _refuse(f"k={args.k}: an eval runs every case 3 times or more")
     _amounts(args.budget_usd, args.per_case_usd)
-    arms = _parse_arms(args.arm)
+    _wall_cap(args.wall_cap, "--wall-cap")
+    arms = [{**arm, "wall_cap": args.wall_cap} for arm in _parse_arms(args.arm)]
     _faux_shell(shell, arms)
     prints = ledger.fingerprints()
     if prints["dirty"]:
@@ -362,6 +413,10 @@ def _outcome(arm: str, run: int, row: dict) -> dict:
         "calls": calls.get("count"),
         "new_work_tokens": calls.get("new_work_tokens"),
         "cost_usd": row.get("cost_usd"),
+        # #239: a row from before the bound was measured or unread, unbounded
+        "cost_measured_usd": row.get("cost_measured_usd", row.get("cost_usd")),
+        "cost_bound_usd": row.get("cost_bound_usd", row.get("cost_usd")),
+        "cost_bounded_calls": row.get("cost_bounded_calls", 0),
         "wall_s": row.get("wall_secs"),
     }
 
@@ -373,6 +428,13 @@ def _metrics(rows: list[dict]) -> dict:
     agg = consistency.aggregate_consistency(consistency.group_by_case(rows))
     walls = [r["wall_secs"] for r in rows if r.get("wall_secs") is not None]
     costs = [r["cost_usd"] for r in rows if r.get("cost_usd") is not None]
+    # #239: a bounded run's spend is neither measured nor unread
+    bounded = sum(
+        r.get("cost_usd") is None
+        and r.get("cost_bound_usd") is not None
+        and (r.get("cost_bounded_calls") or 0) > 0
+        for r in rows
+    )
     metrics = {
         "cases": agg["cases"],
         "pass_k": agg["mean_pass_k"] if rows else None,
@@ -386,9 +448,13 @@ def _metrics(rows: list[dict]) -> dict:
         for key in ("pass_k", "pass_at_1", "cost_usd", "wall_s"):
             metrics[f"{key}_reason"] = NOT_RUN
     elif not costs:
-        metrics["cost_usd_reason"] = "no run's spend could be read"
-    if len(costs) < len(rows):
-        metrics["cost_usd_unread"] = len(rows) - len(costs)
+        metrics["cost_usd_reason"] = (
+            "no run's spend was measured" if bounded else "no run's spend could be read"
+        )
+    if len(costs) + bounded < len(rows):
+        metrics["cost_usd_unread"] = len(rows) - len(costs) - bounded
+    if bounded:
+        metrics["cost_bounded_runs"] = bounded
     return metrics
 
 
@@ -452,21 +518,36 @@ def _noise_floor(
 
 
 def _spent_text(spend: dict) -> str:
-    unread = spend["unread"]
+    unread, calls = spend["unread"], spend["bounded_calls"]
     runs = f"{unread} run{'s' * (unread != 1)}"
-    return _usd(spend["spent_usd"]) + (f" known ({runs} unread)" if unread else "")
+    if not calls:
+        return _usd(spend["spent_usd"]) + (f" known ({runs} unread)" if unread else "")
+    bounded = f"{calls} call{'s' * (calls != 1)} {BOUNDED}"
+    if unread:  # an unread run has no bound, so nothing here is "at most"
+        bound = f"{_usd(spend['bound_usd'])} bounded over the runs read"
+        return (
+            f"{_usd(spend['spent_usd'])} measured ({bound}, {bounded}; {runs} unread)"
+        )
+    bound = f"at most {_usd(spend['bound_usd'])}"
+    return f"{_usd(spend['spent_usd'])} measured ({bound} with {bounded})"
 
 
 def _run_arms(reg: dict, entries: list, out: Path, record) -> tuple:
     """Every case k times per arm, arm after arm, each under its own env and
-    results dir and the per-case cap. Never resumes: every run calls
-    _run_case. Before each case, spent plus the cap is checked against the
-    budget; once it could cross, or once a case's spend went unread, that
-    case and every later one is not run, so later arms starve and the arm it
-    stops in has a partial k. A case can spend its cap plus one call, so the
-    run can spend its budget plus one call; an unread case stops the run
-    because it may have spent that much too, and going on would let each
-    unread case add another call. Each finished case's outcome and the spend
+    results dir, the per-case cap and the arm's wall cap. Never resumes: every
+    run calls _run_case. Before each case, what was spent and bounded plus the
+    cap is checked against the budget; once it could cross, or once a case's
+    spend went unread with no bound, that case and every later one is not
+    run, so later arms starve and the arm it stops in has a partial k. A case
+    can spend its cap plus one call, so the run can spend its budget plus one
+    call. A bounded case (#239) adds its bound, the most its unread calls
+    could cost, and the run goes on; an unread case with no bound stops the
+    run because it may have spent its cap plus a call, and going on would
+    let each such case add another call. The spend keeps spent_usd (the
+    measured calls of the runs read, a bounded case's included), bound_usd
+    (the runs read, measured plus bounded), bounded_calls and unread (runs
+    in neither sum). Each finished case's
+    outcome and the spend
     so far land in <out>/cases.jsonl as they finish, so a case that raises
     loses none of what ran. What each run's Session prints (its data profile
     among it) goes to <out>/<arm>/logs/<case>.r<run>.log, a case that raises
@@ -474,18 +555,21 @@ def _run_arms(reg: dict, entries: list, out: Path, record) -> tuple:
     per arm, the outcomes, the cases not run and the spend."""
     rows, cases, not_run = {}, [], []
     cap, budget = reg["per_case_usd"], reg["budget_usd"]
-    spend = {"spent_usd": 0.0, "unread": 0}
+    spend = {"spent_usd": 0.0, "bound_usd": 0.0, "bounded_calls": 0, "unread": 0}
     for arm in reg["arms"]:
         name = arm["name"]
         _use(arm)
         agent_run.RESULTS_DIR = out / name
         args = argparse.Namespace(
-            **BASELINE, policy_records=[], record=record, per_case_usd=cap
+            **{**BASELINE, "wall_cap": arm["wall_cap"]},
+            policy_records=[],
+            record=record,
+            per_case_usd=cap,
         )
         rows[name] = []
         for run in range(1, reg["k"] + 1):
             for entry in entries:
-                if not_run or spend["unread"] or spend["spent_usd"] + cap > budget:
+                if not_run or spend["unread"] or spend["bound_usd"] + cap > budget:
                     not_run.append({"arm": name, "case": entry["name"], "run": run})
                     continue
                 args.run_tag = f".{name}.r{run}"  # one cassette per arm and run
@@ -510,15 +594,26 @@ def _run_arms(reg: dict, entries: list, out: Path, record) -> tuple:
                 rows[name].append(row)
                 case = _outcome(name, run, row)
                 cases.append(case)
-                cost = case["cost_usd"]
-                if cost is None:
+                cost, bound = case["cost_usd"], case["cost_bound_usd"]
+                measured = case["cost_measured_usd"]
+                bounded = (case["cost_bounded_calls"] or 0) if bound is not None else 0
+                if measured is not None:  # a bounded case's measured calls too
+                    spend["spent_usd"] += measured
+                if bound is None:
                     spend["unread"] += 1
                 else:
-                    spend["spent_usd"] += cost
+                    spend["bound_usd"] += bound
+                    spend["bounded_calls"] += bounded
                 with open(out / "cases.jsonl", "a", encoding="utf-8") as fh:
                     fh.write(json.dumps({"outcome": case, **spend}) + "\n")
                 calls = agent_run._tokens_text(case["calls"])
-                paid = "cost unknown" if cost is None else _usd(cost)
+                if bounded:
+                    paid = (
+                        f"at most {_usd(bound)}: {bounded} "
+                        f"call{'s' * (bounded != 1)} {BOUNDED}"
+                    )
+                else:
+                    paid = "cost unknown" if cost is None else _usd(cost)
                 print(
                     f"{name} {case['case']} r{run}: {case['status']} | {calls} calls"
                     f" | {paid}"
@@ -552,6 +647,9 @@ def _screen(arm: dict, s: dict, served: list, unread: int) -> None:
     cost = _p(s["cost_usd"], s.get("cost_usd_reason"), _usd)
     if s.get("cost_usd_unread") and s["cost_usd"] is not None:
         cost += f" ({s['cost_usd_unread']} unread)"
+    if s.get("cost_bounded_runs"):  # #239: left out of the quantiles, and said
+        runs = s["cost_bounded_runs"]
+        cost += f"; {runs} run{'s' * (runs != 1)} {BOUNDED}"
     print(
         f"\n{arm['name']} ({arm['provider']}:{arm['model']})",
         line("all cases", s),
@@ -576,6 +674,8 @@ def run(args: argparse.Namespace) -> int:
         _refuse(f"no suite {reg['suite']} with a {reg['split']} split here")
     _faux_shell(shell, reg["arms"])
     _amounts(reg.get("budget_usd"), reg.get("per_case_usd"))
+    for arm in reg["arms"]:
+        _wall_cap(arm.get("wall_cap"), f"arm {arm['name']}'s wall_cap")
     results = ledger.rows(kind="result", path=ledger.LEDGER)
     if any(r.get("registered") == reg["row_id"] for r in results):
         _refuse(f"{reg['row_id']} already has a result: register again to rerun")
@@ -629,9 +729,19 @@ def run(args: argparse.Namespace) -> int:
         limits=suite["limits"],
         noise_floor=floor,
         **({} if floor else {"noise_floor_reason": why}),
-        # the known spend; a run whose spend was unread is counted, not added
+        # the measured calls of the runs read, at the entry's (peak) rates; a
+        # bound is beside it, never in it (#239), and a run whose spend was
+        # unread is counted, in neither
         spent_usd=round(spend["spent_usd"], 6),
         **({"spent_usd_unread": spend["unread"]} if spend["unread"] else {}),
+        **(
+            {
+                "spent_bound_usd": round(spend["bound_usd"], 6),
+                "spent_bounded_calls": spend["bounded_calls"],
+            }
+            if spend["bounded_calls"]
+            else {}
+        ),
         budget_hit=bool(not_run),
         cases_not_run=not_run,
     )
@@ -650,10 +760,12 @@ def run(args: argparse.Namespace) -> int:
     print(f"spent {_spent_text(spend)} of the {_usd(reg['budget_usd'])} budget")
     if not_run:
         cap = _usd(reg["per_case_usd"])
+        spent = "spent and bounded" if spend["bounded_calls"] else "spent"
         since = (
-            "a case's spend was unread, so it may have spent its cap plus a call"
+            "a case's spend was unread with no bound, so it may have spent its cap "
+            "plus a call"
             if spend["unread"]
-            else f"spent plus the {cap} per-case cap could cross the budget"
+            else f"{spent} plus the {cap} per-case cap could cross the budget"
         )
         print(f"budget hit: {len(not_run)} cases not run, since {since}")
     logs = EVAL_DIR / reg["row_id"] / "<arm>" / "logs"  # repo-relative, as the ledger
@@ -774,6 +886,12 @@ def main(argv: list[str] | None = None) -> int:
     reg.add_argument("--k", type=int, required=True, help="runs per case, 3 or more")
     reg.add_argument("--budget-usd", type=float, required=True)
     reg.add_argument("--per-case-usd", type=float, required=True)
+    reg.add_argument(
+        "--wall-cap",
+        type=float,
+        default=agent_run.DEFAULT_WALL_CAP,
+        help="seconds a case may run, above 0 (agent_run's default when unset)",
+    )
     for flag in ("--hypothesis", "--primary", "--rule"):
         reg.add_argument(flag, required=True)
     reg.add_argument("--guards", action="append", required=True)

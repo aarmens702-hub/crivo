@@ -9,9 +9,17 @@ exists for a model, `bench.eval register` refuses an arm on it.
 
 `cost_usd` prices one gen_ai.client.call span on the terms
 `agent_run._call_stats` sums: input minus cache hits at `input`, cache hits at
-`cache_hit`, output at `output`. A span missing its input or output count, or
-a model with no entry, is None, never 0, which would read as a free call. An
-all-zero entry (faux) costs 0.0 whatever the span reported.
+`cache_hit`, output at `output`. A span missing its input or output count, a
+negative count, more cache hits than input, or a model with no entry, is None,
+never 0, which would read as a free call. An all-zero entry (faux) costs 0.0
+whatever the span reported.
+
+`call_bound_usd` is the most one call can cost when its span can't be priced
+(#239): every byte sent priced as an input token (a token covers at least one
+byte) plus the entry's optional `max_output_tokens`, the provider's documented
+maximum output for one call, read from the same page, at `output`. An entry
+without it can't bound a call: None, and the spend guard stops the case as
+unread. A bound is labelled bounded wherever it is used, never measured.
 
 What the spans can't tell apart is priced as input: Claude's cache write is
 counted in the span's input (llm._claude_usage) and billed above the input
@@ -38,6 +46,7 @@ PRICES: dict[str, dict] = {
         "input": 1.32,
         "cache_hit": 0.044,
         "output": 3.96,
+        "max_output_tokens": 384_000,
         "source": "https://api-docs.deepseek.com/quick_start/pricing "
         "(peak rates, model version DeepSeek-V4-Pro-0813)",
         "checked": "2026-10-19",
@@ -75,9 +84,30 @@ def cost_usd(attrs: dict, key: str) -> float | None:
         return None
     hit = attrs.get("crivo.cache.hit_tokens")
     hit = hit if _count(hit) else 0
+    if min(fresh, out, hit) < 0 or hit > fresh:  # no reading: unread, not cheap
+        return None
     total = (
         (fresh - hit) * price["input"]
         + hit * price["cache_hit"]
         + out * price["output"]
     )
+    return total / 1_000_000 if math.isfinite(total) else None
+
+
+def call_bound_usd(input_bytes, key: str) -> float | None:
+    """The most one call that sent `input_bytes` can cost at PRICES[key]:
+    input_bytes at `input` plus `max_output_tokens` at `output`, per million.
+    None when the entry names no limit (or one that is not a positive whole
+    number of tokens), the key has no entry, a rate is not finite, or
+    input_bytes is not a finite count of 0 or more (see the module
+    docstring)."""
+    price = PRICES.get(key)
+    if price is None or not all(_count(price.get(rate)) for rate in RATES):
+        return None
+    limit = price.get("max_output_tokens")
+    if not (isinstance(limit, int) and not isinstance(limit, bool) and limit > 0):
+        return None
+    if not (_count(input_bytes) and input_bytes >= 0):
+        return None
+    total = input_bytes * price["input"] + limit * price["output"]
     return total / 1_000_000 if math.isfinite(total) else None

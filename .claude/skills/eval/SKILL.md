@@ -17,11 +17,12 @@ Only the orchestrating session runs this, never a specialist (the builder's hook
    ```
    uv run python -m bench.eval register --issue <n> --type <behaviour|experiment> \
        --suite <suite> --split <split> --arm <NAME>=<PROVIDER>:<MODEL> --k <k> \
-       --budget-usd <B> --per-case-usd <C> --hypothesis "<hypothesis>" \
-       --primary <metric> --guards <metric> --rule "<rule>" --dry
+       --budget-usd <B> --per-case-usd <C> --wall-cap <seconds> \
+       --hypothesis "<hypothesis>" --primary <metric> --guards <metric> \
+       --rule "<rule>" --dry
    ```
-   - Both caps come from the Measurement or from Aarmen. Neither has a default (ED5), so ask him for any the Measurement leaves out; never pick one.
-   - Show Aarmen the worst case it prints and what each arm's model cost a case before. Stop and wait for his answer. Register only once he has confirmed both caps or named new ones (new caps get a fresh `--dry`).
+   - Both caps come from the Measurement or from Aarmen. Neither has a default (ED5), so ask him for any the Measurement leaves out; never pick one. The wall cap comes from the same place, or `--wall-cap` is left off for the 300 s default; never pick one yourself.
+   - Show Aarmen the worst case it prints, its worst-case wall time line (a lower bound, not a ceiling), and what each arm's model cost a case before. Stop and wait for his answer. Register only once he has confirmed both caps or named new ones (new caps get a fresh `--dry`).
    - A non-faux arm needs an entry in `bench/prices.py`, its rates read from the provider's own pricing page, with that page's URL and the date read. Without one, `register` refuses the arm. A new entry is a change: commit it on the task branch before registering.
 3. **Register.** The same line without `--dry`. It prints the registered row id.
    - An issue gets 2 results. `register` refuses a third without `--owner-ok`, and that flag goes on only with Aarmen's yes in this conversation. The builder stops after 2 runs and reports.
@@ -33,6 +34,7 @@ Only the orchestrating session runs this, never a specialist (the builder's hook
    - Each run's Session output, its data profile among it, is in the logs dir the run names, `bench/results/eval/<row>/<arm>/logs/`. Read a log there when a case needs a look; never paste one anywhere, since it holds samples of the data.
    - If a case raises, the run stops without a result: the refusal names that case's log, and the cases that ran are kept in `bench/results/eval/<row>/cases.jsonl`. No result row means its spend is in no ledger row, and the 2-results count never sees it. Stop and give Aarmen the spend the refusal names (plus up to the raising case's cap and one call, unread). Register again only on his yes.
    - A budget hit lists the cases not run, and the arm it stopped in has a partial k.
+   - A call whose spend can't be read (a stream cut off before its usage arrived) is charged its bound, at most one call's cost: the bytes sent plus the output limit its model's `bench/prices.py` entry names. The bound counts toward the budget and the run goes on; the case line, the arm's screen and the spent line say "bounded, not measured". `spent_usd` is the measured calls of the runs read, priced at the entry's rates (peak, so it reads high off-peak); `spent_bound_usd` adds the bounds, the most the runs read could cost at those rates; a run left unread is in neither. On a model whose entry names no output limit, an unread case still stops the run.
    - Commit `bench/ledger.jsonl` by name again, then run `uv run python scripts/check_locks.py`.
 5. **Judge.** Hold the result to the rule as registered; never reword the rule after the run.
    - Compare it with the A/A noise floor for that suite and model: `noise_floor` on a result row in `bench/ledger.jsonl` whose registration ran two arms on one config. This lists every floor on a suite: its result row, the model it was measured on, the pass@1 spread and how many cases were flaky (a count, never their names), or "no floor" when there is none:
