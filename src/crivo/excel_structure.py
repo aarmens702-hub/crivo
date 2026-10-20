@@ -10,8 +10,10 @@ model, no new dependency.
 
 A "table block" is a run of consecutive non-empty rows at least two columns
 wide; a one-column run (a title or a single note) is preamble, not a table.
-The header is the first table block's first row. Restructuring is a
-judgement call, so findings are graded, never auto-applied.
+The header is the first table block's first row at least two columns wide;
+narrower rows leading into it (a title with no blank row under it) are
+preamble. Restructuring is a judgement call, so findings are graded, never
+auto-applied.
 """
 
 from __future__ import annotations
@@ -66,7 +68,12 @@ def _analyze_sheet(name: str, grid: list[tuple]) -> dict:
         base["evidence"] = "no tabular block found"
         return base
 
-    header_index = tables[0][0]  # 0-indexed row where the first table starts
+    # the header is the first table's first wide row (0-indexed); narrow rows
+    # leading straight into it (a title with no blank row under it) are preamble
+    start, end = tables[0]
+    header_index = next(
+        i for i in range(start, end + 1) if widths[i] >= _MIN_TABLE_WIDTH
+    )
     header_row = header_index + 1  # 1-indexed for humans
     preamble = header_index
     base["header_row"] = header_row
