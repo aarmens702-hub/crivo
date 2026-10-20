@@ -98,10 +98,13 @@ class SkillResult:
     ok: bool = False
     problems: list = field(default_factory=list)
     scrubbed: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
     disease: object = None
     successes: object = None
     failures: object = None
     sha256: str | None = None
+    scripts_sha256: dict | None = None
+    scripts_pinned: bool = False
 
 
 @dataclass
@@ -164,9 +167,12 @@ def _selected(
 
 
 def _build_manifest(results: list) -> dict:
-    """name, disease, state at export time, successes/failures, sha256 — one
-    row per skill actually written, so the manifest never lists more than
-    what's on disk beside it."""
+    """name, disease, state at export time, successes/failures, sha256 (of
+    SKILL.md), scripts_sha256 (of scripts/fix.py and scripts/test_fix.py as
+    written) and scripts_pinned — one row per skill actually written, so the
+    manifest never lists more than what's on disk beside it. scripts_sha256
+    equals the ledger's admission pin only when scripts_pinned is true; for
+    an unpinned skill it is just the hash of what shipped."""
     return {
         "skills": [
             {
@@ -176,6 +182,8 @@ def _build_manifest(results: list) -> dict:
                 "successes": r.successes,
                 "failures": r.failures,
                 "sha256": r.sha256,
+                "scripts_sha256": r.scripts_sha256,
+                "scripts_pinned": r.scripts_pinned,
             }
             for r in results
             if r.selected and r.ok
@@ -283,6 +291,18 @@ def run_export(
             except (ValueError, OSError) as exc:
                 problems.append(str(exc))
             else:
+                # Hold an admitted skill to the scripts it was admitted with
+                # (#237); with no ledger row there is no pin to check.
+                if entry is None:
+                    result.notes.append(
+                        f"{name} has no ledger row, so its scripts are not pinned"
+                    )
+                else:
+                    pinned_ok, pin_note = lib.check(name, loaded)
+                    if not pinned_ok:
+                        problems.append(pin_note)
+                    elif pin_note:
+                        result.notes.append(pin_note)
                 scrubbed, notes = _scrub(loaded, strict=strict)
                 result.scrubbed = notes
                 if result.disease is None:
@@ -300,6 +320,17 @@ def run_export(
             else:
                 result.ok = True
                 result.sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                # Hashed as library.Library pins them, so they equal the ledger
+                # pin when there is one (scripts_pinned); a failed check never
+                # reaches here.
+                sources = (scrubbed.fix_source, scrubbed.test_source)
+                result.scripts_sha256 = {
+                    key: hashlib.sha256(source.encode("utf-8")).hexdigest()
+                    for key, source in zip(library.PINNED, sources, strict=True)
+                }
+                result.scripts_pinned = (
+                    entry is not None and entry.get("sha256") is not None
+                )
                 admitted.append((name, scrubbed))
         results.append(result)
 
@@ -341,6 +372,8 @@ def _print_report(report: ExportReport) -> None:
             print(f"{verb:<12} {r.name} ({r.state})")
             for note in r.scrubbed:
                 print(f"             scrubbed: {note}")
+            for note in r.notes:
+                print(f"             note: {note}")
         else:
             print(f"refused      {r.name}")
             for problem in r.problems:

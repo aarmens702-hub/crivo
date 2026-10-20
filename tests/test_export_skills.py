@@ -6,12 +6,15 @@ skills/ directory: skills/<name>/{SKILL.md,scripts/} plus skills/ledger.json,
 or skills/retired/<name>/ for the ones the library has already retired.
 """
 
+import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from crivo import library, skills
 
@@ -371,3 +374,297 @@ def test_an_exported_skill_runs_in_a_consumer_that_never_heard_of_us(tmp_path):
     result = module.fix(pd.DataFrame({"ibu": ["N/A", "60", "unknown"]}), ["ibu"])
     assert result["ibu"].isna().sum() == 2
     assert result["ibu"].tolist()[1] == 60.0
+
+
+# --- #238: export holds an admitted skill to the scripts it was admitted with -
+
+SENTINEL_FIX = (
+    "def fix(df, columns):\n"
+    "    out = df.copy()\n"
+    "    for c in columns:\n"
+    "        if c in out.columns:\n"
+    "            out[c] = out[c].replace(['-999', 'N/A', 'n/a'], None)\n"
+    "    return out\n"
+)
+SENTINEL_TEST = (
+    "import pandas as pd\n"
+    "\n"
+    "\n"
+    "def test_fix_clears_the_sentinels_and_keeps_leading_zeros():\n"
+    "    df = pd.DataFrame({'zip': ['02134', '-999', 'N/A', '00501']})\n"
+    "    out = fix(df, ['zip'])\n"
+    "    assert out['zip'].isna().sum() == 2\n"
+    "    assert out['zip'].dropna().tolist() == ['02134', '00501']\n"
+)
+# Edits made after admission, one per pinned script.
+EDITS = [
+    # one token gone: -999 now survives the fix
+    ("fix.py", SENTINEL_FIX.replace("'-999', ", "")),
+    # the test still runs, and no longer tests anything
+    ("test_fix.py", SENTINEL_TEST.replace("== 2", ">= 0")),
+]
+
+
+def sentinel_skill(name) -> skills.Skill:
+    return make_skill(name, fix_source=SENTINEL_FIX, test_source=SENTINEL_TEST)
+
+
+def admit(root: Path, name: str, *, state: str = "proven") -> Path:
+    """A skill as admission leaves it, then moved on to `state`: the folder
+    written, the row registered (which pins both scripts), the ledger saved."""
+    skills.save(sentinel_skill(name), root)
+    lib = library.Library.load(root)
+    lib.register(name, 4)
+    lib.entries[name]["state"] = state
+    lib.save()
+    return root / name
+
+
+def _result(report, name):
+    return next(r for r in report.results if r.name == name)
+
+
+def _notes(result) -> str:
+    """Every note export carried for one skill. `notes` is the field #238
+    adds; a result from before it has none to read."""
+    return " ".join(getattr(result, "notes", []))
+
+
+def _names_script(text: str, script: str) -> bool:
+    """`script` named as a file in `text`: fix.py is not test_fix.py."""
+    return re.search(rf"(?<!\w){re.escape(script)}", text) is not None
+
+
+def _printed_block(stdout: str, name: str) -> list[str]:
+    """A skill's own line in the printed report, then the lines indented
+    under it."""
+    block, inside = [], False
+    for line in stdout.splitlines():
+        if not line[:1].isspace():  # a skill's own line, or the blank before the tail
+            inside = re.search(rf"\s{re.escape(name)}(\s|$)", line) is not None
+        if inside:
+            block.append(line)
+    return block
+
+
+@pytest.mark.parametrize("state", ["proven", "probation"])
+@pytest.mark.parametrize("script, edited", EDITS, ids=[s for s, _ in EDITS])
+def test_an_admitted_skill_whose_script_changed_is_not_exported(
+    tmp_path, script, edited, state
+) -> None:
+    """Regression for #238. A pinned script edited after admission is the code
+    nobody admitted, so export leaves the skill out of the bundle and the
+    MANIFEST and says which skill and which file. An unchanged admitted skill
+    in the same run still ships."""
+    root = tmp_path / "skills"
+    folder = admit(root, "fix-zip-sentinels", state=state)
+    admit(root, "fix-sentinel-missing")
+    (folder / "scripts" / script).write_text(edited, encoding="utf-8")
+    out = tmp_path / "out"
+
+    report = run_export(root, out, include_probation=True)
+
+    assert "fix-zip-sentinels" not in report.exported, (
+        "an admitted skill whose scripts changed exported as admitted"
+    )
+    assert report.refused == ["fix-zip-sentinels"]
+    assert report.exported == ["fix-sentinel-missing"], "the unchanged one ships"
+    assert not (out / "fix-zip-sentinels").exists()
+    manifest = json.loads((out / "MANIFEST.json").read_text())
+    assert [s["name"] for s in manifest["skills"]] == ["fix-sentinel-missing"]
+    problems = _result(report, "fix-zip-sentinels").problems
+    assert any(
+        "fix-zip-sentinels" in p and _names_script(p, script) for p in problems
+    ), "the refusal names the skill and the file that changed"
+
+
+def test_an_unchanged_admitted_skill_exports_with_its_pinned_script_hashes(
+    tmp_path,
+) -> None:
+    """Regression for #238. The legitimate case beside the refusal: scripts
+    that still match their pin export with no refusal and no note, and the
+    MANIFEST carries their sha256 beside SKILL.md's, equal to the ledger pin
+    and to the bytes written into the bundle, and marks them pinned."""
+    root = tmp_path / "skills"
+    name = "fix-sentinel-missing"
+    admit(root, name)
+    pin = library.Library.load(root).entries[name].get("sha256")
+    assert pin, "admission pinned nothing"
+    out = tmp_path / "out"
+
+    report = run_export(root, out)
+
+    assert report.exported == [name]
+    assert report.refused == []
+    result = _result(report, name)
+    assert not result.problems
+    assert not _notes(result), "an unchanged pinned skill needs no notice"
+    manifest = json.loads((out / "MANIFEST.json").read_text())
+    entry = next(s for s in manifest["skills"] if s["name"] == name)
+    assert entry.get("scripts_sha256") == pin, (
+        "MANIFEST must carry the admitted scripts' sha256"
+    )
+    written = {
+        key: hashlib.sha256((out / name / key).read_bytes()).hexdigest()
+        for key in library.PINNED
+    }
+    assert entry["scripts_sha256"] == written
+    assert entry.get("scripts_pinned") is True, (
+        "scripts that passed their pin check are marked pinned in the MANIFEST"
+    )
+
+
+@pytest.mark.parametrize("strict", [False, True], ids=["default", "--strict"])
+def test_an_unpinned_row_exports_with_a_note_that_says_so(tmp_path, strict) -> None:
+    """Regression for #238. A row from before #237 has no pin, so there is
+    nothing to hold its scripts to. It still exports, --strict included, and
+    the export says the skill is unpinned rather than vouching for it: the
+    MANIFEST still hashes its scripts, and marks them not pinned."""
+    root = tmp_path / "skills"
+    name = "fix-sentinel-missing"
+    skills.save(sentinel_skill(name), root)
+    write_ledger(root, {name: ledger_entry(state="proven", successes=4)})
+    assert "sha256" not in library.Library.load(root).entries[name]
+    out = tmp_path / "out"
+
+    report = run_export(root, out, strict=strict)
+
+    assert report.exported == [name], "an unpinned row is not refused"
+    notes = _notes(_result(report, name))
+    assert name in notes and "unpinned" in notes, (
+        "the export must say this skill's scripts are unpinned"
+    )
+    manifest = json.loads((out / "MANIFEST.json").read_text())
+    entry = next(s for s in manifest["skills"] if s["name"] == name)
+    written = {
+        key: hashlib.sha256((out / name / key).read_bytes()).hexdigest()
+        for key in library.PINNED
+    }
+    assert entry.get("scripts_sha256") == written, (
+        "an unpinned skill's scripts are still hashed in the MANIFEST"
+    )
+    assert entry.get("scripts_pinned") is False, (
+        "a row with no pin must not read as pinned in the MANIFEST"
+    )
+
+
+def test_a_skill_with_no_ledger_row_exports_under_all_with_a_not_pinned_note(
+    tmp_path,
+) -> None:
+    """Regression for #238. Under --all a skill with no ledger row is selected,
+    and with no row there is no pin to check it against. It exports as before,
+    with a note that its scripts are not pinned, and the MANIFEST marks them
+    not pinned; the admitted skill beside it gets no such note and is marked
+    pinned."""
+    root = tmp_path / "skills"
+    admit(root, "fix-sentinel-missing")
+    skills.save(sentinel_skill("fix-zip-sentinels"), root)  # never registered
+    assert "fix-zip-sentinels" not in library.Library.load(root).entries
+    out = tmp_path / "out"
+
+    report = run_export(root, out, include_all=True)
+
+    assert report.exported == ["fix-sentinel-missing", "fix-zip-sentinels"]
+    assert re.search(
+        r"unpinned|not pinned|n't pinned",
+        _notes(_result(report, "fix-zip-sentinels")),
+        re.IGNORECASE,
+    ), "the export must say a skill with no ledger row has unpinned scripts"
+    assert not _notes(_result(report, "fix-sentinel-missing"))
+    manifest = json.loads((out / "MANIFEST.json").read_text())
+    pinned = {s["name"]: s.get("scripts_pinned") for s in manifest["skills"]}
+    assert pinned == {"fix-sentinel-missing": True, "fix-zip-sentinels": False}, (
+        "only the skill whose row pinned its scripts reads as pinned"
+    )
+
+
+def test_dry_run_still_refuses_an_admitted_skill_whose_script_changed(
+    tmp_path,
+) -> None:
+    """Regression for #238. --dry-run reports what a real run would do, so an
+    edited admitted skill shows as refused there too, and nothing is written."""
+    root = tmp_path / "skills"
+    folder = admit(root, "fix-zip-sentinels")
+    script, edited = EDITS[0]
+    (folder / "scripts" / script).write_text(edited, encoding="utf-8")
+    out = tmp_path / "out"
+
+    report = run_export(root, out, dry_run=True)
+
+    assert report.exported == []
+    assert report.refused == ["fix-zip-sentinels"]
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("flags", [[], ["--dry-run"]], ids=["export", "--dry-run"])
+def test_main_prints_the_refused_skill_with_its_file_and_the_unpinned_note(
+    tmp_path, monkeypatch, capsys, flags
+) -> None:
+    """Regression for #238. The CLI report shows a refused admitted skill on a
+    refused line with the file that changed under it, and an unpinned skill's
+    note under its own exported line, in a real run and a dry run alike."""
+    import export_skills
+
+    root = tmp_path / "skills"
+    folder = admit(root, "fix-zip-sentinels")
+    script, edited = EDITS[0]
+    (folder / "scripts" / script).write_text(edited, encoding="utf-8")
+    skills.save(sentinel_skill("fix-sentinel-missing"), root)
+    lib = library.Library.load(root)
+    lib.entries["fix-sentinel-missing"] = ledger_entry(state="proven")  # pre-pin
+    lib.save()
+    out = tmp_path / "out"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["export_skills.py", "--skills-root", str(root), "--out", str(out), *flags],
+    )
+    export_skills.main()
+    stdout = capsys.readouterr().out
+
+    refused = _printed_block(stdout, "fix-zip-sentinels")
+    assert refused and refused[0].startswith("refused"), (
+        "the edited admitted skill must be printed as refused"
+    )
+    assert any(_names_script(line, script) for line in refused[1:]), (
+        "the refusal must name the file that changed"
+    )
+    unpinned = _printed_block(stdout, "fix-sentinel-missing")
+    assert unpinned and "refused" not in unpinned[0]
+    assert any("unpinned" in line for line in unpinned[1:]), (
+        "the unpinned skill's note must be printed under it"
+    )
+    assert not (out / "fix-zip-sentinels").exists()
+
+
+def test_a_retired_skill_whose_script_changed_is_refused_under_include_retired(
+    tmp_path,
+) -> None:
+    """Regression for #238. The pin outlives retirement, so --include-retired
+    holds a retired skill to it too: the edited one is refused and named, and
+    the unchanged retired one beside it exports. (Which folder the refusal's
+    advice names is library.py's wording, fixed in #240, so it isn't
+    asserted here.)"""
+    root = tmp_path / "skills"
+    admit(root, "fix-zip-sentinels")
+    admit(root, "fix-sentinel-missing")
+    lib = library.Library.load(root)
+    for name in ("fix-zip-sentinels", "fix-sentinel-missing"):
+        lib.retire(name, reason="failed verification twice in a row")
+    lib.save()
+    grave = root / library.RETIRED_DIR / "fix-zip-sentinels"
+    script, edited = EDITS[0]
+    (grave / "scripts" / script).write_text(edited, encoding="utf-8")
+    out = tmp_path / "out"
+
+    report = run_export(root, out, include_retired=True)
+
+    assert report.refused == ["fix-zip-sentinels"], (
+        "a retired skill whose scripts changed exported as admitted"
+    )
+    assert report.exported == ["fix-sentinel-missing"]
+    assert not (out / "fix-zip-sentinels").exists()
+    problems = _result(report, "fix-zip-sentinels").problems
+    assert any(
+        "fix-zip-sentinels" in p and _names_script(p, script) for p in problems
+    ), "the refusal names the skill and the file that changed"
