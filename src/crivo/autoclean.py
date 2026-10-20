@@ -606,7 +606,10 @@ class CleanSummary:
             why = (
                 f" — {pii.redact_text(reason, r['columns'], flagged)}" if reason else ""
             )
-            lines.append(f"  · d{r['disease']:02d} {r['slug']} [{where}]{why}")
+            # the grade (and a d22 entry's kind) tells apart two entries that
+            # share a disease and column
+            label = " ".join(filter(None, (r["grade"], r.get("kind"))))
+            lines.append(f"  · d{r['disease']:02d} {r['slug']} [{where}] {label}{why}")
         return "\n".join(lines)
 
     def _repr_html_(self) -> str:
@@ -628,8 +631,25 @@ def _slim(finding: dict, **extra) -> dict:
         "slug": finding["slug"],
         "columns": finding["columns"],
         "grade": finding["grade"],
+        **_kind(finding),
         **extra,
     }
+
+
+def _kind(finding: dict) -> dict:
+    """Which damage a d22 finding names, so two d22 GATE findings on one id
+    column are not identical entries: "guarded" (Excel's apostrophe guard) or
+    "eaten" (a numeric cast collapsed the ids; the numeric path's "shorter"
+    count is leading zeros it ate). Read from which count the stats hold,
+    never a value. Empty for every other disease."""
+    if finding["disease"] != 22:
+        return {}
+    stats = finding.get("stats") or {}
+    if "guarded" in stats:
+        return {"kind": "guarded"}
+    if "eaten" in stats or "shorter" in stats:
+        return {"kind": "eaten"}
+    return {}
 
 
 # why an AUTO finding with no fixer is left for a person; the default covers

@@ -2,10 +2,12 @@
 paints its own colours, never trusts the notebook theme, and escapes every
 value that crosses into it (GitHub / nbconvert sanitize aggressively)."""
 
-from html import escape
+import re
+from html import escape, unescape
 
 import pandas as pd
 import pytest
+from test_autoclean_regressions import _excel_damaged_ids, _state_frame
 
 from crivo import autoclean, pii
 from crivo.detect import SINGLE_FRAME, SLUGS, detect_all
@@ -390,3 +392,147 @@ def test_clean_summary_repr_masks_a_deferred_reason_quoting_a_pii_value(monkeypa
     assert "'***@example.com'" in text
     assert SLUGS[6] in text
     assert "could not convert string to float: '$1,200'" in text
+
+
+# --- #47: two review entries that share a disease and column read apart -----
+
+
+def _card_rows(card) -> list[str]:
+    """The visible text of each row of a clean card, one per <div> (the card
+    nests none inside its wrapper), entities decoded and whitespace (&nbsp;
+    included) collapsed, so a row reads as the line a person sees."""
+    rows = (re.sub(r"<[^>]+>", "", chunk) for chunk in re.split(r"<div[^>]*>", card))
+    return [text for text in (" ".join(unescape(r).split()) for r in rows) if text]
+
+
+def _lines(summary, surface) -> list[str]:
+    """Every row a person reads on `surface`: the lines `print(summary)`
+    shows, or the clean card's rows, whitespace collapsed alike."""
+    if surface == "repr":
+        return [" ".join(line.split()) for line in repr(summary).splitlines()]
+    return _card_rows(_card_or_error(summary))
+
+
+def _review_lines(summary, surface) -> list[str]:
+    return [line for line in _lines(summary, surface) if line.startswith("· ")]
+
+
+def _review_entry(disease, column, grade, **extra) -> dict:
+    return {
+        "disease": disease,
+        "slug": SLUGS[disease],
+        "columns": [column],
+        "grade": grade,
+        **extra,
+    }
+
+
+SURFACES = [pytest.param("repr", id="repr"), pytest.param("card", id="card")]
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+@pytest.mark.parametrize(
+    "frame, entries, marks",
+    [
+        pytest.param(
+            _state_frame,
+            [_review_entry(7, "state", "AUTO"), _review_entry(7, "state", "HUMAN")],
+            [["[state] AUTO"], ["[state] HUMAN"]],
+            id="d07-auto-beside-human",
+        ),
+        pytest.param(
+            _excel_damaged_ids,
+            [
+                _review_entry(22, "txn_id", "GATE", kind="guarded"),
+                _review_entry(22, "txn_id", "GATE", kind="eaten"),
+            ],
+            [["[txn_id] GATE", "guarded"], ["[txn_id] GATE", "eaten"]],
+            id="d22-guarded-beside-eaten",
+        ),
+    ],
+)
+def test_review_entries_sharing_a_disease_and_column_render_apart(
+    surface, frame, entries, marks
+):
+    """Regression for #47. After #24 there is one review entry per finding,
+    so a d07 AUTO beside a d07 HUMAN, or a d22 guarded beside a d22 eaten on
+    one id column, printed the same line twice on both surfaces. Each review
+    line now names the bare grade after its column bracket, and a d22 line
+    its kind as well."""
+    df = frame()
+    summary = autoclean.CleanSummary(df, df, [], entries)
+
+    lines = _review_lines(summary, surface)
+
+    assert len(lines) == 2, lines
+    assert lines[0] != lines[1], lines
+    for line, wanted in zip(lines, marks):
+        assert all(mark in line for mark in wanted), (wanted, line)
+
+
+def _fold_only_upper(frame, cols):
+    """A case fold that misses a casing, so its d07 AUTO finding still fires
+    and the fold is reverted into review beside the d07 HUMAN spelling one."""
+    out = frame.copy()
+    for c in cols:
+        out[c] = out[c].replace({"CALIFORNIA": "California"})
+    return out
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+def test_a_refused_case_fold_and_the_spelling_finding_name_their_grades(
+    monkeypatch, surface
+):
+    """Regression for #47, on the path clean() takes. The refused d07 case
+    fold (AUTO, with the refusal's reason) and the d07 spelling finding
+    (HUMAN) sit in review on one column; each line names its grade, ahead of
+    the reason."""
+    monkeypatch.setitem(autoclean.FIXERS, 7, _fold_only_upper)
+    _cleaned, summary = autoclean.clean(_state_frame())
+    case = [r for r in summary.needs_review if r["disease"] == 7]
+    assert [r["grade"] for r in case] == ["AUTO", "HUMAN"], "the premise"
+
+    lines = [line for line in _review_lines(summary, surface) if " d07 " in line]
+
+    assert lines == [
+        f"· d07 {SLUGS[7]} [state] AUTO — fix did not clear verification",
+        f"· d07 {SLUGS[7]} [state] HUMAN",
+    ], lines
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+def test_an_applied_line_is_unchanged_beside_a_graded_review_line(surface):
+    """Regression for #47, and its pin. The grade goes on review lines only:
+    the d07 case fold clean() applies to the state column still reads as it
+    did, and the spelling finding it leaves reads with its grade."""
+    _cleaned, summary = autoclean.clean(_state_frame())
+    assert [a["disease"] for a in summary.applied] == [7], "the premise"
+
+    # the head of each fix, never its before/after examples, which quote cells
+    heads = [line for line in _lines(summary, surface) if line[:2] in ("✓ ", "· ")]
+
+    assert heads == [
+        f"✓ d07 {SLUGS[7]} [state]",
+        f"· d07 {SLUGS[7]} [state] HUMAN",
+    ], heads
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+def test_two_d22_findings_on_one_id_column_render_their_kinds(surface):
+    """Regression for #47. The Excel-damaged id column carries two d22 GATE
+    findings, the apostrophe guard and the ids a numeric cast ate, which a
+    person fixes differently. Their review lines differ by kind; neither
+    surface quotes an id."""
+    frame = _excel_damaged_ids()
+    _cleaned, summary = autoclean.clean(frame)
+
+    rendered = repr(summary) if surface == "repr" else _card_or_error(summary)
+    lines = [line for line in _review_lines(summary, surface) if " d22 " in line]
+
+    # a count first, so no later failure message can carry an id
+    leaked = _leaked(rendered, frame["txn_id"])
+    assert leaked == 0
+    assert len(lines) == 2, lines
+    assert all("[txn_id] GATE" in line for line in lines), lines
+    assert ["guarded" in line for line in lines] == [True, False], lines
+    assert ["eaten" in line for line in lines] == [False, True], lines

@@ -255,6 +255,12 @@ def _applied_row(fix, examples, flagged) -> str:
 
 def _deferred_row(fix, flagged) -> str:
     head = _fix_head("&#183;", MUTED, MUTED_2, fix)
+    # the bare grade (and a d22 entry's kind) tells apart two entries that
+    # share a disease and column; escaped, as no value reaches the card raw
+    grade = fix["grade"]
+    head += _span("&nbsp;&nbsp;" + _esc(grade), GRADE.get(grade, MUTED_2), bold=True)
+    if fix.get("kind"):
+        head += _span("&nbsp;" + _esc(fix["kind"]), MUTED_2)
     reason = fix.get("reason")
     if reason:
         # mask before escaping, as in _finding: a fixer error can quote a cell

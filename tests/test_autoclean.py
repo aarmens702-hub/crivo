@@ -9,6 +9,7 @@ trustworthily, only chat with it.
 
 import pandas as pd
 import pytest
+from test_autoclean_regressions import _excel_damaged_ids
 from test_detect import _PRICES, _plant
 
 import crivo as aa
@@ -406,3 +407,68 @@ def test_clean_keeps_a_strong_token_the_real_values_reach(column, cells, token) 
     kept = cleaned[column].iloc[real].tolist()
     assert [v for v in kept if v == token] == [token] * cells.count(token)
     assert kept == [cells[p] for p in real]
+
+
+def _excel_damaged_ids_with_states() -> pd.DataFrame:
+    """The Excel-damaged transactions export (two d22 GATE findings on
+    txn_id: three ids with the apostrophe guard, three a numeric cast ate)
+    with a state column beside it: three casings of California (d07 AUTO,
+    which clean() folds) and two misspellings a person maps (d07 HUMAN)."""
+    frame = _excel_damaged_ids()
+    frame["state"] = (
+        ["California"] * 9
+        + ["california", "CALIFORNIA"]
+        + ["Pennsylvania"] * 6
+        + ["Pensylvania"]
+        + ["Washington"] * 6
+        + ["Massachusetts"] * 5
+        + ["Massachusets"]
+    )
+    return frame
+
+
+def test_a_d22_review_entry_says_which_damage_and_quotes_no_id() -> None:
+    """Regression for #47. The two d22 GATE findings on one id column, the
+    apostrophe guard and the ids a numeric cast ate, made review entries that
+    were identical dicts, so nothing a person or a machine read could tell
+    them apart. Each now carries `kind`, "guarded" or "eaten", read from which
+    count its finding holds, never an id. Entries of any other disease, the
+    d07 fold applied beside them and the d07 spelling left in review, carry
+    no `kind`."""
+    frame = _excel_damaged_ids_with_states()
+
+    _cleaned, summary = aa.clean(frame)
+
+    # a count first, so no later failure message can carry an id
+    leaked = sum(1 for cell in set(frame["txn_id"]) if cell in summary.to_json())
+    assert leaked == 0
+    kinds = [r.get("kind") for r in summary.needs_review if r["disease"] == 22]
+    assert kinds == ["guarded", "eaten"], summary.needs_review
+    others = [r for r in summary.applied + summary.needs_review if r["disease"] != 22]
+    assert [(r["disease"], r["grade"]) for r in others] == [(7, "AUTO"), (7, "HUMAN")]
+    assert not any("kind" in r for r in others), others
+
+
+def test_a_numeric_id_column_with_eaten_zeros_reviews_as_eaten() -> None:
+    """Regression for #47. d22's numeric path, a zip column read as integers
+    that lost its leading zeros, counts the short ids as `shorter`, not
+    `eaten`. It is the same damage the text path calls eaten, so its review
+    entry says "eaten" too, on the entry and on the line, and quotes no zip."""
+    zips = [35233, 90210, 60614, 98101, 87501, 55401, 73301, 33101, 44101]
+    zips += [66101, 77001, 15201, 2115, 2138, 1002]  # 02115, 02138, 01002 lost a 0
+    cities = ["Birmingham", "Beverly Hills", "Chicago", "Seattle", "Santa Fe"]
+    cities += ["Minneapolis", "Austin", "Miami", "Cleveland", "Kansas City"]
+    cities += ["Houston", "Pittsburgh", "Boston", "Cambridge", "Amherst"]
+    frame = pd.DataFrame({"zip_code": zips, "city": cities})
+
+    _cleaned, summary = aa.clean(frame)
+
+    # a count first, so no later failure message can carry a zip
+    shown = summary.to_json() + repr(summary)
+    leaked = sum(1 for z in zips if str(z) in shown or f"{z:05d}" in shown)
+    assert leaked == 0
+    d22 = [r for r in summary.needs_review if r["disease"] == 22]
+    assert [(r["columns"], r.get("kind")) for r in d22] == [(["zip_code"], "eaten")]
+    lines = [line for line in repr(summary).splitlines() if " d22 " in line]
+    assert len(lines) == 1, lines
+    assert lines[0].rstrip().endswith("GATE eaten"), lines
