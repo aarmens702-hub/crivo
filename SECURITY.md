@@ -38,6 +38,69 @@ What limits exposure today:
   inside the root can still swap a file between the check and the read.
 - Variable names from MCP clients are checked before use.
 
+## Threat model
+
+The data a user loads can attack crivo. Text planted in a cell value, a column,
+sheet or file name, or an error message reaches the model, which may follow it
+as an instruction. What decides a verdict must sit out of the model's reach.
+
+**Actors.** The data (any file, URL or database result a user loads); the
+model (assume the data can steer it); a calling agent over MCP; the person at
+a gate. Out of scope: a malicious model provider or a compromised machine.
+
+**Paths from data to the model.**
+- The dataset profile: column names, sample values and top values.
+- The finding a model fix is given. Its evidence can quote raw values, from
+  PII-flagged columns too.
+- Cell output and error messages. The value, printed output and traceback are
+  clipped today; the error message is not.
+- Excel sheet names and file names, in load messages, error text and lineage.
+
+**What an attack tries.** Reading secrets (`.env`, files under home, the
+keychain); reaching the network; writing what the referee trusts; changing a
+verdict; spending money; pushing a person to approve a gate.
+
+**What the referee trusts.** Plan rule 2: nothing the model, the kernel or the
+data can write may change a verdict. The referee trusts `skills/` (the SKILL.md
+files and `ledger.json`), the session transcript, cards, clean reports, lineage
+files, host-side baselines (after Stage 0b), `bench/` truth and
+`bench/ledger.jsonl`, and later contracts, the glossary and saved answers.
+Today kernel code can write them: the default kernel runs as the user, and a
+Docker kernel can write the session's transcript, cards, clean reports and
+lineage (the session's folder is mounted read-write). The referee's checks, and
+the baselines they compare against, also live in the kernel today, so a cell
+can patch them (RE1: the strict xfails in `tests/test_referee_bypass.py`).
+Stage 0b moves them to the host (RE11 (#167) to RE13 (#169)).
+
+**Defences.**
+- **Today.** The kernel starts with an allowlisted environment, so provider
+  keys are not in its `os.environ`. A cell can still read `.env` from disk.
+- **Today.** A GATE or HUMAN gate runs only on a yes. Headless `crivo clean`
+  defers both to `needs_human`; MCP `clean_file` defers HUMAN gates and asks
+  GATE fixes by elicitation when the client can, trusting the client to put
+  that question to a person. AUTO fixes, proven skills on AUTO findings and
+  the query cells of `crivo.ask` and MCP `ask` run with no person.
+- **Today, CT16 (#114).** The profile masks sample and top values from
+  PII-flagged text columns. That guards privacy, not against injection: other
+  text values, column names and numeric columns reach the model raw.
+- **Stage 0d, CT3 (#147) to CT8 (#215).** An OS sandbox around the kernel: no
+  network, read-only data, writes only to the kernel's own folder. Unattended
+  paths then run model code uncontained only when the user opts out, and every
+  card says so. Today only Docker contains the kernel; the default does not.
+- **Stage 0d, CT9 (#149).** A memory limit on the subprocess kernel.
+- **Stage 0d, CT13 (#112) to CT15 (#150).** Host secrets and token-shaped values
+  are redacted from kernel output, the transcript and prompts, and secret-shaped
+  columns are masked like other PII.
+- **Stage 0d, CT17 (#110).** Every kernel message to the model is capped.
+- **Stage 0d, CT22 (#195).** A dollar cap per task and per session.
+
+**Known limits of the Stage 0d defences.**
+- The memory watchdog polls, so a fast burst can overshoot the limit.
+- Output from processes a cell starts is not captured.
+- There is no OS sandbox on Windows.
+- The macOS sandbox uses `sandbox-exec`, which Apple marks deprecated.
+- The Linux sandbox needs unprivileged user namespaces; some systems block them.
+
 ## In scope
 
 - Model-written code escaping a gate, or escaping the documented container.
