@@ -270,6 +270,121 @@ def test_rate_limited_create_retries_after_the_server_delay(monkeypatch):
     assert delays == [2.0]
 
 
+@pytest.mark.parametrize("provider", ["deepseek", "claude"])
+def test_connection_error_before_first_stream_chunk_retries(monkeypatch, provider):
+    """Regression for #117: a stream can fail before yielding its first item."""
+    monkeypatch.setenv("CRIVO_PROVIDER", provider)
+    monkeypatch.setattr(llm, "_wait_before_retry", lambda *_: iter(()))
+    calls: list[int] = []
+
+    def failed_stream():
+        raise ConnectionError("connection closed before the first chunk")
+        yield  # keep this a generator so failure happens while consuming it
+
+    def create(**_):
+        calls.append(1)
+        if len(calls) == 1:
+            return failed_stream()
+        event = (
+            claude_event(text="recovered")
+            if provider == "claude"
+            else chunk(content="recovered")
+        )
+        return iter([event])
+
+    if provider == "claude":
+        install_claude_create(monkeypatch, create)
+    else:
+        install_openai_create(monkeypatch, create)
+
+    assert list(llm.generate([{"role": "user", "content": "hi"}])) == ["recovered"]
+    assert calls == [1, 1]
+
+
+@pytest.mark.parametrize("provider", ["deepseek", "claude"])
+@pytest.mark.parametrize("heartbeat", [False, True], ids=["text", "heartbeat"])
+def test_connection_error_after_first_stream_chunk_is_not_retried(
+    monkeypatch, provider, heartbeat
+):
+    """Regression for #117: delivered text and heartbeat chunks are not replayed."""
+    monkeypatch.setenv("CRIVO_PROVIDER", provider)
+    monkeypatch.setattr(llm, "_wait_before_retry", lambda *_: iter(()))
+    calls: list[int] = []
+
+    def failed_after_chunk():
+        if provider == "claude":
+            event = (
+                claude_event(thinking="thinking")
+                if heartbeat
+                else claude_event(text="partial")
+            )
+        else:
+            event = (
+                chunk(reasoning="thinking") if heartbeat else chunk(content="partial")
+            )
+        yield event
+        raise ConnectionError("connection closed after the first chunk")
+
+    def create(**_):
+        calls.append(1)
+        return failed_after_chunk()
+
+    if provider == "claude":
+        install_claude_create(monkeypatch, create)
+    else:
+        install_openai_create(monkeypatch, create)
+
+    reply = llm.generate([{"role": "user", "content": "hi"}])
+    assert next(reply) == ("" if heartbeat else "partial")
+    with pytest.raises(ConnectionError, match="after the first chunk"):
+        next(reply)
+    assert calls == [1]
+
+
+def test_retry_discards_metadata_from_a_failed_unstarted_claude_stream(
+    tmp_path, monkeypatch
+):
+    """Regression for #117: a retried attempt cannot overwrite final metadata."""
+    path = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    monkeypatch.setenv("CRIVO_TELEMETRY", str(path))
+    monkeypatch.setattr(llm, "_wait_before_retry", lambda *_: iter(()))
+    calls: list[int] = []
+    discarded_usage = {
+        "input_tokens": 9,
+        "cache_read_input_tokens": 2,
+        "cache_creation_input_tokens": 3,
+        "output_tokens": 1,
+    }
+    final_usage = {
+        "input_tokens": 1200,
+        "cache_read_input_tokens": 200,
+        "cache_creation_input_tokens": None,
+        "output_tokens": 1,
+    }
+
+    def failed_after_metadata():
+        yield _claude_stream(discarded_usage, model="claude-discarded")[0]
+        raise ConnectionError("connection closed before any reply chunk")
+
+    def create(**_):
+        calls.append(1)
+        if len(calls) == 1:
+            return failed_after_metadata()
+        return iter(_claude_stream(final_usage, model="claude-final"))
+
+    install_claude_create(monkeypatch, create)
+
+    assert (
+        "".join(llm.generate([{"role": "user", "content": "hi"}])) == "RS-1 grew most."
+    )
+
+    attrs = _call_attrs(path)
+    assert attrs["gen_ai.response.model"] == "claude-final"
+    assert tuple(attrs.get(attr) for attr in _USAGE_ATTRS) == (1400, 57, 200, 1200)
+    assert calls == [1, 1]
+
+
 def test_retry_stats_include_attempts_and_actual_total_wait(tmp_path, monkeypatch):
     """Regression for #117. Retry telemetry records the calls and wait."""
     monkeypatch.setenv("CRIVO_PROVIDER", "deepseek")

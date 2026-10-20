@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Generator, Iterable, Iterator
 from datetime import UTC
 from email.utils import parsedate_to_datetime
+from typing import TypedDict
 
 from openai import APIConnectionError as _OpenAIAPIConnectionError
 from openai import OpenAI, Timeout
@@ -96,6 +97,13 @@ MAX_CALL_S = 420
 STALL_S = 90  # no bytes at all for this long means the stream is dead
 MAX_PROVIDER_ATTEMPTS = 3
 RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504, 529})
+
+
+class _StreamState(TypedDict):
+    yielded: bool
+    watchdog_error: bool
+    usages: list[object]
+    models: list[str]
 
 
 def stall_budget_s() -> float:
@@ -364,7 +372,17 @@ def _create_with_retries[T](
     started_at: float,
     call_budget: float,
     retry_stats: dict[str, int | float] | None = None,
-) -> Generator[str, None, T]:
+    consume: Callable[[T, _StreamState], Iterator[str]] | None = None,
+    usage_sink: Callable[[object], None] | None = None,
+    model_sink: Callable[[str], None] | None = None,
+) -> Generator[str, None, T | None]:
+    """Run a provider request, retrying failures before its first chunk.
+
+    ``consume`` lets the stream watchdog report an error from the provider's
+    iterator through the same retry budget as ``create()``. Metadata remains
+    local to an attempt until it succeeds or can no longer be retried. Once a
+    chunk reaches the caller, the attempt is committed and never replayed.
+    """
     attempts = 0
     while True:
         if _cancel.is_set():
@@ -379,17 +397,57 @@ def _create_with_retries[T](
                 int(retry_stats.get("crivo.retry.attempts", 0)) + 1
             )
         attempts += 1
+        stream_state: _StreamState = {
+            "yielded": False,
+            "watchdog_error": False,
+            "usages": [],
+            "models": [],
+        }
+        metadata_committed = False
+
+        def commit_metadata(state: _StreamState) -> None:
+            nonlocal metadata_committed
+            if metadata_committed:
+                return
+            if usage_sink is not None:
+                for usage in state["usages"]:
+                    usage_sink(usage)
+            if model_sink is not None:
+                for served_model in state["models"]:
+                    model_sink(served_model)
+            metadata_committed = True
+
         try:
-            return create()
+            result = create()
+            if consume is None:
+                return result
+            yield from consume(result, stream_state)
         except Exception as error:
-            if attempts >= MAX_PROVIDER_ATTEMPTS or not _is_retryable_provider_error(
-                error
-            ):
+            retry = (
+                not stream_state["yielded"]
+                and not stream_state["watchdog_error"]
+                and attempts < MAX_PROVIDER_ATTEMPTS
+                and _is_retryable_provider_error(error)
+            )
+            if not retry:
+                commit_metadata(stream_state)
                 raise
             delay = _retry_after_seconds(error)
             if delay is None:
                 delay = 2 ** (attempts - 1)
-            yield from _wait_before_retry(delay, started_at, call_budget, retry_stats)
+            try:
+                yield from _wait_before_retry(
+                    delay, started_at, call_budget, retry_stats
+                )
+            except BaseException:
+                commit_metadata(stream_state)
+                raise
+        else:
+            commit_metadata(stream_state)
+            return None
+        finally:
+            if stream_state["yielded"]:
+                commit_metadata(stream_state)
 
 
 def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str]:
@@ -483,19 +541,22 @@ def _generate(
             "thinking": {"type": "adaptive", "display": "summarized"},
             "stream": True,
         }
-        stream = yield from _create_with_retries(
+        yield from _create_with_retries(
             lambda: _get_claude_client().messages.create(**request),
             started_at,
             call_budget,
             retry_stats,
-        )
-        yield from _watched(
-            stream,
-            _claude_text,
-            usage_sink,
-            model_sink,
-            started_at=started_at,
-            call_budget=call_budget,
+            lambda stream, state: _watched(
+                stream,
+                _claude_text,
+                usage_sink,
+                model_sink,
+                started_at=started_at,
+                call_budget=call_budget,
+                stream_state=state,
+            ),
+            usage_sink=usage_sink,
+            model_sink=model_sink,
         )
         return
 
@@ -518,19 +579,22 @@ def _generate(
         # The wall-clock checks below no longer assume that is enough on its own.
         "timeout": Timeout(connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0),
     }
-    stream = yield from _create_with_retries(
+    yield from _create_with_retries(
         lambda: client.chat.completions.create(**request),
         started_at,
         call_budget,
         retry_stats,
-    )
-    yield from _watched(
-        stream,
-        _deepseek_text,
-        usage_sink,
-        model_sink,
-        started_at=started_at,
-        call_budget=call_budget,
+        lambda stream, state: _watched(
+            stream,
+            _deepseek_text,
+            usage_sink,
+            model_sink,
+            started_at=started_at,
+            call_budget=call_budget,
+            stream_state=state,
+        ),
+        usage_sink=usage_sink,
+        model_sink=model_sink,
     )
 
 
@@ -541,6 +605,7 @@ def _watched[T](
     model_sink: Callable[[str], None] | None = None,
     started_at: float | None = None,
     call_budget: float | None = None,
+    stream_state: _StreamState | None = None,
 ) -> Iterator[str]:
     """Enforce the call and stall budgets around any provider's stream.
 
@@ -580,10 +645,14 @@ def _watched[T](
             call_left = call_budget - (now - started)
             stall_left = stall_budget - (now - last_progress)
             if call_left <= 0:
+                if stream_state is not None:
+                    stream_state["watchdog_error"] = True
                 raise TimeoutError(
                     f"gave up after {call_budget:g}s of thinking with no complete reply"
                 )
             if stall_left <= 0:
+                if stream_state is not None:
+                    stream_state["watchdog_error"] = True
                 raise TimeoutError(f"gave up after {stall_budget:g}s of silence")
 
             try:
@@ -603,15 +672,23 @@ def _watched[T](
                 if usage is None:  # Claude's message_start nests it
                     usage = getattr(getattr(item, "message", None), "usage", None)
                 if usage is not None:
-                    usage_sink(usage)
+                    if stream_state is None:
+                        usage_sink(usage)
+                    else:
+                        stream_state["usages"].append(usage)
             if model_sink is not None:
                 served = getattr(item, "model", None)
                 if served is None:  # Claude's message_start nests it
                     served = getattr(getattr(item, "message", None), "model", None)
                 if isinstance(served, str) and served:
-                    model_sink(served)
+                    if stream_state is None:
+                        model_sink(served)
+                    else:
+                        stream_state["models"].append(served)
             text = extract(item)
             if text is not None:
+                if stream_state is not None:
+                    stream_state["yielded"] = True
                 yield text
     finally:
         # Tells the pump thread to stop queueing once its current `next()`
