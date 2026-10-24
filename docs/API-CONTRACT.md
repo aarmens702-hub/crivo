@@ -151,7 +151,7 @@ One JSON object per line. The host writes requests to the supervisor's stdin; ev
 - `{id, ev: "result", status, value, error, exec_count, elapsed_s, registry, registry_omitted, truncated}`. `status` is `ok`, `error`, `timeout`, `interrupted` or `hung`. `error` is `{ename, evalue, traceback}`.
 - The `hello` result adds `proto` (1), `python`, `ipykernel`. An unknown op or a malformed line gets a result whose error `ename` is `BadRequest`.
 - Caps: a value is cut at 8 KiB, a stream at 64 KiB (head and tail kept, with a marker).
-- The kernel's environment is an allowlist (`KERNEL_ENV_PASSTHROUGH`, plus `DOCKER_ENV_PASSTHROUGH` with `--docker`); provider keys are never passed in.
+- The kernel's environment is an allowlist (`KERNEL_ENV_PASSTHROUGH`, plus `DOCKER_ENV_PASSTHROUGH` with `--docker`); provider keys are never passed in. `CRIVO_KERNEL_DENY_READ` is on it: bootstrap installs the read guard from it as its first step, so the guard is on when the kernel starts and again after `restart()`.
 
 ## Environment variables
 
@@ -173,6 +173,7 @@ One JSON object per line. The host writes requests to the supervisor's stdin; ev
 | `CRIVO_TELEMETRY` | unset (off) | path of a JSONL telemetry file |
 | `CRIVO_PLAN_FIRST` | `off` | `on` turns on plan-first cleaning (one plan approved as a unit) |
 | `CRIVO_M1` | `on` | `off` restores the pre-M1 clean flow (the bench legacy arm) |
+| `CRIVO_KERNEL_DENY_READ` | unset (no guard) | JSON `{"deny": [...], "allow": [...]}` of absolute paths. A kernel cell that opens, lists, copies, links, renames or imports from a denied path (one under a deny root and not under an allow root), or starts a process, gets `PermissionError`, and each refusal is one `{"readguard": event, "path": ...}` line in the supervisor's stderr log. A value that does not parse denies the whole filesystem. Subprocess transport only (`docker exec` does not forward it). A speed bump, not containment: native readers, ctypes, metadata calls and `dir_fd`-relative opens get past it; a thread racing a symlink swap between the check and the open can get a denied file; tampering switches it off (one assignment to a guard helper, or, where `_posixsubprocess` is a builtin, an importlib re-import of it, which raises no audit event); and the kernel can write wherever its user can outside the deny roots, so it can plant code that runs later: a `.pth` file in site-packages runs at the next interpreter start, before bootstrap, unlogged; an editable install's `crivo.pth` points at `src/`, so the guard's own source is writable; and a module planted in the kernel's working directory (on its sys.path after the stdlib, just ahead of site-packages) shadows a site-packages one for later imports, while after a dead kernel's restart the new supervisor (`python -m`) puts that directory first, so a planted package can replace the supervisor or the guard. The value is not secret. The agent bench sets it (SC16b). |
 
 ## Changing this file
 A contract change is a `core`-labelled issue and needs Aarmen's yes before any code builds against it. Update this file in the same change as the code, never after.

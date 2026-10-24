@@ -55,6 +55,8 @@ KERNEL_ENV_PASSTHROUGH = (
     # where a cell's own TLS trust comes from. A wrong-looking certificate is
     # an opaque verify failure, not a timeout, so this is worth carrying
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    # paths the kernel's read guard refuses (crivo.kernel.readguard); not secret
+    "CRIVO_KERNEL_DENY_READ",
 )  # fmt: skip
 
 # Only the docker transport gets these, and only because the child there is

@@ -5,6 +5,24 @@ skips underscored names) never lists its own machinery.
 """
 
 BOOTSTRAP_SOURCE = '''
+# First, so no error below can skip it: the read guard (SC16a), a speed bump,
+# not a sandbox (crivo.kernel.readguard names what gets past it). Imported with
+# the cwd off sys.path, so a package planted there cannot stand in for it. A
+# value that does not parse denies everything, imports below included
+import os as _aa_os
+import sys as _aa_sys
+
+if "CRIVO_KERNEL_DENY_READ" in _aa_os.environ:
+    _aa_path, _aa_cwd = list(_aa_sys.path), _aa_os.path.realpath(_aa_os.getcwd())
+    _aa_sys.path[:] = [
+        _p for _p in _aa_path if _aa_os.path.realpath(_p or ".") != _aa_cwd
+    ]
+    try:
+        from crivo.kernel import readguard as _aa_readguard
+    finally:
+        _aa_sys.path[:] = _aa_path
+    _aa_readguard.install_from_env(_aa_os.environ["CRIVO_KERNEL_DENY_READ"])
+
 import matplotlib as _aa_mpl
 _aa_mpl.use("Agg")
 get_ipython().run_line_magic("matplotlib", "inline")
