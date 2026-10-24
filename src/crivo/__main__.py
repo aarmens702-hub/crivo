@@ -97,7 +97,12 @@ def main() -> int:
         args.diagnose = args.diagnose or args.file
     elif mode == "clean":
         args.clean = args.clean or args.file
-    # the mode's own FILE only: `crivo clean --diagnose FILE` must not diagnose
+    # the mode's own FILE only, so the other mode's flag is refused: the
+    # diagnose branch runs first, and `crivo clean F --diagnose G` diagnosed
+    # G and never cleaned F (#46); `crivo clean --diagnose F` is refused too
+    other = {"diagnose": "clean", "clean": "diagnose"}.get(mode)
+    if other and getattr(args, other):
+        parser.error(f"crivo {mode} does not take --{other}; run `crivo {other} FILE`")
     if mode and not getattr(args, mode):
         parser.error(f"crivo {mode} needs a FILE")
     if not mode and args.file:

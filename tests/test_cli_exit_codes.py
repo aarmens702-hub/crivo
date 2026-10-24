@@ -266,6 +266,81 @@ def test_a_subcommand_does_not_run_the_other_mode(
     assert seen == {"sessions": [], "cleaned": []}
 
 
+def _two_dirty_files(tmp_path) -> tuple:
+    """F and G: two distinct readable files, each with a GATE finding, so
+    either mode would run on either one and exit for its own reasons."""
+    paths = []
+    for sub in ("f", "g"):
+        (tmp_path / sub).mkdir()
+        paths.append(str(_dirty_gate_csv(tmp_path / sub)))
+    return tuple(paths)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        ["{F}", "{flag}", "{G}"],
+        ["{flag}", "{G}", "{F}"],
+        ["--json", "{F}", "{flag}", "{G}"],
+        ["{F}", "{flag}={G}"],
+    ],
+    ids=["flag-after-file", "flag-before-file", "with-json", "flag-equals"],
+)
+@pytest.mark.parametrize(
+    ("sub", "flag"), [("clean", "--diagnose"), ("diagnose", "--clean")]
+)
+def test_a_subcommand_with_the_other_modes_flag_is_refused(
+    tmp_path, monkeypatch, capsys, sub, flag, shape
+) -> None:
+    """Regression for #46. `crivo clean F --diagnose G` gave clean its FILE
+    and diagnose one too, and the diagnose branch ran first, so G was
+    diagnosed and F never cleaned; `crivo diagnose F --clean G` diagnosed F
+    and dropped the clean. Under a subcommand the other mode's flag is
+    refused with a parser error (exit 2) that names it, and nothing runs."""
+    seen = _no_model_clean(monkeypatch)
+    f_path, g_path = _two_dirty_files(tmp_path)
+
+    argv = [a.format(F=f_path, G=g_path, flag=flag) for a in shape]
+    code = _exit_code(monkeypatch, ["crivo", sub, *argv])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == "", "a mode ran and printed a report or a summary"
+    assert seen == {"sessions": [], "cleaned": []}
+    assert flag in _error_line(captured.err)
+
+
+@pytest.mark.parametrize(
+    ("sub", "shape", "code", "cleaned"),
+    [
+        ("clean", ["{F}"], 0, [("{F}", None)]),
+        ("clean", ["--json", "{F}"], 0, [("{F}", None)]),
+        ("clean", ["{F}", "--fail-on", "never"], 0, [("{F}", None)]),
+        ("diagnose", ["{F}"], 1, []),
+        ("diagnose", ["--json", "{F}"], 1, []),
+        ("diagnose", ["{F}", "--autonomy", "careful"], 1, []),
+        ("diagnose", ["{F}", "--name", "people"], 1, []),
+    ],
+)
+def test_a_subcommand_without_the_other_modes_flag_still_runs(
+    tmp_path, monkeypatch, capsys, sub, shape, code, cleaned
+) -> None:
+    """Pin for #46: the refusal is for the other mode's FILE flag only. The
+    same argv without the stray pair runs its mode on F, and the options the
+    two modes share or that only one of them reads (--json, --fail-on,
+    --autonomy, --name) are still taken under either subcommand."""
+    seen = _no_model_clean(monkeypatch)
+    f_path, _ = _two_dirty_files(tmp_path)
+
+    argv = [a.format(F=f_path) for a in shape]
+    got = _exit_code(monkeypatch, ["crivo", sub, *argv])
+    captured = capsys.readouterr()
+    assert got == code, _error_line(captured.err)
+    assert seen["cleaned"] == [(c.format(F=f_path), n) for c, n in cleaned]
+    if sub == "diagnose":
+        assert "out-of-domain" in captured.out
+        assert seen["sessions"] == []
+
+
 @pytest.mark.parametrize(
     "argv",
     [
