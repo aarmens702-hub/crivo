@@ -12,6 +12,7 @@ import json
 import platform
 import queue
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -31,6 +32,7 @@ STREAM_CAP = 64 * 1024
 STREAM_TAIL_CAP = 16 * 1024
 TB_HEAD, TB_TAIL = 5, 30
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+PR_SET_DUMPABLE = 4  # <linux/prctl.h>
 
 
 def _strip_ansi(text: str) -> str:
@@ -126,7 +128,12 @@ class Supervisor:
         self._hung = False
 
     def run(self) -> None:
-        self.km.start_kernel()
+        # The kernel's stdout must not be our stdout, the protocol pipe the host
+        # reads (#242). ipykernel's fd watcher dup2s its own pipe onto fd 1, so
+        # fd-level and child-process output still reaches IOPub; only its echo
+        # to the original fd lands in /dev/null. restart_kernel reuses these
+        # launch args. stderr stays inherited: it is diagnostics, never protocol.
+        self.km.start_kernel(stdout=subprocess.DEVNULL)
         self.kc = self.km.client()
         self.kc.start_channels()
         self.kc.wait_for_ready(timeout=120)
@@ -398,7 +405,29 @@ class Supervisor:
             print(f"teardown: {exc}", file=sys.stderr)
 
 
+def _make_undumpable() -> None:
+    """On Linux, mark this process non-dumpable before the kernel starts (#242).
+
+    Otherwise a same-uid process (the kernel, or anything a cell starts) can
+    open /proc/<this pid>/fd/1, the protocol pipe to the host, and write onto
+    it. execve resets the flag, so the kernel itself is unaffected. A failure
+    is logged, never fatal. The host's own end of the pipe is still reachable
+    until events are signed (#251).
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE, 0) failed")
+    except Exception as exc:  # noqa: BLE001 — hardening only, never crash on it
+        print(f"supervisor: still dumpable: {exc}", file=sys.stderr)
+
+
 def main() -> None:
+    _make_undumpable()
     Supervisor().run()
 
 
