@@ -41,8 +41,11 @@ CASE_HEALTHY_ROWS = 50  # ... plus untouched ones, so a fix must not harm them
 # and so moves every pair, nor sampling, which changes the row count and
 # cannot match a whole-column digest at all. Both used to be claimed here.
 # The first is admitted by `rode_along` below, on evidence and under the
-# conditions its docstring lists; the second is a row-count question the row
-# invariant answers.
+# conditions its docstring lists. The second is NOT answered by the row
+# invariant, which only counts rows: removing any row still moves every
+# column's digest. Outside the diseases whose fix removes rows (d09, d10, d21)
+# the row invariant refuses a changed count outright; inside them, verify_cell
+# skips the digests once rows are gone and asks `survived` below instead.
 #
 # Cost is one pass plus a sort over 8 bytes per row.
 COLUMN_DIGEST = (
@@ -128,6 +131,137 @@ def rode_along(live, backup, untouched: list[str], baseline_rows: int) -> bool:
     moved = int((tb[perm] != ta).any(axis=1).sum())
     stayed = int((tb != ta).any(axis=1).sum())
     return moved <= stayed
+
+
+def survived(live, backup, untouched: list[str]):
+    """Are the rows a row-removing fix kept still the baseline's own rows,
+    unchanged in every untouched column? Returns the baseline POSITIONS of
+    the rows that went, or None when the survivors do not check out.
+
+    Columns pair by name: the k-th column named N in the backup with the k-th
+    named N in the live frame, and a name whose count moved is refused. With
+    no untouched name at all, the rows are matched over every column. Rows are
+    hashed whole, without the index, as `rode_along` hashes them, so NaN
+    equals NaN and an integer column cast to float reads as a change.
+
+    Two readings, tried in this order:
+    (a) the labels were kept: both indexes are unique, every live label is a
+        baseline label, and each live row equals the baseline row at its label;
+    (b) the index was reset to a plain range: the live rows are an
+        order-preserving subsequence of the baseline rows. (b) is tried even
+        when (a) fails, because a reset over a range-indexed baseline leaves
+        labels that all look like baseline labels.
+    So a reset combined with a reorder is refused, and so is a duplicated
+    index label unless the index was reset. Under (b), where two baseline rows
+    are equal in every matched column, which of them went is read, not
+    proven: each kept row is paired with the earliest baseline row that fits.
+    """
+    import pandas as pd
+
+    keep = set(untouched) or {str(c) for c in backup.columns}
+    was, now = {}, {}
+    for frame, slots in ((backup, was), (live, now)):
+        for i in range(len(frame.columns)):
+            if str(frame.columns[i]) in keep:
+                slots.setdefault(str(frame.columns[i]), []).append(i)
+    if not was or {n: len(v) for n, v in was.items()} != {
+        n: len(v) for n, v in now.items()
+    }:
+        return None
+    names = sorted(was)
+    before = pd.util.hash_pandas_object(
+        backup.iloc[:, [i for n in names for i in was[n]]], index=False
+    ).tolist()
+    after = pd.util.hash_pandas_object(
+        live.iloc[:, [i for n in names for i in now[n]]], index=False
+    ).tolist()
+    if backup.index.is_unique and live.index.is_unique:
+        at = backup.index.get_indexer(live.index).tolist()
+        if -1 not in at and [before[p] for p in at] == after:
+            return sorted(set(range(len(backup))) - set(at))
+    if live.index.equals(pd.RangeIndex(len(live))):
+        removed, j = [], 0
+        for p, h in enumerate(before):
+            if j < len(after) and after[j] == h:
+                j += 1
+            else:
+                removed.append(p)
+        if j == len(after):
+            return removed
+    return None
+
+
+def rollup_rows(frame, targets) -> list[int]:
+    """Positions of the rows that carry a rollup label in a column named in
+    `targets`, found with the pandas call _d21 makes: detect.ROLLUP_LABEL
+    through `str.match` on the column's non-blank text, lower-cased. The same
+    call, not Python's re, because the two disagree under pandas' Arrow string
+    engine (NBSP padding, a non-ASCII letter after 'all'), and this has to
+    count what the detector counted under whichever engine is installed."""
+    from crivo.detect import ROLLUP_LABEL, _is_texty
+
+    names = {str(t) for t in targets}
+    hits = set()
+    for i in range(len(frame.columns)):
+        if str(frame.columns[i]) not in names:
+            continue
+        series = frame.iloc[:, i].reset_index(drop=True)
+        if not _is_texty(series):
+            continue
+        values = series.dropna().astype(str)
+        values = values[values.str.strip() != ""]
+        hit = values.str.lower().str.match(ROLLUP_LABEL)
+        hits.update(int(p) for p in hit[hit].index)
+    return sorted(hits)
+
+
+def partnered(backup, removed: list[int]) -> bool:
+    """Does every baseline row a d10 fix removed have a near-duplicate among
+    the baseline rows it kept? A partner is what _d10 reads as the same entity
+    recorded twice: equal in every column once detect._normalised_frame has
+    folded case, whitespace and unicode, or equal that way in every column
+    but one, where both values read as numbers within _d10's drift tolerance.
+    That tolerance is copied from _d10, which holds it inline, and a test
+    holds the two together either side of the boundary; _d10's 90% coverage
+    floor on the drift column is not applied here.
+    """
+    import pandas as pd
+
+    from crivo import detect
+
+    gone = set(removed)
+    kept = [p for p in range(len(backup)) if p not in gone]
+    detect._VIEWS.clear()  # keyed on id(frame), so never trust a stale view
+    try:
+        normal = detect._normalised_frame(backup).reset_index(drop=True)
+    finally:
+        detect._VIEWS.clear()
+    whole = pd.util.hash_pandas_object(normal, index=False).tolist()
+    have = {whole[p] for p in kept}
+    left = [p for p in removed if whole[p] not in have]
+    for j in range(normal.shape[1] if normal.shape[1] >= 2 else 0):
+        if not left:
+            break
+        col = pd.to_numeric(backup.iloc[:, j], errors="coerce").tolist()
+        if all(pd.isna(col[p]) for p in left):
+            continue
+        rest = pd.util.hash_pandas_object(
+            normal.drop(columns=[normal.columns[j]]), index=False
+        ).tolist()
+        near: dict = {}
+        for p in kept:
+            if not pd.isna(col[p]):
+                near.setdefault(rest[p], []).append(col[p])
+        left = [
+            p
+            for p in left
+            if pd.isna(col[p])
+            or not any(
+                abs(col[p] - w) <= 1e-3 * max(1.0, abs(max(col[p], w)))
+                for w in near.get(rest[p], [])
+            )
+        ]
+    return not left
 
 
 # The untouched-column guard. Each baseline digest has to be found again among
@@ -555,6 +689,48 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
     reorder combined with a COLUMN reorder is declined, because the row hashes
     are taken in column order.
 
+    The surviving-rows arm, for the diseases whose fix removes rows (d09, d10,
+    d21). Removing any row moves every (index label, value) pair, so the
+    digest guard refused every dedup and every rollup drop the row invariant
+    had just admitted. Once such a fix leaves fewer rows than the baseline the
+    digests are not consulted: `survived` asks whether the rows left are
+    baseline rows, unchanged in every untouched column, matched by index label
+    when the labels were kept, or as an order-preserving subsequence when the
+    index was reset to a plain range. The row invariant still bounds how many
+    rows went, and detect_one still has to go quiet, which is what refuses a
+    d09 fix that drops the right number of the wrong rows.
+
+    For d21 and d10 the detector cannot carry that alone, because removing
+    the wrong row can silence it: with a lone Total, dropping a detail row
+    instead breaks the sum that corroborated it, and dropping an unrelated row
+    can take a numeric column below the coverage d10's drift pass needs. So
+    for d21 every removed row must carry a rollup label in a target column,
+    found by `rollup_rows` with the pandas call _d21 itself makes, so a label
+    the detector did not count is not counted here either. And a d21 fix only
+    removes rows, so the rows it kept are judged on every column, the target
+    label column included. That is what refuses a kept Subtotal passing for
+    the detail row it equals outside the label column, whether a reset paired
+    it with that row or the fix handed it that row's label, repaired the label
+    header as well, or disguised the Subtotal with a zero-width character;
+    and what refuses blanking the labels of the rows kept. For d10 every
+    removed row must have a near-duplicate among the rows kept, as
+    `partnered` reads one.
+
+    The cost of judging the label column, pinned by a test: a d21 fix that
+    also repairs a padded label header in the same cell is refused, since the
+    label column no longer sits under the name the baseline recorded. The
+    header repair (d18) has to come in its own fix; the rollup drop alone
+    verifies under the padded header.
+
+    What the arm refuses, each pinned by a test: a surviving untouched cell
+    that changed, under either index; a reset combined with a reorder; a
+    duplicated index label when the labels were kept; for d21, a detail row
+    removed in place of a rollup, and a kept row whose label changed; for
+    d10, a removed row with no kept partner, and a merge that writes into the
+    copy it keeps (such merges are out of scope here). No other disease
+    reaches the arm, and a row-removing fix that leaves the count unchanged
+    meets the digest guard above as is.
+
     The target names are resolved through detect._resolve_renames first, the
     same call detect_one makes, so the two halves of the guard cannot drift.
     A finding freezes its target's name when it is raised; an already-verified
@@ -577,6 +753,51 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
     )
     untouched = [c for c in baseline_columns if c not in targets]
     digest = COLUMN_DIGEST.format(series=f"{var}.iloc[:, _i]")
+    guard = UNTOUCHED_TEMPLATE.format(var=var, digest=digest)
+    disease = int(finding.get("disease", 0))
+    if disease in ROW_DELTA_EXACT or disease in ROW_DELTA_BOUNDED:
+        import textwrap
+
+        judged = "_untouched"
+        changed = (
+            "        'a surviving row changed (values or row identity) in a '\n"
+            "        'column that was not a fix target'\n"
+        )
+        where = json.dumps(sorted({str(t) for t in targets}))
+        if disease == 21:
+            # a d21 fix only removes rows, so the rows it kept are judged on
+            # the target label column too
+            judged = f"_untouched + {where}"
+            changed = (
+                "        'a row the fix kept changed (values, row identity or a '\n"
+                "        'column name); a d21 fix may only remove the rollup rows'\n"
+            )
+        rows = (
+            "from crivo.verify import survived as _survived\n"
+            f"if len({var}) < _clean_rows:\n"
+            f"    _removed = _survived({var}, _clean_backup, {judged})\n"
+            "    assert _removed is not None, (\n"
+            f"{changed}"
+            "    )\n"
+        )
+        if disease == 21:
+            rows += (
+                "    from crivo.verify import rollup_rows as _rollup_rows\n"
+                "    _rollups = set(_rollup_rows(_clean_backup, " + where + "))\n"
+                "    assert set(_removed) <= _rollups, (\n"
+                "        'a removed row is not a rollup row, and a d21 fix may '\n"
+                "        'remove only those'\n"
+                "    )\n"
+            )
+        if disease == 10:
+            rows += (
+                "    from crivo.verify import partnered as _partnered\n"
+                "    assert _partnered(_clean_backup, _removed), (\n"
+                "        'a removed row has no near-duplicate among the rows the '\n"
+                "        'fix kept, and a d10 fix may remove only copies'\n"
+                "    )\n"
+            )
+        guard = rows + "else:\n" + textwrap.indent(guard, "    ")
     reference = ""
     if int(finding.get("disease", 0)) == 6:
         reference = (
@@ -615,7 +836,7 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
         "assert _v is None, f\"signal still fires: {_v['evidence']}\"\n"
         f"{reference}"
         f"{_row_invariant(var, finding)}\n"
-        f"{UNTOUCHED_TEMPLATE.format(var=var, digest=digest)}"
+        f"{guard}"
         '"verified"'
     )
 
