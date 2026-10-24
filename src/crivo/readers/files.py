@@ -248,7 +248,12 @@ def _read_file_raw(p: Path, format: str | None = None, **kwargs) -> pd.DataFrame
     # a partitioned parquet dataset is a directory of parts; read it whole
     # before any suffix logic (a directory name may still carry a dot)
     if p.is_dir():
-        return pd.read_parquet(p, **kwargs)
+        frame = pd.read_parquet(p, **kwargs)
+        if frame.columns.empty:
+            # an empty directory, or a Spark output holding only _SUCCESS, is
+            # a 0 x 0 frame every detector calls clean: refuse it, naming it
+            raise ValueError(f"{p.name}: no parquet parts in this directory")
+        return frame
     suffix = p.suffix.lower()
     if suffix == ".dta":
         return pd.read_stata(p, **kwargs)
