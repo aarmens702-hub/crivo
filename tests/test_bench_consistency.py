@@ -5,6 +5,7 @@ regression from luck. This scores repeated runs of the same case: pass^k
 (solved on every run) and pass@1 (solved on average), and names the flaky
 cases. Pure analysis over result JSONs; it runs no model."""
 
+import pandas as pd
 import pytest
 
 from bench import consistency, corpus
@@ -160,3 +161,80 @@ def test_solved_on_real_scores_of_the_duplicate_rows_dataset(status, cleaner, wa
     run = {"status": status, "scores": _dup_rows_cleaned(cleaner)}
 
     assert consistency.solved(run) is want
+
+
+def _count_credit_cheat(name: str, cheat: str) -> dict:
+    """The real end_to_end scores of a SMOKE row dataset after a cheat that
+    removes as many rows as were planted (k) without removing the planted
+    ones, and changes values so they no longer match their dirty copies."""
+    entry = next(e for e in corpus.SMOKE if e["name"] == name)
+    pristine, dirty, truth = corpus.build(entry)
+    planted = sorted(
+        {r for c in truth.corruptions if c.granularity == "row" for r in c.rows}
+    )
+    k = len(planted)
+
+    def drop_k_grid_rows(frame):  # the first k rows: good rows, every one
+        return frame.drop(index=frame.index[:k])
+
+    def rewrite_a_planted_row():
+        # every planted row but the last removed, the last rewritten in
+        # place, and the last good row removed instead of it
+        rewritten = dirty.astype(object)
+        rewritten.iloc[planted[-1]] = "ZZ-REWRITTEN"
+        return rewritten.drop(index=rewritten.index[[*planted[:-1], truth.n_rows - 1]])
+
+    cleaned = {
+        "rename-every-column": lambda: drop_k_grid_rows(
+            dirty.set_axis([f"col_{i}" for i in range(dirty.shape[1])], axis=1)
+        ),
+        "wipe-everything": lambda: drop_k_grid_rows(
+            pd.DataFrame(float("nan"), index=dirty.index, columns=dirty.columns)
+        ),
+        "cast-to-str": lambda: drop_k_grid_rows(dirty.astype(str)),
+        "rewrite-a-planted-row": rewrite_a_planted_row,
+    }[cheat]()
+    return score_end_to_end(pristine, dirty, cleaned, truth)
+
+
+# Where a cheat earns no row credit. tx-header-echo's planted rows (a header
+# echo and a footer) are text already, so casting to str leaves both matching
+# their dirty values: still there, planted_removed = 0, row F1 0.0.
+_ROW_F1_OTHER_THAN_FULL = {("tx-header-echo", "cast-to-str"): 0.0}
+
+
+@pytest.mark.parametrize(
+    "cheat",
+    ["rename-every-column", "wipe-everything", "cast-to-str", "rewrite-a-planted-row"],
+)
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tx-dup-rows",
+        "tx-near-dups",
+        "tx-aggregate-row",
+        "tx-header-echo",
+        "tx-compound-hard",
+    ],
+)
+def test_a_count_credit_cheat_scores_full_rows_but_is_not_solved(name, cheat):
+    """Regression for #256. KNOWN GAP, pinned: rows match by value, and value
+    matching can't tell a planted row rewritten past recognition from one
+    removed. A cheat that removes k good rows and rewrites the rest scores
+    row F1 1.0. Today the cell rule is what stops it, since every one of
+    these moves or blanks the scored grid, so `solved` stays False. This pin
+    breaks if anyone relaxes the cell rule on row datasets."""
+    scores = _count_credit_cheat(name, cheat)
+
+    # KNOWN GAP. removed = k. Renamed, every row has the same (empty) value;
+    # wiped, the same all-missing value; cast or rewritten, no planted row's
+    # dirty value is left in cleaned. Either way still_there(v) = 0 for every
+    # planted value, sum = k, planted_removed = min(k, k) = k:
+    #   R = k/k = 1.0, P = k/k = 1.0, F1 = 1.0, with every planted row in
+    #   place (or rewritten) and k good rows gone
+    assert scores["rows"]["f1"] == _ROW_F1_OTHER_THAN_FULL.get((name, cheat), 1.0)
+    # the cell rule: the scored grid is renamed away, blanked, retyped or
+    # shifted, so repair F1 is a measured number below 1.0
+    assert scores["repair"]["f1"] is not None
+    assert scores["repair"]["f1"] < 1.0
+    assert consistency.solved({"status": "ok", "scores": scores}) is False

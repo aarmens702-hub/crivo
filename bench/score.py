@@ -143,12 +143,15 @@ def _positions(
 
 
 def _value_key(x) -> tuple:
-    """A hashable stand-in for one value, close to `equivalent` in a form a
-    Counter can hold: the missing family is one key, numbers are floats
+    """A hashable stand-in for one value, finer than `equivalent`, in a form
+    a Counter can hold: the missing family is one key, numbers are floats
     rounded to 12 significant digits, a bool stays a bool, datetime-likes
     compare by instant (tz-aware and naive apart, as `equivalent` keeps them),
-    strings compare exactly. Never raises: an exotic value keys by its type
-    and repr."""
+    strings compare exactly. On those families an equal key implies
+    `equivalent`, but not the other way round: two numbers within its 1e-9
+    tolerance can round apart at 12 digits. Never raises: an exotic value
+    keys by its type and repr, and only that fallback can give one key to
+    values `equivalent` keeps apart."""
     try:
         if _is_missing(x):
             return ("missing",)
@@ -196,12 +199,24 @@ def _row_removal(
     values. For each value key v, kept(v) counts v among the unplanted dirty
     rows, and still_there(v) = min(planted(v), max(0, cleaned(v) - kept(v))).
     Then planted_removed = min(removed, Σ(planted(v) - still_there(v))),
-    where removed = max(0, len(dirty) - len(cleaned)): the cap means a
-    planted row rewritten in place is not counted as removed.
+    where removed = max(0, len(dirty) - len(cleaned)).
 
-    With no column left to compare (all renamed or dropped), every row has
-    the same empty key, rows can't be told apart, and the score falls back
-    to counts: planted_removed = min(removed, planted)."""
+    The cap holds credit to the drop in row count, so a rewrite alone earns
+    nothing. It stops no more than that: value matching can't tell a
+    rewritten planted row from a removed one, so a cleaner that rewrites and
+    also removes is credited for planted rows first. In the limit the score
+    is counts alone, planted_removed = min(removed, planted): with no
+    compared column (all renamed or dropped) every row has the same empty
+    key, and once no planted row's dirty key is left in `cleaned`, none is
+    still there. A compared column rewritten on every row (wiped to NaN,
+    cast to str, nudged inside `equivalent`'s tolerance but past the key's
+    12 digits) gets there wherever it changes the planted rows' values.
+
+    Credit for a planted row still in place is paid for by an unplanted row
+    removed, and the unplanted rows are the cell grid's rows (injectors
+    append the rows they plant), where a removal shifts every row after it.
+    The cell score is what sees that, which is why `consistency.solved`
+    reads both."""
     planted_at = sorted(
         {r for c in truth.corruptions if c.granularity == "row" for r in c.rows}
     )

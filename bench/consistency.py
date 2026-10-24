@@ -23,10 +23,15 @@ def solved(run: dict, threshold: float = 1.0) -> bool:
     (ok_unchanged with an unmeasurable repair F1) counts as solved: deferring a
     judgement call is the right outcome, not a failure.
 
-    On a dataset that plants rows, the scores also carry a row score (#256),
-    which the cell grid can't see: planted rows sit past it. Its F1 must meet
-    the threshold too, whatever the cells say, so a run that leaves the
-    planted rows in place is not solved, a held ok_unchanged run included."""
+    On a dataset that plants rows, the scores also carry a row score (#256)
+    for what the cell grid can't see: planted rows sit past it. A defined
+    row F1 below the threshold fails the run whatever the cells say, so a
+    run that changes nothing is not solved, a held ok_unchanged run
+    included. Failing a run that leaves a planted row in place takes the two
+    rules together: rows match by value, so a run that rewrites a planted
+    row and removes a good one passes the row rule at F1 1.0, and the cell
+    rule is what fails it, since the good rows are the grid's rows and
+    removing one shifts every row after it."""
     if run.get("status") not in _OK:
         return False
     scores = run.get("scores") or {}

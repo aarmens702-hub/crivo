@@ -1014,6 +1014,29 @@ def test_repairing_a_near_copy_in_place_does_not_remove_it():
     }
 
 
+def test_a_near_copy_repaired_in_place_beside_a_dropped_good_row_reads_as_removed():
+    """Regression for #256. KNOWN GAP, pinned so a fix shows up here: the cap
+    stops a rewrite alone from counting as a removal, not a rewrite paired
+    with a real removal. The cleaner repairs the near copy in place (now an
+    exact copy of row 2) and drops good row 0 instead. Value matching can't
+    tell the rewritten planted row from a removed one, so the one removal is
+    credited to it, and a planted row still in place with a good row gone
+    scores as a full repair."""
+    pristine, dirty, truth = _export_with_a_near_copy()
+    cleaned = dirty.copy()
+    cleaned.loc[4, "amount"] = 40.0
+    cleaned = cleaned.drop(index=[0])
+
+    rows = _rows_of(pristine, dirty, cleaned, truth)
+
+    # KNOWN GAP. removed = 5 - 4 = 1. planted(40.01 row) = 1, cleaned(40.01
+    # row) = 0: still_there = 0, sum = 1, planted_removed = min(1, 1) = 1
+    #   R = 1/1 = 1.0, P = 1/1 = 1.0, F1 = 1.0, where what happened is
+    #   R = 0/1 and P = 0/1
+    assert (rows["removed"], rows["planted_removed"]) == (1, 1)
+    assert (rows["recall"], rows["precision"], rows["f1"]) == (1.0, 1.0, 1.0)
+
+
 def test_dropping_the_near_copy_is_a_full_row_repair():
     """Regression for #256, the pin beside the cap above: removing the near
     copy is the repair, and scores row F1 1.0."""
