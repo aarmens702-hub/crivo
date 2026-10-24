@@ -26,6 +26,15 @@ from crivo.detect import detect_all
 EXTERNAL = ["hospital", "flights", "beers", "rayyan"]
 _MARK_START, _MARK_END = "<!-- bench:start -->", "<!-- bench:end -->"
 
+# Diseases whose correct fix can never equal the truth value, so repair F1 on
+# them is undefined by design. A fully fixable dataset whose every attempted
+# disease is listed here leaves the repair mean by this rule, and is counted
+# beside it; adding a disease moves datasets out of the published mean (#86).
+REPAIR_UNDEFINED_BY_DESIGN: dict[int, str] = {
+    4: "a cleared placeholder lands on missing; the truth holds the value it replaced",
+    19: "a dropped constant column cannot equal the truth column",
+}
+
 
 class InvariantViolation(AssertionError):
     """The instrument itself is broken — no number it prints can be trusted."""
@@ -47,18 +56,30 @@ def _mean(values: list) -> float | None:
     return round(sum(present) / len(present), 4) if present else None
 
 
+def _repair_undefined_by_design(row: dict) -> bool:
+    """True when every disease the row attempted is declared undefined."""
+    attempted = set(row["scores"]["attempted_diseases"])
+    return bool(attempted) and attempted <= set(REPAIR_UNDEFINED_BY_DESIGN)
+
+
 def _aggregate(synthetic: list[dict]) -> dict:
     """The honest split: overall means, plus repair over only the datasets
     whose every disease has a deterministic fixer — never one blended number."""
     fixable = [row for row in synthetic if not row["scores"]["not_attempted_diseases"]]
     # a dataset can be "fully fixable" yet score zero repairs by design:
     # sentinel-clearing and constant-drops are correct fixes whose destination
-    # (NaN, a removed column) can never equal the truth value. So the repair
-    # mean is over datasets where repair was defined, with both counts
-    # published alongside — never one silently-shrunk denominator.
-    fixable_defined = [
-        r for r in fixable if r["scores"]["end_to_end"]["repair"]["f1"] is not None
-    ]
+    # (NaN, a removed column) can never equal the truth value. Which datasets
+    # leave the repair mean is decided by their diseases against the declared
+    # rule, never by their score: a measured zero stays in, and the count the
+    # rule left out is published beside the mean.
+    undefined_by_design = [r for r in fixable if _repair_undefined_by_design(r)]
+    fixable_scored = [r for r in fixable if not _repair_undefined_by_design(r)]
+    for r in fixable_scored:
+        if r["scores"]["end_to_end"]["repair"]["f1"] is None:
+            raise InvariantViolation(
+                f"{r['name']}: repair F1 undefined on a fully fixable dataset"
+                " the declared rule does not name"
+            )
     # same rule for survival: a dataset where crivo attempted no fix has an
     # undefined survival rate, not a good one, so it stays out of the mean.
     # Excluding it is only honest if the count that WAS averaged travels with
@@ -69,7 +90,8 @@ def _aggregate(synthetic: list[dict]) -> dict:
     return {
         "datasets": len(synthetic),
         "fully_fixable_datasets": len(fixable),
-        "repair_defined_datasets": len(fixable_defined),
+        "repair_scored_datasets": len(fixable_scored),
+        "repair_undefined_by_design_datasets": len(undefined_by_design),
         "survival_defined_datasets": len(survival_defined),
         # a silent detector is a recall-0 detector: None counts as 0.0 here,
         # so the mean can never look better because a signal said nothing
@@ -82,7 +104,7 @@ def _aggregate(synthetic: list[dict]) -> dict:
             if r["scores"]["detection"]["micro"]["f1"] in (None, 0.0)
         ),
         "repair_f1_fixable_mean": _mean(
-            [r["scores"]["end_to_end"]["repair"]["f1"] for r in fixable_defined]
+            [r["scores"]["end_to_end"]["repair"]["f1"] for r in fixable_scored]
         ),
         "survived_rate_mean": _mean(
             [r["scores"]["verification"]["survived_rate"] for r in survival_defined]
@@ -106,7 +128,8 @@ def _markdown(report: dict) -> str:
         (
             f"- datasets: {agg['datasets']} synthetic"
             f" ({agg['fully_fixable_datasets']} fully fixable,"
-            f" {agg['repair_defined_datasets']} with repair defined)"
+            f" {agg['repair_scored_datasets']} with repair scored,"
+            f" {agg['repair_undefined_by_design_datasets']} undefined by design)"
             f" + {len(report['external'])} external"
         ),
         (
@@ -117,9 +140,10 @@ def _markdown(report: dict) -> str:
         ),
         (
             f"- repair F1, mean over the"
-            f" {agg['repair_defined_datasets']}/{agg['datasets']} datasets with"
-            f" repair defined ({agg['repair_defined_datasets']} of the"
-            f" {agg['fully_fixable_datasets']} fully fixable):"
+            f" {agg['repair_scored_datasets']}/{agg['datasets']} datasets with"
+            f" repair scored ({agg['repair_scored_datasets']} of the"
+            f" {agg['fully_fixable_datasets']} fully fixable;"
+            f" {agg['repair_undefined_by_design_datasets']} undefined by design):"
             f" {_fmt(agg['repair_f1_fixable_mean'])}"
         ),
         (
@@ -129,10 +153,19 @@ def _markdown(report: dict) -> str:
         ),
         "",
         (
-            "— means undefined: no fixer attempted, the detector produced"
-            " nothing to score, or a 0/0 ratio. A fixable dataset can score"
-            " zero repairs by design (sentinel-clearing and constant-drops"
-            " land on NaN/removal, never the truth value)."
+            "— means nothing to score: for dirt and repair F1, no scored cell"
+            " was dirty and none changed (dirt in appended rows or an added"
+            " column, which the cell grid doesn't see, lands here too); for"
+            " detection, no finding and no planted disease; for survival, no"
+            " fix was attempted. On a fully fixable dataset a miss is a"
+            " measured 0.000 and stays in the repair mean. The repair mean"
+            " leaves out datasets with a disease crivo has no fixer for, and,"
+            " by declared rule, fully fixable datasets whose every disease is"
+            " undefined by design: "
+            + "; ".join(
+                f"d{d:02d} ({why})" for d, why in REPAIR_UNDEFINED_BY_DESIGN.items()
+            )
+            + "."
         ),
         "",
         "## Synthetic corpus",
@@ -193,10 +226,11 @@ def _write_readme(readme: Path, report: dict) -> None:
             "|---|---|",
             f"| detection micro-F1 (mean, silence = 0) | {_fmt(agg['detection_micro_f1_mean'])} |",
             (
-                f"| repair F1, mean over datasets with repair defined"
-                f" ({agg['repair_defined_datasets']}/{agg['datasets']};"
-                f" {agg['repair_defined_datasets']} of the"
-                f" {agg['fully_fixable_datasets']} fully fixable)"
+                f"| repair F1, mean over datasets with repair scored"
+                f" ({agg['repair_scored_datasets']}/{agg['datasets']};"
+                f" {agg['repair_scored_datasets']} of the"
+                f" {agg['fully_fixable_datasets']} fully fixable;"
+                f" {agg['repair_undefined_by_design_datasets']} undefined by design)"
                 f" | {_fmt(agg['repair_f1_fixable_mean'])} |"
             ),
             (
@@ -317,9 +351,9 @@ def main(argv: list[str] | None = None) -> int:
         f"{mode}: {agg['datasets']} synthetic + {len(report['external'])} external"
         f" | detect µF1 {_fmt(agg['detection_micro_f1_mean'])}"
         f" | repair F1 mean {_fmt(agg['repair_f1_fixable_mean'])}"
-        f" over {agg['repair_defined_datasets']} of {agg['datasets']}"
-        f" ({agg['repair_defined_datasets']} of {agg['fully_fixable_datasets']}"
-        f" fixable)"
+        f" over {agg['repair_scored_datasets']} of {agg['datasets']}"
+        f" ({agg['repair_scored_datasets']} of {agg['fully_fixable_datasets']}"
+        f" fixable; {agg['repair_undefined_by_design_datasets']} undefined by design)"
         f" | survived mean {_fmt(agg['survived_rate_mean'])}"
         f" over {agg['survival_defined_datasets']} of {agg['datasets']}"
     )

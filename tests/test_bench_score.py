@@ -3,6 +3,7 @@ per RED step, each table-driven so the whole scorer needs few of them."""
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from bench.score import equivalent, score_detection, score_end_to_end, score_pair
 from bench.truth import Cell, Corruption, GroundTruth, frame_sha256
@@ -69,13 +70,15 @@ def test_score_end_to_end_oracle_and_no_op_invariants():
     # No-op: the cleaner changes nothing, so C = set() -> both precisions are
     # 0/0 (None, the zero-denominator rule), while both recalls have a real,
     # nonzero denominator (|D|=1) and come out 0.0 — never a crash either way.
+    # F1 is 2*TP/(|C|+|D|) = 0/(0+1) = 0.0: a cleaner that left real dirt
+    # alone scored a measured zero, not "undefined" (#86).
     noop = score_end_to_end(pristine, dirty, dirty.copy(), truth)
     assert noop["dirt_targeting"]["precision"] is None
     assert noop["dirt_targeting"]["recall"] == 0.0
-    assert noop["dirt_targeting"]["f1"] is None
+    assert noop["dirt_targeting"]["f1"] == 0.0
     assert noop["repair"]["precision"] is None
     assert noop["repair"]["recall"] == 0.0
-    assert noop["repair"]["f1"] is None
+    assert noop["repair"]["f1"] == 0.0
     assert noop["counts"] == {"dirty": 1, "changed": 0, "repaired": 0}
 
 
@@ -124,7 +127,8 @@ def test_score_detection_counts_and_disease_zero_exclusion():
         "f1": 1.0,
     }
     # disease 2: no findings at all, 0 of 1 corruption matched
-    #            -> P: 0/0 -> None, R=0/1=0.0, F1 None
+    #            -> P: 0/0 -> None, R=0/1=0.0, F1 = 2*0/(0+1) = 0.0
+    #            (a silent detector on real dirt is a measured zero, #86)
     assert result["per_disease"]["2"] == {
         "matched_findings": 0,
         "n_findings": 0,
@@ -132,10 +136,10 @@ def test_score_detection_counts_and_disease_zero_exclusion():
         "n_truth": 1,
         "precision": None,
         "recall": 0.0,
-        "f1": None,
+        "f1": 0.0,
     }
     # disease 3: 0 of 1 finding matched, no corruptions at all
-    #            -> P=0/1=0.0, R: 0/0 -> None, F1 None
+    #            -> P=0/1=0.0, R: 0/0 -> None, F1 = 2*0/(1+0) = 0.0
     assert result["per_disease"]["3"] == {
         "matched_findings": 0,
         "n_findings": 1,
@@ -143,7 +147,7 @@ def test_score_detection_counts_and_disease_zero_exclusion():
         "n_truth": 0,
         "precision": 0.0,
         "recall": None,
-        "f1": None,
+        "f1": 0.0,
     }
     assert "0" not in result["per_disease"]
     # macro_f1: diseases present in truth (excluding 0) are {1, 2}; disease
@@ -443,3 +447,166 @@ def test_string_space_equivalence_scores_external_pairs():
     assert result["counts"] == {"dirty": 2, "changed": 2, "repaired": 1}
     assert result["repair"]["precision"] == 0.5
     assert result["repair"]["recall"] == 0.5
+
+
+def _score_export(start: str, edits: dict) -> dict:
+    """Score a cleaner on a small messy export. `start` picks the frame the
+    cleaner is handed ("dirty": four planted cells; "pristine": no dirt at
+    all) and `edits` are the cells the cleaner rewrites, {(row, column):
+    value}. The export is typed the way a CSV reader leaves it: zero-padded
+    customer ids and ISO dates held as text, money as floats, a town. Every
+    value is invented; none is from the Raha data."""
+    pristine = pd.DataFrame(
+        {
+            "cust_id": ["00412", "00977", "01530", "03218"],
+            "signup": ["2024-01-05", "2024-02-11", "2024-03-02", "2024-03-30"],
+            "amount": [1200.0, 85.5, 40.0, 310.25],
+            "town": ["Quarnby", "Velloch", "Tarrisford", "Quarnby"],
+        }
+    )
+    dirty = pristine.copy()
+    if start == "dirty":
+        dirty.loc[3, "cust_id"] = "3218"  # leading zero lost (d22)
+        dirty.loc[1, "signup"] = "11/02/2024"  # a second date format (d03)
+        dirty.loc[2, "amount"] = -999.0  # a placeholder for missing (d04)
+        dirty.loc[0, "town"] = "  Quarnby "  # stray whitespace (d06)
+        # D = {(3,cust_id), (1,signup), (2,amount), (0,town)}, |D| = 4
+    cleaned = dirty.copy()
+    for (row, column), value in edits.items():
+        cleaned.loc[row, column] = value
+    truth = GroundTruth(seed=0, base="fixture", n_rows=4, n_cols=4, frame_sha256="x")
+    return score_end_to_end(pristine, dirty, cleaned, truth)
+
+
+# (frame the cleaner gets, the cells it rewrites, dirt-targeting F1, repair F1,
+#  counts). F1 = 2*TP/(|C|+|D|): TP is C∩D for dirt targeting, C∩D∩K for repair.
+_MEASURED_ZEROS = [
+    # changes nothing: C = {}, |D| = 4
+    #   dirt:   P = 0/0 None, R = 0/4 = 0.0, F1 = 2*0/(0+4) = 0.0
+    #   repair: P = 0/0 None, R = 0/4 = 0.0, F1 = 2*0/(0+4) = 0.0
+    pytest.param(
+        "dirty",
+        {},
+        0.0,
+        0.0,
+        {"dirty": 4, "changed": 0, "repaired": 0},
+        id="changes-nothing-on-real-dirt",
+    ),
+    # re-cases a clean town and nudges a clean amount: C = {(1,town),
+    # (0,amount)}, C∩D = {}
+    #   dirt:   P = 0/2, R = 0/4, P + R = 0, F1 = 2*0/(2+4) = 0.0
+    #   repair: P = 0/2, R = 0/4, P + R = 0, F1 = 2*0/(2+4) = 0.0
+    pytest.param(
+        "dirty",
+        {(1, "town"): "VELLOCH", (0, "amount"): 1200.5},
+        0.0,
+        0.0,
+        {"dirty": 4, "changed": 2, "repaired": 0},
+        id="changes-only-clean-cells",
+    ),
+    # clears the -999 to NaN (truth held 40.0) and pads "3218" to the wrong
+    # width (truth "03218"): C = {(2,amount), (3,cust_id)} ⊆ D, K∩D = {}
+    #   dirt:   P = 2/2 = 1.0, R = 2/4 = 0.5, F1 = 2*2/(2+4) = 2/3
+    #   repair: P = 0/2, R = 0/4, P + R = 0, F1 = 2*0/(2+4) = 0.0
+    pytest.param(
+        "dirty",
+        {(2, "amount"): np.nan, (3, "cust_id"): "003218"},
+        2 / 3,
+        0.0,
+        {"dirty": 4, "changed": 2, "repaired": 0},
+        id="changes-dirty-cells-repairs-none",
+    ),
+    # no dirt at all, and the cleaner re-cases a clean town: D = {},
+    # C = {(1,town)}
+    #   dirt:   P = 0/1 = 0.0, R = 0/0 None, F1 = 2*0/(1+0) = 0.0
+    #   repair: P = 0/1 = 0.0, R = 0/0 None, F1 = 2*0/(1+0) = 0.0
+    pytest.param(
+        "pristine",
+        {(1, "town"): "VELLOCH"},
+        0.0,
+        0.0,
+        {"dirty": 0, "changed": 1, "repaired": 0},
+        id="damages-a-frame-with-no-dirt",
+    ),
+]
+
+
+@pytest.mark.parametrize("start, edits, dirt_f1, repair_f1, counts", _MEASURED_ZEROS)
+def test_a_cleaner_that_repairs_nothing_scores_a_measured_zero(
+    start, edits, dirt_f1, repair_f1, counts
+):
+    """Regression for #86. A cleaner that changed nothing on real dirt, or
+    changed cells and repaired none, scored F1 None: precision was 0/0, or
+    P + R was 0, and `_f1` called both undefined. The bench's repair mean
+    drops a None, so a total miss left the mean instead of pulling it down.
+    F1 is 2*TP/(|C|+|D|), and that is 0.0 whenever anything was dirty or
+    anything changed."""
+    result = _score_export(start, edits)
+
+    assert result["counts"] == counts
+    assert result["dirt_targeting"]["f1"] == pytest.approx(dirt_f1)
+    assert result["repair"]["f1"] == pytest.approx(repair_f1)
+
+
+def test_nothing_dirty_and_nothing_changed_is_the_one_undefined_f1():
+    """Regression for #86, the pin beside the zeros above. With nothing to
+    repair and nothing done, every ratio is 0/0 and F1 stays None. A scorer
+    that answered 0.0 here would mark a cleaner down for leaving a clean frame
+    alone."""
+    result = _score_export("pristine", {})
+
+    assert result["counts"] == {"dirty": 0, "changed": 0, "repaired": 0}
+    for family in ("dirt_targeting", "repair"):
+        assert result[family] == {"precision": None, "recall": None, "f1": None}
+
+
+@pytest.mark.parametrize(
+    "start, edits, precision, recall",
+    [
+        # C = {}: both precisions are 0/0; |D| = 4, so both recalls are 0/4
+        pytest.param("dirty", {}, None, 0.0, id="nothing-changed"),
+        # D = {}: both recalls are 0/0; |C| = 1, so both precisions are 0/1
+        pytest.param(
+            "pristine", {(1, "town"): "VELLOCH"}, 0.0, None, id="nothing-dirty"
+        ),
+    ],
+)
+def test_an_empty_denominator_still_leaves_its_ratio_undefined(
+    start, edits, precision, recall
+):
+    """Regression for #86. Only F1 reads a missing side as 0.0. Precision with
+    nothing changed and recall with nothing dirty are still 0/0, and the JSON
+    keeps saying so with None, so a reader can tell "changed nothing" from
+    "changed the wrong cells"."""
+    result = _score_export(start, edits)
+
+    for family in ("dirt_targeting", "repair"):
+        assert (result[family]["precision"], result[family]["recall"]) == (
+            precision,
+            recall,
+        ), family
+
+
+def test_a_detector_that_flags_the_wrong_column_scores_f1_zero():
+    """Regression for #86. P = R = 0 is a measured miss: the detector flagged
+    mixed dates on `amount` while truth planted them on `signup`. Per-disease
+    and micro F1 read 0.0, not None."""
+    detect_result = {"findings": [{"disease": 3, "columns": ["amount"]}]}
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=4,
+        n_cols=4,
+        frame_sha256="x",
+        corruptions=[Corruption(disease=3, columns=("signup",), granularity="cell")],
+    )
+
+    result = score_detection(detect_result, truth)
+    d3 = result["per_disease"]["3"]
+
+    # 0 of 1 finding matched, 0 of 1 corruption matched:
+    # P = 0/1, R = 0/1, F1 = 2*0/(1+1) = 0.0
+    assert (d3["precision"], d3["recall"]) == (0.0, 0.0)
+    assert d3["f1"] == 0.0
+    assert result["micro"] == {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+    assert result["macro_f1"] == 0.0

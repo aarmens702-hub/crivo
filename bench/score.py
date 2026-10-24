@@ -142,12 +142,19 @@ def _positions(
 
 
 def _f1(precision: float | None, recall: float | None) -> float | None:
-    """Harmonic mean. None whenever precision or recall is itself undefined,
-    or when P+R is 0 — the F1 formula's own zero denominator, never a NaN."""
-    if precision is None or recall is None:
+    """Harmonic mean of precision and recall. In `score_end_to_end` (dirt
+    targeting, repair) that is 2·TP / (|C| + |D|), since a dirty cell that
+    ends correct has changed; `score_detection` counts precision and recall
+    over different numerators, so there it is only the harmonic mean.
+    None only when both precision and recall are undefined: nothing
+    to find and nothing done. One undefined side reads as 0.0 (changing
+    nothing on real dirt is a measured miss), and P+R of 0 is F1 0.0, never
+    None or NaN (#86)."""
+    if precision is None and recall is None:
         return None
+    precision, recall = precision or 0.0, recall or 0.0
     denom = precision + recall
-    return 2 * precision * recall / denom if denom else None
+    return 2 * precision * recall / denom if denom else 0.0
 
 
 def score_end_to_end(
