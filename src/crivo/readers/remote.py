@@ -6,9 +6,10 @@ only (a redirect to another scheme is refused too), and a clear error under
 `--network none` instead of a bare timeout. The frame is built straight from
 the response body, never cached to disk.
 
-The frame carries its own lineage on `attrs["remote"]`: the URL, the fetch
-time (UTC), the sha256 of the bytes that arrived, and the row count and
-column names of the frame built from them. The kernel registry carries that
+The frame carries its own lineage on `attrs["remote"]`: the URL without
+userinfo, query or fragment, the fetch time (UTC), the sha256 of the bytes
+that arrived, and the row count and column names of the frame built from
+them. The kernel registry carries that
 stamp up so an answer built on remote data can name its source.
 
 Format is decided by the response Content-Type first (application/json vs
@@ -26,7 +27,7 @@ import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import pandas as pd
 
@@ -41,10 +42,24 @@ _WEB_SCHEMES = {"http", "https"}
 READER_ENV_VARS = ("CRIVO_HTTP_TIMEOUT_S", "CRIVO_HTTP_MAX_BYTES")
 
 
+def strip_url_credentials(url: str) -> str:
+    """`url` with its userinfo, query and fragment dropped: scheme, host, port
+    and path only (host and path as written; urlsplit lowercases the scheme).
+    The host is what follows the last `@` of the netloc, so an `@` inside a
+    password leaves nothing of it behind. Rebuilt
+    from the netloc text, not `.hostname`/`.port`, which lowercase the host,
+    drop IPv6 brackets and raise on a bad port."""
+    parts = urlsplit(url)
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
 def read_url(url, records_path=None, **kwargs) -> pd.DataFrame:
     """Fetch `url` and return a DataFrame, format inferred from Content-Type then
     the URL extension. For JSON, `records_path` is a dotted path (e.g.
-    'data.items') walked into the parsed object to the records list."""
+    'data.items') walked into the parsed object to the records list. The fetch
+    uses `url` as given; the lineage stamp on `attrs["remote"]["uri"]` is the
+    URL without userinfo, query or fragment."""
     scheme = urlparse(url).scheme.lower()
     if scheme not in _WEB_SCHEMES:
         raise ValueError(
@@ -68,7 +83,7 @@ def read_url(url, records_path=None, **kwargs) -> pd.DataFrame:
             io.StringIO(text), keep_default_na=False, dtype=str, **kwargs
         )
     frame.attrs["remote"] = {
-        "uri": url,
+        "uri": strip_url_credentials(url),
         "fetched_at": datetime.now(UTC).isoformat(),
         "sha256": digest,
         "rows": len(frame),

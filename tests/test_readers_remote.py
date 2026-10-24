@@ -52,16 +52,19 @@ def http_server(tmp_path):
 
 class _ControlHandler(BaseHTTPRequestHandler):
     """Serves a body and Content-Type each test shapes, and records the last
-    request's User-Agent — so the fetch discipline (header, byte cap, format
-    decision) can be asserted against real bytes."""
+    request's User-Agent and path (query included) — so the fetch discipline
+    (header, byte cap, format decision, what URL was asked for) can be
+    asserted against real bytes."""
 
     body = b""
     content_type = "application/octet-stream"
     last_user_agent = None
+    last_path = None
 
     def do_GET(self):
         cls = type(self)
         cls.last_user_agent = self.headers.get("User-Agent")
+        cls.last_path = self.path
         self.send_response(200)
         self.send_header("Content-Type", cls.content_type)
         self.end_headers()
@@ -78,6 +81,7 @@ def control_server():
     _ControlHandler.body = b""
     _ControlHandler.content_type = "application/octet-stream"
     _ControlHandler.last_user_agent = None
+    _ControlHandler.last_path = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ControlHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -346,6 +350,128 @@ def test_the_remote_hash_is_of_the_bytes_that_arrived(control_server) -> None:
     remote = frame.attrs.get("remote", {})
     assert remote.get("sha256") == served
     assert remote.get("rows") == 3
+
+
+def test_read_url_stamps_the_uri_without_its_query_or_fragment(
+    control_server,
+) -> None:
+    """Regression for #56. A query string is where an API key rides
+    (`?token=...`), and `attrs["remote"]["uri"]` travels into the kernel
+    registry and on to shareable output. The stamp keeps scheme, host, port
+    and path only. The fetch still sends the query, so the server answers the
+    request it was asked for."""
+    from crivo.readers.remote import read_url
+
+    base, handler = control_server
+    handler.content_type = "text/csv"
+    handler.body = b"supplier_id,amount\n00412,1200.50\n00077,N/A\n"
+    served = hashlib.sha256(handler.body).hexdigest()
+
+    frame = read_url(f"{base}/x.csv?token=abc#frag")
+
+    assert handler.last_path == "/x.csv?token=abc", "the fetch lost the query"
+    remote = frame.attrs.get("remote", {})
+    assert remote.get("uri") == f"{base}/x.csv"
+    assert remote.get("sha256") == served
+    # the digest is hex and could hold "abc" by chance: it is pinned to the
+    # served bytes above, then taken out before the search
+    stamped = json.dumps(frame.attrs, default=str).replace(served, "")
+    for part in ("token", "abc", "frag"):
+        assert part not in stamped, f"{part!r} reached the lineage stamp"
+
+
+def test_read_url_fetches_the_full_url_but_stamps_it_without_credentials(
+    monkeypatch,
+) -> None:
+    """Regression for #56. A `user:secret@` URL is fetched as given but
+    stamped without its userinfo or query. `_fetch` is replaced by a recorder
+    serving canned bytes, because urllib takes the userinfo for part of the
+    host and cannot fetch this URL live (#241)."""
+    from crivo.readers import remote
+
+    body = "supplier_id,amount\n00412,1200.50\n00077,N/A\n"
+    served = hashlib.sha256(body.encode()).hexdigest()
+    fetched = []
+
+    def record(url):
+        fetched.append(url)
+        return body, "text/csv", served
+
+    monkeypatch.setattr(remote, "_fetch", record)
+    url = "http://user:secret@127.0.0.1:9/x.csv?token=abc"
+
+    frame = remote.read_url(url)
+
+    assert fetched == [url], "the fetch must get the URL as given"
+    stamp = frame.attrs.get("remote", {})
+    assert stamp.get("uri") == "http://127.0.0.1:9/x.csv"
+    stamped = json.dumps(frame.attrs, default=str).replace(served, "")
+    for part in ("secret", "token", "abc"):
+        assert part not in stamped, f"{part!r} reached the lineage stamp"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        pytest.param(
+            "http://user:secret@127.0.0.1:8000/x.csv?token=abc",
+            "http://127.0.0.1:8000/x.csv",
+            id="userinfo-port-query",
+        ),
+        pytest.param(
+            "https://apitoken@h/exports/x.json",
+            "https://h/exports/x.json",
+            id="token-as-username",
+        ),
+        pytest.param("http://u:p@[::1]:8080/x", "http://[::1]:8080/x", id="ipv6"),
+        pytest.param(
+            "http://us%40er:p%3Ass@h/x", "http://h/x", id="percent-encoded-userinfo"
+        ),
+        pytest.param("http://u:p@ss@h/x", "http://h/x", id="at-in-password"),
+        pytest.param("http://h/x?e=a@b.c", "http://h/x", id="at-in-query"),
+        pytest.param("http://h:8080?k=v", "http://h:8080", id="no-path"),
+        pytest.param(
+            "https://h:8443/x.csv#frag", "https://h:8443/x.csv", id="fragment"
+        ),
+    ],
+)
+def test_strip_url_credentials_keeps_scheme_host_port_and_path(url, expected) -> None:
+    """Regression for #56. Userinfo, query and fragment go; scheme, host,
+    port and path stay. The host is what follows the last `@` of the netloc,
+    so an `@` inside a password does not leave half the password behind."""
+    from crivo.readers import remote
+
+    assert hasattr(remote, "strip_url_credentials"), (
+        "crivo.readers.remote has no strip_url_credentials"
+    )
+    assert remote.strip_url_credentials(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("http://127.0.0.1:8000/x.csv", id="ipv4-port"),
+        pytest.param(
+            "https://data.example.org:8443/exports/2026/ledger.json",
+            id="host-port-deep-path",
+        ),
+        pytest.param("http://[::1]:8080/x.csv", id="ipv6-port"),
+        pytest.param(
+            "https://h:443/exports/q3%20ledger.csv", id="percent-encoded-path"
+        ),
+        pytest.param("http://h/users/@me/x.csv", id="at-in-path"),
+    ],
+)
+def test_strip_url_credentials_leaves_a_plain_url_unchanged(url) -> None:
+    """Regression for #56. A URL with nothing to strip comes back byte for
+    byte: the port, a percent-encoded path and an `@` in the path all
+    survive, so the stamp still names the source it was read from."""
+    from crivo.readers import remote
+
+    assert hasattr(remote, "strip_url_credentials"), (
+        "crivo.readers.remote has no strip_url_credentials"
+    )
+    assert remote.strip_url_credentials(url) == url
 
 
 def test_read_url_refuses_non_web_schemes(tmp_path) -> None:
