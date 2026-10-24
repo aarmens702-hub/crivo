@@ -21,10 +21,19 @@ def solved(run: dict, threshold: float = 1.0) -> bool:
     """One run counts as solved when it finished cleanly and, where repair was
     measurable, met the threshold. A held case that correctly changed nothing
     (ok_unchanged with an unmeasurable repair F1) counts as solved: deferring a
-    judgement call is the right outcome, not a failure."""
+    judgement call is the right outcome, not a failure.
+
+    On a dataset that plants rows, the scores also carry a row score (#256),
+    which the cell grid can't see: planted rows sit past it. Its F1 must meet
+    the threshold too, whatever the cells say, so a run that leaves the
+    planted rows in place is not solved, a held ok_unchanged run included."""
     if run.get("status") not in _OK:
         return False
-    f1 = (run.get("scores") or {}).get("repair", {}).get("f1")
+    scores = run.get("scores") or {}
+    rows = scores.get("rows")
+    if isinstance(rows, dict) and rows.get("f1") is not None and rows["f1"] < threshold:
+        return False
+    f1 = scores.get("repair", {}).get("f1")
     if f1 is None:
         return True  # unmeasurable repair (held / drop-fix); clean finish stands
     return f1 >= threshold

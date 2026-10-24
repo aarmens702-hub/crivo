@@ -5,11 +5,18 @@ regression from luck. This scores repeated runs of the same case: pass^k
 (solved on every run) and pass@1 (solved on average), and names the flaky
 cases. Pure analysis over result JSONs; it runs no model."""
 
-from bench import consistency
+import pytest
+
+from bench import consistency, corpus
+from bench.score import score_end_to_end
 
 
-def _run(status="ok", f1=1.0):
-    scores = {"repair": {"f1": f1}} if f1 is not None else {"repair": {"f1": None}}
+def _run(status="ok", f1=1.0, rows=None):
+    """One run's result row. `rows` is the row score's F1 on a dataset that
+    plants rows; None leaves the block out, as on a cell-only dataset."""
+    scores = {"repair": {"f1": f1}}
+    if rows is not None:
+        scores["rows"] = {"f1": rows}
     return {"status": status, "scores": scores}
 
 
@@ -70,3 +77,86 @@ def test_group_runs_by_case_name():
     grouped = consistency.group_by_case(rows)
     assert set(grouped) == {"a", "b"}
     assert len(grouped["a"]) == 2 and len(grouped["b"]) == 1
+
+
+# (status, repair F1, row F1, solved). On a row dataset the dirt sits in
+# appended rows the cell grid never sees, so repair F1 is usually None there
+# and only the row score can say the run left the rows in.
+_ROW_RUNS = [
+    pytest.param("ok", None, 0.0, False, id="cells-unmeasurable-rows-left"),
+    pytest.param("ok_unchanged", None, 0.0, False, id="held-run-left-the-rows"),
+    pytest.param("ok", 1.0, 0.5, False, id="cells-repaired-half-the-rows"),
+    # the pins beside: a row score that meets the threshold leaves the run
+    # to the rules it had, status and cell F1 alike
+    pytest.param("ok", None, 1.0, True, id="cells-unmeasurable-rows-removed"),
+    pytest.param("ok", 1.0, 1.0, True, id="cells-and-rows-repaired"),
+    pytest.param("ok", 0.6, 1.0, False, id="rows-removed-cells-short"),
+    pytest.param("no_cleaned_output", None, 1.0, False, id="no-output-still-fails"),
+]
+
+
+@pytest.mark.parametrize("status, repair_f1, rows_f1, want", _ROW_RUNS)
+def test_a_row_dataset_is_solved_only_when_its_rows_are(
+    status, repair_f1, rows_f1, want
+):
+    """Regression for #256. `solved` read only the cell repair F1, so a run
+    that left every planted row in place counted as solved whenever the
+    cells were unmeasurable, and a held ok_unchanged run on a row dataset
+    counted as deferring correctly. A defined row score below the threshold
+    now fails the run, whatever the cells say."""
+    assert consistency.solved(_run(status, repair_f1, rows=rows_f1)) is want
+
+
+def test_the_threshold_applies_to_the_row_score():
+    """Regression for #256. The caller's threshold is the bar for the row
+    score as well as for cells."""
+    runs = [_run("ok", 1.0, rows=0.8), _run("ok", 1.0, rows=0.9)]
+
+    assert consistency.score_pass_k(runs, threshold=0.75)["pass_k"] == 1.0
+    assert consistency.score_pass_k(runs, threshold=0.95)["pass_k"] == 0.0
+    assert consistency.solved(runs[1], threshold=0.85)
+    assert not consistency.solved(runs[0], threshold=0.85)
+
+
+def _dup_rows_cleaned(cleaner: str):
+    """The real end_to_end scores of the d09 SMOKE dataset as `cleaner` left
+    it. The 25 planted exact duplicates are appended after row 250, so the
+    cell grid sees nothing a row-only cleaner does."""
+    entry = next(e for e in corpus.SMOKE if e["name"] == "tx-dup-rows")
+    pristine, dirty, truth = corpus.build(entry)
+    planted = sorted(
+        {r for c in truth.corruptions if c.granularity == "row" for r in c.rows}
+    )
+    cleaned = {
+        "oracle": lambda: pristine,
+        "no-op": lambda: dirty.copy(),
+        "drop-everything": lambda: dirty.iloc[:0],
+        "leaves-one-planted-row": lambda: dirty.drop(index=planted[:-1]),
+        "drop-duplicates": lambda: dirty.drop_duplicates(),
+    }[cleaner]()
+    return score_end_to_end(pristine, dirty, cleaned, truth)
+
+
+@pytest.mark.parametrize(
+    "status, cleaner, want",
+    [
+        pytest.param("ok", "no-op", False, id="no-op"),
+        pytest.param("ok_unchanged", "no-op", False, id="held-no-op"),
+        # 24 of 25 removed: row P = 24/24, R = 24/25, F1 = 48/49 < 1.0
+        pytest.param("ok", "leaves-one-planted-row", False, id="leaves-one-row"),
+        # the cells already fail this one (every scored cell went missing);
+        # it stays failed with rows scored: row P = 25/275, F1 = 1/6
+        pytest.param("ok", "drop-everything", False, id="drop-everything"),
+        # the pins beside: removing exactly the planted rows is solved
+        pytest.param("ok", "oracle", True, id="oracle"),
+        pytest.param("ok", "drop-duplicates", True, id="drop-duplicates"),
+    ],
+)
+def test_solved_on_real_scores_of_the_duplicate_rows_dataset(status, cleaner, want):
+    """Regression for #256. With the real scorer on the d09 SMOKE dataset,
+    the oracle and the no-op both scored every repair number None, and both
+    counted as solved. Now only the cleaners that remove the planted rows
+    are."""
+    run = {"status": status, "scores": _dup_rows_cleaned(cleaner)}
+
+    assert consistency.solved(run) is want

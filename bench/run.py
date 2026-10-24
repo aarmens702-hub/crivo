@@ -49,6 +49,13 @@ def _check_invariants(pristine, dirty, truth) -> None:
     noop = score_end_to_end(pristine, dirty, dirty, truth)
     if noop["counts"]["repaired"] != 0:
         raise InvariantViolation(f"{truth.base}: no-op cleaner scored repairs")
+    # planted rows sit past the cell grid, so the cell checks above pass
+    # vacuously on them: hold the row score to the same oracle/no-op rule
+    if any(c.granularity == "row" for c in truth.corruptions):
+        if (oracle.get("rows") or {}).get("recall") != 1.0:
+            raise InvariantViolation(f"{truth.base}: oracle row recall != 1.0")
+        if (noop.get("rows") or {}).get("recall") != 0.0:
+            raise InvariantViolation(f"{truth.base}: no-op row recall != 0.0")
 
 
 def _mean(values: list) -> float | None:
@@ -87,6 +94,14 @@ def _aggregate(synthetic: list[dict]) -> dict:
     survival_defined = [
         r for r in synthetic if r["scores"]["verification"]["survived_rate"] is not None
     ]
+    # the row score exists only on datasets that plant rows; its precision is
+    # undefined where nothing was removed, so that mean carries its own count
+    row_scores = [
+        r["scores"]["end_to_end"]["rows"]
+        for r in synthetic
+        if r["scores"]["end_to_end"].get("rows") is not None
+    ]
+    row_precisions = [s["precision"] for s in row_scores if s["precision"] is not None]
     return {
         "datasets": len(synthetic),
         "fully_fixable_datasets": len(fixable),
@@ -109,6 +124,11 @@ def _aggregate(synthetic: list[dict]) -> dict:
         "survived_rate_mean": _mean(
             [r["scores"]["verification"]["survived_rate"] for r in survival_defined]
         ),
+        "row_scored_datasets": len(row_scores),
+        "row_precision_defined_datasets": len(row_precisions),
+        "row_recall_mean": _mean([s["recall"] for s in row_scores]),
+        "row_precision_mean": _mean(row_precisions),
+        "row_f1_mean": _mean([s["f1"] for s in row_scores]),
     }
 
 
@@ -356,6 +376,14 @@ def main(argv: list[str] | None = None) -> int:
         f" fixable; {agg['repair_undefined_by_design_datasets']} undefined by design)"
         f" | survived mean {_fmt(agg['survived_rate_mean'])}"
         f" over {agg['survival_defined_datasets']} of {agg['datasets']}"
+    )
+    print(
+        f"rows removed: recall mean {_fmt(agg['row_recall_mean'])}"
+        f" | F1 mean {_fmt(agg['row_f1_mean'])}"
+        f" over {agg['row_scored_datasets']} of {agg['datasets']} that plant rows"
+        f" | precision mean {_fmt(agg['row_precision_mean'])}"
+        f" over {agg['row_precision_defined_datasets']}"
+        f" of {agg['row_scored_datasets']} that removed a row"
     )
     return 0
 

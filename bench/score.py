@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import math
 import re
+from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -141,6 +142,94 @@ def _positions(
     return out
 
 
+def _value_key(x) -> tuple:
+    """A hashable stand-in for one value, close to `equivalent` in a form a
+    Counter can hold: the missing family is one key, numbers are floats
+    rounded to 12 significant digits, a bool stays a bool, datetime-likes
+    compare by instant (tz-aware and naive apart, as `equivalent` keeps them),
+    strings compare exactly. Never raises: an exotic value keys by its type
+    and repr."""
+    try:
+        if _is_missing(x):
+            return ("missing",)
+        if _is_bool(x):
+            return ("bool", bool(x))
+        if _is_number(x):
+            return ("number", float(f"{float(x):.12g}"))
+        if _is_datetime(x):
+            ts = pd.Timestamp(x)
+            if ts.tzinfo is None:
+                return ("datetime", "naive", ts)
+            return ("datetime", "aware", ts.tz_convert(None))
+        if isinstance(x, str):
+            return ("str", str(x))
+        return ("other", type(x).__name__, repr(x))
+    except Exception:  # noqa: BLE001 - one odd value must never crash the scorer
+        return ("other", type(x).__name__)
+
+
+def _first_column(frame: pd.DataFrame, label):
+    """The first column of `frame` named `label`, or None. A cleaned frame
+    can carry one name twice, and `frame[label]` would then be a frame."""
+    if label not in frame.columns:
+        return None
+    return frame.iloc[:, frame.columns.get_indexer_for([label])[0]]
+
+
+def _row_keys(frame: pd.DataFrame, columns) -> list[tuple]:
+    """One value key per row of `frame` over `columns`, in row order."""
+    if not columns:
+        return [()] * len(frame)
+    values = [_first_column(frame, c).tolist() for c in columns]
+    return [tuple(_value_key(x) for x in row) for row in zip(*values)]
+
+
+def _row_removal(
+    pristine: pd.DataFrame, dirty: pd.DataFrame, cleaned: pd.DataFrame, truth
+) -> dict:
+    """Row-removal precision and recall for the truth's row corruptions.
+
+    The planted rows are the union of every row corruption's `rows`
+    (positions in `dirty`). Rows match by value, never by position or index
+    label, over pristine's columns present in both `dirty` and `cleaned`,
+    and copy by copy, since a planted exact duplicate has its source's
+    values. For each value key v, kept(v) counts v among the unplanted dirty
+    rows, and still_there(v) = min(planted(v), max(0, cleaned(v) - kept(v))).
+    Then planted_removed = min(removed, Σ(planted(v) - still_there(v))),
+    where removed = max(0, len(dirty) - len(cleaned)): the cap means a
+    planted row rewritten in place is not counted as removed.
+
+    With no column left to compare (all renamed or dropped), every row has
+    the same empty key, rows can't be told apart, and the score falls back
+    to counts: planted_removed = min(removed, planted)."""
+    planted_at = sorted(
+        {r for c in truth.corruptions if c.granularity == "row" for r in c.rows}
+    )
+    columns = [
+        c
+        for c in pristine.columns
+        if _first_column(dirty, c) is not None and _first_column(cleaned, c) is not None
+    ]
+    dirty_keys = _row_keys(dirty, columns)
+    planted_set = set(planted_at)
+    planted = Counter(dirty_keys[r] for r in planted_at)
+    kept = Counter(k for i, k in enumerate(dirty_keys) if i not in planted_set)
+    in_cleaned = Counter(_row_keys(cleaned, columns))
+    gone = sum(n - min(n, max(0, in_cleaned[v] - kept[v])) for v, n in planted.items())
+    removed = max(0, len(dirty) - len(cleaned))
+    planted_removed = min(removed, gone)
+    precision = planted_removed / removed if removed else None
+    recall = planted_removed / len(planted_at) if planted_at else None
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": _f1(precision, recall),
+        "planted": len(planted_at),
+        "removed": removed,
+        "planted_removed": planted_removed,
+    }
+
+
 def _f1(precision: float | None, recall: float | None) -> float | None:
     """Harmonic mean of precision and recall. In `score_end_to_end` (dirt
     targeting, repair) that is 2·TP / (|C| + |D|), since a dirty cell that
@@ -168,7 +257,14 @@ def score_end_to_end(
     scored over the pristine grid only: rows < truth.n_rows, pristine's own
     columns. D = truly dirty, C = touched by the cleaner, K = ended correct.
     `values_equal` picks the equivalence space: typed for the synthetic
-    corpus, `equivalent_str` for all-string external pairs."""
+    corpus, `equivalent_str` for all-string external pairs.
+
+    The cell grid never sees appended rows, so when the truth holds a "row"
+    granularity corruption the result also carries "rows": how many planted
+    rows are gone from `cleaned` (recall) and how many removed rows were
+    planted (precision), matched by value (`_row_removal`). Without one, the
+    key is absent and the result is the cell score alone. Only removal is
+    scored: a d10 merge that combines values across rows is not."""
     n = truth.n_rows
     columns = pristine.columns
     D = _positions(columns, n, pristine, dirty, False, values_equal)
@@ -184,7 +280,7 @@ def score_end_to_end(
     rp_precision = len(c_and_d_and_k) / len(C) if C else None
     rp_recall = len(d_and_k) / len(D) if D else None
 
-    return {
+    result = {
         "dirt_targeting": {
             "precision": dt_precision,
             "recall": dt_recall,
@@ -197,6 +293,11 @@ def score_end_to_end(
         },
         "counts": {"dirty": len(D), "changed": len(C), "repaired": len(d_and_k)},
     }
+    # _row_removal tolerates a name twice in `cleaned`, but `_positions` above
+    # raises on one first, so no caller reaches that case through here yet
+    if any(c.granularity == "row" for c in truth.corruptions):
+        result["rows"] = _row_removal(pristine, dirty, cleaned, truth)
+    return result
 
 
 def _columns_match(finding_columns, corruption) -> bool:

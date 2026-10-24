@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from bench import corpus
 from bench.score import equivalent, score_detection, score_end_to_end, score_pair
 from bench.truth import Cell, Corruption, GroundTruth, frame_sha256
 
@@ -610,3 +611,535 @@ def test_a_detector_that_flags_the_wrong_column_scores_f1_zero():
     assert d3["f1"] == 0.0
     assert result["micro"] == {"precision": 0.0, "recall": 0.0, "f1": 0.0}
     assert result["macro_f1"] == 0.0
+
+
+# Row-level scoring (#256). A row corruption's `rows` are positions in the
+# DIRTY frame, and every row injector appends at the end, so the cell grid
+# (rows < n_rows) never sees them. The row score counts the planted rows that
+# are gone from `cleaned`, by value and copy by copy:
+#   removed = max(0, len(dirty) - len(cleaned))
+#   still_there(v) = min(planted(v), max(0, cleaned(v) - kept(v))), where
+#     kept(v) counts value v among the unplanted dirty rows
+#   planted_removed = min(removed, sum(planted(v) - still_there(v)))
+#   R = planted_removed / planted, P = planted_removed / removed (None when
+#   nothing was removed), F1 by `_f1`
+
+# (SMOKE entry, planted rows k, dirty rows) for every SMOKE entry that plants
+# a row corruption; the planted rows are the last k dirty positions
+_ROW_ENTRIES = [
+    pytest.param("tx-dup-rows", 25, 275, id="d09-exact-duplicates"),
+    pytest.param("tx-near-dups", 25, 275, id="d10-near-duplicates"),
+    pytest.param("tx-aggregate-row", 1, 251, id="d21-total-row"),
+    pytest.param("tx-header-echo", 2, 252, id="d24-header-echo-and-footer"),
+    # 35 d09 duplicates + 1 d21 total row, behind cell damage (d07, d15) and
+    # a renamed first column (d18), so matching runs without that column
+    pytest.param("tx-compound-hard", 36, 386, id="compound-hard"),
+]
+
+
+def _row_case(name: str, k: int, n_dirty: int):
+    """(pristine, dirty, truth, planted positions) for one SMOKE row entry,
+    checked against the shape the expected values were worked out on."""
+    entry = next(e for e in corpus.SMOKE if e["name"] == name)
+    pristine, dirty, truth = corpus.build(entry)
+    planted = sorted(
+        {r for c in truth.corruptions if c.granularity == "row" for r in c.rows}
+    )
+    assert (len(planted), len(dirty)) == (k, n_dirty), f"{name}: the corpus moved"
+    return pristine, dirty, truth, planted
+
+
+def _rows_of(pristine, dirty, cleaned, truth) -> dict:
+    result = score_end_to_end(pristine, dirty, cleaned, truth)
+    assert "rows" in result, "no row score on a dataset that plants rows"
+    return result["rows"]
+
+
+def _hand_back(frame: pd.DataFrame, how: str, tmp_path=None) -> pd.DataFrame:
+    """The frame a cleaner returns, rebuilt the ways real cleaners rebuild it."""
+    if how == "as-is":
+        return frame
+    if how == "shuffled-reset":
+        # new order and a fresh RangeIndex: neither a position nor an index
+        # label still names the dirty row it came from
+        return frame.sample(frac=1, random_state=7).reset_index(drop=True)
+    if how == "retyped":
+        # every column as object and every missing value as None: the same
+        # values in other types (NaN, NaT and None are one missing value)
+        return frame.astype(object).where(frame.notna(), None)
+    if how == "parquet":
+        path = tmp_path / "cleaned.parquet"
+        frame.to_parquet(path)
+        return pd.read_parquet(path)
+    raise ValueError(how)
+
+
+def _swap_a_planted_row_for_a_good_one(pristine, dirty, truth, planted):
+    """Remove every planted row but the last, plus the first good row whose
+    values are unique in dirty, so no planted row shares its value."""
+    shared = [c for c in pristine.columns if c in dirty.columns]
+    unique = ~dirty[shared].duplicated(keep=False)
+    good = next(row for row in range(truth.n_rows) if unique.iat[row])
+    return dirty.drop(index=dirty.index[[*planted[:-1], good]])
+
+
+@pytest.mark.parametrize("name, k, n_dirty", _ROW_ENTRIES)
+def test_the_oracle_removes_every_planted_row_and_the_no_op_none(name, k, n_dirty):
+    """Regression for #256. The cell grid stops at n_rows, so on a row
+    dataset the oracle and the no-op scored the same: every repair number
+    None, and both counted as solved. The row score tells them apart."""
+    pristine, dirty, truth, _ = _row_case(name, k, n_dirty)
+
+    # oracle: cleaned = pristine, n_rows rows, so removed = n_dirty - n_rows
+    # = k, and no planted value is in pristine: planted_removed = min(k, k)
+    #   P = k/k = 1.0, R = k/k = 1.0, F1 = 1.0
+    assert _rows_of(pristine, dirty, pristine, truth) == {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "planted": k,
+        "removed": k,
+        "planted_removed": k,
+    }
+    # no-op: removed = 0, so planted_removed = min(0, ...) = 0
+    #   P = 0/0 None, R = 0/k = 0.0, F1 = 0.0 (a miss on real dirt, #86)
+    assert _rows_of(pristine, dirty, dirty.copy(), truth) == {
+        "precision": None,
+        "recall": 0.0,
+        "f1": 0.0,
+        "planted": k,
+        "removed": 0,
+        "planted_removed": 0,
+    }
+
+
+@pytest.mark.parametrize("how", ["as-is", "shuffled-reset", "retyped"])
+@pytest.mark.parametrize("name, k, n_dirty", _ROW_ENTRIES)
+def test_removing_a_good_row_instead_of_a_planted_one_loses_precision(
+    name, k, n_dirty, how
+):
+    """Regression for #256. The cleaner removes as many rows as were
+    planted, but one is a good row and one planted row stays. Counted by
+    length, position or a reset index label that looks perfect, so rows
+    match by value, and the planted row left behind costs recall and
+    precision both."""
+    pristine, dirty, truth, planted = _row_case(name, k, n_dirty)
+    swapped = _swap_a_planted_row_for_a_good_one(pristine, dirty, truth, planted)
+
+    rows = _rows_of(pristine, dirty, _hand_back(swapped, how), truth)
+
+    # removed = (k - 1) planted + 1 good = k. The planted row left, value v,
+    # is in cleaned once more than among the unplanted dirty rows, so
+    # still_there(v) = 1; the good row was unique, so planted(good) = 0.
+    # planted_removed = min(k, k - 1) = k - 1, and R = P = F1 = (k - 1)/k:
+    #   d09, d10: 24/25 = 0.96; d21: 0/1 = 0.0; d24: 1/2; compound: 35/36
+    assert (rows["planted"], rows["removed"], rows["planted_removed"]) == (
+        k,
+        k,
+        k - 1,
+    )
+    assert rows["recall"] == pytest.approx((k - 1) / k)
+    assert rows["precision"] == pytest.approx((k - 1) / k)
+    assert rows["f1"] == pytest.approx((k - 1) / k)
+    assert rows["f1"] < 1.0
+
+
+@pytest.mark.parametrize("name, k, n_dirty", _ROW_ENTRIES)
+def test_a_cleaner_that_drops_every_row_loses_precision(name, k, n_dirty):
+    """Regression for #256. Removing everything removes the planted rows
+    too, so recall alone would call it perfect; precision marks it down."""
+    pristine, dirty, truth, _ = _row_case(name, k, n_dirty)
+
+    rows = _rows_of(pristine, dirty, dirty.iloc[:0], truth)
+
+    # removed = n_dirty and nothing is left: planted_removed = min(n_dirty,
+    # k) = k, so R = k/k = 1.0, P = k/n_dirty, F1 = 2k/(k + n_dirty):
+    #   d09, d10: P = 25/275 = 1/11, F1 = 50/300 = 1/6
+    #   d21: P = 1/251, F1 = 2/252; d24: P = 2/252, F1 = 4/254
+    #   compound: P = 36/386, F1 = 72/422 = 0.171
+    assert (rows["planted"], rows["removed"], rows["planted_removed"]) == (
+        k,
+        n_dirty,
+        k,
+    )
+    assert rows["recall"] == 1.0
+    assert rows["precision"] == pytest.approx(k / n_dirty)
+    assert rows["f1"] == pytest.approx(2 * k / (k + n_dirty))
+    assert rows["f1"] < 0.2
+
+
+@pytest.mark.parametrize("how", ["as-is", "shuffled-reset"])
+@pytest.mark.parametrize("keep", ["first", "last"])
+def test_dropping_the_exact_duplicates_is_a_full_row_repair(keep, how):
+    """Regression for #256, the pin beside the misses above: the repair d09
+    asks for, `drop_duplicates`, scores row F1 1.0. A copy and its source
+    have the same values, so keeping the later one is the same repair by
+    value (what its shifted positions do to cells is the cell grid's call)."""
+    pristine, dirty, truth, _ = _row_case("tx-dup-rows", 25, 275)
+
+    rows = _rows_of(
+        pristine, dirty, _hand_back(dirty.drop_duplicates(keep=keep), how), truth
+    )
+
+    # 25 copies of 22 sources (row 82 copied twice, row 135 three times) and
+    # no duplicate in pristine, so drop_duplicates removes 25 rows either
+    # way. Each copied value v is then in cleaned once, as often as among the
+    # unplanted rows: still_there(v) = 0, planted_removed = min(25, 25) = 25
+    #   P = 25/25 = 1.0, R = 25/25 = 1.0, F1 = 1.0
+    assert rows == {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "planted": 25,
+        "removed": 25,
+        "planted_removed": 25,
+    }
+
+
+def _blank_the_planted_rows(frame, planted):
+    blanked = frame.astype(object)
+    blanked.iloc[planted] = None
+    return blanked
+
+
+_KEEPS_EVERY_ROW = {
+    "wipes-a-column": lambda f, planted: f.assign(amount=np.nan),
+    "canonicalizes-a-column": lambda f, planted: f.assign(
+        merchant=f["merchant"].str.upper()
+    ),
+    "sorts-and-resets": lambda f, planted: f.sort_values(
+        "merchant", kind="stable"
+    ).reset_index(drop=True),
+    "renames-every-column": lambda f, planted: f.set_axis(
+        [f"col_{i}" for i in range(f.shape[1])], axis=1
+    ),
+    "drops-a-column": lambda f, planted: f.drop(columns="merchant"),
+    "makes-dates-tz-aware": lambda f, planted: f.assign(
+        posted_at=pd.to_datetime(f["posted_at"], errors="coerce", utc=True)
+    ),
+    "blanks-the-planted-rows": _blank_the_planted_rows,
+}
+
+
+@pytest.mark.parametrize("rewrite", list(_KEEPS_EVERY_ROW))
+@pytest.mark.parametrize("name, k, n_dirty", _ROW_ENTRIES)
+def test_a_rewrite_that_removes_no_row_removes_no_planted_row(
+    name, k, n_dirty, rewrite
+):
+    """Regression for #256. Rewriting values is not removing rows: a cleaner
+    that keeps every row scores row recall 0, however much it changed. The
+    planted values may be gone from cleaned (blanked, renamed away, made
+    tz-aware), and the cap at `removed` is what holds recall at 0. Matching
+    must also survive the rewrite without raising."""
+    pristine, dirty, truth, planted = _row_case(name, k, n_dirty)
+    cleaned = _KEEPS_EVERY_ROW[rewrite](dirty.copy(), planted)
+    assert len(cleaned) == len(dirty)
+
+    rows = _rows_of(pristine, dirty, cleaned, truth)
+
+    # removed = 0, so planted_removed = min(0, ...) = 0 whatever the values:
+    #   P = 0/0 None, R = 0/k = 0.0, F1 = 0.0
+    assert rows == {
+        "precision": None,
+        "recall": 0.0,
+        "f1": 0.0,
+        "planted": k,
+        "removed": 0,
+        "planted_removed": 0,
+    }
+
+
+@pytest.mark.parametrize("how", ["shuffled-reset", "parquet"])
+@pytest.mark.parametrize("name, k, n_dirty", _ROW_ENTRIES)
+def test_the_oracle_scores_full_rows_however_it_is_handed_back(
+    name, k, n_dirty, how, tmp_path
+):
+    """Regression for #256. A cleaner that rebuilt the pristine frame (new
+    order, fresh index, or written out and read back) still removed exactly
+    the planted rows."""
+    pristine, dirty, truth, _ = _row_case(name, k, n_dirty)
+
+    rows = _rows_of(pristine, dirty, _hand_back(pristine, how, tmp_path), truth)
+
+    # as for the oracle: removed = k, no planted value is in pristine, so
+    # planted_removed = k and P = R = F1 = 1.0
+    assert rows == {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "planted": k,
+        "removed": k,
+        "planted_removed": k,
+    }
+
+
+@pytest.mark.parametrize(
+    "name, k, n_dirty",
+    # tx-header-echo is left out: its dirty frame mixes header text into the
+    # number and date columns, which parquet refuses to write
+    [p for p in _ROW_ENTRIES if p.id != "d24-header-echo-and-footer"],
+)
+def test_a_parquet_round_trip_keeps_the_good_row_miss(name, k, n_dirty, tmp_path):
+    """Regression for #256. Read back from parquet, the planted row the
+    swap left behind still matches its dirty copy, so it still counts as
+    there: the miss stays (k - 1)/k and doesn't round up to a full repair."""
+    pristine, dirty, truth, planted = _row_case(name, k, n_dirty)
+    swapped = _swap_a_planted_row_for_a_good_one(pristine, dirty, truth, planted)
+
+    rows = _rows_of(pristine, dirty, _hand_back(swapped, "parquet", tmp_path), truth)
+
+    # as for the swap above: removed = k, planted_removed = k - 1
+    #   R = P = (k - 1)/k: d09, d10: 24/25; d21: 0/1; compound: 35/36
+    assert (rows["removed"], rows["planted_removed"]) == (k, k - 1)
+    assert rows["recall"] == pytest.approx((k - 1) / k)
+    assert rows["precision"] == pytest.approx((k - 1) / k)
+
+
+def _export_with_copies() -> tuple:
+    """A small export, with rows 4 and 5 planted as exact copies of row 1
+    (d09). Row 1 carries a missing town, so the copies do too. Every value
+    is invented."""
+    pristine = pd.DataFrame(
+        {
+            "cust_id": ["00412", "00977", "01530", "03218"],
+            "signup": ["2024-01-05", "2024-02-11", "2024-03-02", "2024-03-30"],
+            "amount": [1200.0, 85.5, 40.0, 310.25],
+            "town": ["Quarnby", None, "Tarrisford", "Quarnby"],
+        }
+    )
+    dirty = pd.concat([pristine, pristine.iloc[[1, 1]]], ignore_index=True)
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=4,
+        n_cols=4,
+        frame_sha256="x",
+        corruptions=[
+            Corruption(
+                disease=9,
+                columns=tuple(pristine.columns),
+                granularity="row",
+                rows=(4, 5),
+            )
+        ],
+    )
+    return pristine, dirty, truth
+
+
+# (dirty positions the cleaner removes, R, P). Row 1's value v: planted(v) =
+# 2 (rows 4, 5), kept(v) = 1 (row 1 itself), cleaned(v) = 3 - (copies of v
+# removed); still_there(v) = min(2, max(0, cleaned(v) - 1)).
+_COPIES = [
+    # cleaned(v) = 2: still_there = 1, sum = 1, planted_removed = min(1, 1)
+    #   R = 1/2, P = 1/1, F1 = 2*0.5*1/1.5 = 2/3
+    pytest.param([5], 0.5, 1.0, id="one-copy-removed"),
+    # by value the source and a copy are the same row: the same count
+    pytest.param([1], 0.5, 1.0, id="the-source-removed-instead"),
+    # cleaned(v) = 1: still_there = 0, sum = 2, planted_removed = min(2, 2)
+    #   R = 2/2, P = 2/2. v is still in cleaned, once: a match on "is v
+    #   still there" would call both copies kept and score R = 0
+    pytest.param([4, 5], 1.0, 1.0, id="both-copies-removed"),
+    # cleaned(v) = 0: still_there = 0, sum = 2, planted_removed = min(3, 2)
+    #   R = 2/2, P = 2/3, F1 = 2*(2/3)*1/(5/3) = 0.8
+    pytest.param([1, 4, 5], 1.0, 2 / 3, id="source-and-both-copies-removed"),
+    # cleaned(v) = 3: still_there = 2, sum = 0, planted_removed = 0
+    #   R = 0/2, P = 0/1, F1 = 0.0
+    pytest.param([0], 0.0, 0.0, id="a-good-row-removed"),
+]
+
+
+@pytest.mark.parametrize("removed_positions, recall, precision", _COPIES)
+def test_row_matching_counts_copies(removed_positions, recall, precision):
+    """Regression for #256. A planted exact duplicate and its source have
+    equal values, so matching counts copies: of one source copied twice,
+    removing one copy is half the planted rows gone, and v still being in
+    cleaned does not mean both copies are. The index is reset, as a
+    cleaner's often is."""
+    pristine, dirty, truth = _export_with_copies()
+    cleaned = dirty.drop(index=removed_positions).reset_index(drop=True)
+
+    rows = _rows_of(pristine, dirty, cleaned, truth)
+
+    assert (rows["planted"], rows["removed"]) == (2, len(removed_positions))
+    assert rows["recall"] == pytest.approx(recall)
+    assert rows["precision"] == pytest.approx(precision)
+
+
+def _export_with_a_near_copy() -> tuple:
+    """A small export with row 4 planted as a near copy of row 2, its amount
+    nudged from 40.0 to 40.01 (d10). Every value is invented."""
+    pristine = pd.DataFrame(
+        {
+            "cust_id": ["00412", "00977", "01530", "03218"],
+            "amount": [1200.0, 85.5, 40.0, 310.25],
+            "town": ["Quarnby", "Velloch", "Tarrisford", "Quarnby"],
+        }
+    )
+    near = pristine.iloc[[2]].assign(amount=40.01)
+    dirty = pd.concat([pristine, near], ignore_index=True)
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=4,
+        n_cols=3,
+        frame_sha256="x",
+        corruptions=[
+            Corruption(disease=10, columns=("amount",), granularity="row", rows=(4,))
+        ],
+    )
+    return pristine, dirty, truth
+
+
+def test_repairing_a_near_copy_in_place_does_not_remove_it():
+    """Regression for #256. A cleaner that repairs the near copy's amount
+    turns it into an exact copy of row 2 but leaves the row in. Its planted
+    value (40.01) is gone from cleaned, so without the cap at `removed` the
+    score would credit a removal that never happened."""
+    pristine, dirty, truth = _export_with_a_near_copy()
+    cleaned = dirty.copy()
+    cleaned.loc[4, "amount"] = 40.0
+
+    rows = _rows_of(pristine, dirty, cleaned, truth)
+
+    # planted(40.01 row) = 1, cleaned(40.01 row) = 0: still_there = 0, so
+    # sum = 1, but removed = 0 and planted_removed = min(0, 1) = 0
+    #   R = 0/1 = 0.0, P = 0/0 None, F1 = 0.0
+    assert rows == {
+        "precision": None,
+        "recall": 0.0,
+        "f1": 0.0,
+        "planted": 1,
+        "removed": 0,
+        "planted_removed": 0,
+    }
+
+
+def test_dropping_the_near_copy_is_a_full_row_repair():
+    """Regression for #256, the pin beside the cap above: removing the near
+    copy is the repair, and scores row F1 1.0."""
+    pristine, dirty, truth = _export_with_a_near_copy()
+
+    rows = _rows_of(pristine, dirty, dirty.drop(index=[4]), truth)
+
+    # removed = 1, the 40.01 row is gone: planted_removed = min(1, 1) = 1
+    #   P = 1/1, R = 1/1, F1 = 1.0
+    assert (rows["precision"], rows["recall"], rows["f1"]) == (1.0, 1.0, 1.0)
+
+
+_CELL_ONLY_KEYS = {"dirt_targeting", "repair", "counts"}
+
+
+def test_a_dataset_with_no_planted_rows_gets_no_row_score():
+    """Regression for #256, the other side of the row score: a dataset with
+    no row corruption keeps exactly today's keys, for the oracle, the no-op
+    and a cleaner that drops every row, so cell-only results, the committed
+    replay cassette and every reader that never heard of rows stay as they
+    are."""
+    checked = 0
+    for entry in corpus.SMOKE:
+        pristine, dirty, truth = corpus.build(entry)
+        if any(c.granularity == "row" for c in truth.corruptions):
+            continue
+        for cleaned in (pristine, dirty.copy(), dirty.iloc[:0]):
+            result = score_end_to_end(pristine, dirty, cleaned, truth)
+            assert set(result) == _CELL_ONLY_KEYS, entry["name"]
+        checked += 1
+    assert checked, "the smoke corpus has no cell-only dataset to check"
+
+
+def _half_repaired(pristine, dirty, truth) -> pd.DataFrame:
+    """A partial cleaner built from the truth alone, so the pins below don't
+    move when crivo's fixers do: it restores every other planted cell to its
+    pristine value and damages one clean id."""
+    cells = sorted({(c.row, c.column) for k in truth.corruptions for c in k.cells})
+    cleaned = dirty.astype(object)
+    for row, column in cells[::2]:
+        cleaned.loc[row, column] = pristine.loc[row, column]
+    column = pristine.columns[0]
+    row = next(r for r in range(truth.n_rows) if (r, column) not in set(cells))
+    cleaned.loc[row, column] = "ZZ-00000"
+    return cleaned
+
+
+# Full end_to_end dicts pinned from d0180c4, before row scoring existed.
+# Each cleaner restores every other planted cell (|R| of them) and damages
+# one clean id, so |C| = |R| + 1, C∩D = C∩D∩K = D∩K = R:
+#   P = |R|/|C|, R = |R|/|D|, F1 = 2|R|/(|C| + |D|), dirt and repair alike
+_CELL_PINS = [
+    # 25 padded cells, |D| = 25; 13 restored, |C| = 14
+    #   P = 13/14, R = 13/25, F1 = 26/39 = 2/3
+    pytest.param(
+        "tx-whitespace",
+        {
+            "dirt_targeting": {
+                "precision": 0.9285714285714286,
+                "recall": 0.52,
+                "f1": 0.6666666666666666,
+            },
+            "repair": {
+                "precision": 0.9285714285714286,
+                "recall": 0.52,
+                "f1": 0.6666666666666666,
+            },
+            "counts": {"dirty": 25, "changed": 14, "repaired": 13},
+        },
+        id="d06-whitespace",
+    ),
+    # the amount column arrives as text, so all 250 amount cells differ from
+    # pristine's floats (truth records the 25 money strings): |D| = 250;
+    # 13 of the 25 restored, |C| = 14
+    #   P = 13/14, R = 13/250, F1 = 26/264
+    pytest.param(
+        "tx-money-strings",
+        {
+            "dirt_targeting": {
+                "precision": 0.9285714285714286,
+                "recall": 0.052,
+                "f1": 0.09848484848484848,
+            },
+            "repair": {
+                "precision": 0.9285714285714286,
+                "recall": 0.052,
+                "f1": 0.09848484848484848,
+            },
+            "counts": {"dirty": 250, "changed": 14, "repaired": 13},
+        },
+        id="d01-money-strings",
+    ),
+    # |D| = 67 ids + 350 dates + 350 amounts (every amount arrives as text)
+    # = 767; truth names 452 distinct cells (35 + 35 ids, 3 shared, + 350
+    # dates + 35 amounts); 226 restored, |C| = 227
+    #   P = 226/227, R = 226/767, F1 = 452/994
+    pytest.param(
+        "tx-compound-fixable",
+        {
+            "dirt_targeting": {
+                "precision": 0.9955947136563876,
+                "recall": 0.29465449804432853,
+                "f1": 0.4547283702213279,
+            },
+            "repair": {
+                "precision": 0.9955947136563876,
+                "recall": 0.29465449804432853,
+                "f1": 0.4547283702213279,
+            },
+            "counts": {"dirty": 767, "changed": 227, "repaired": 226},
+        },
+        id="compound-fixable",
+    ),
+]
+
+
+@pytest.mark.parametrize("name, expected", _CELL_PINS)
+def test_cell_only_datasets_score_exactly_as_before(name, expected):
+    """Regression for #256, the pin that row scoring leaves cells alone:
+    on cell-only SMOKE data the whole end_to_end dict, to the last digit,
+    is what the scorer published before rows were scored."""
+    entry = next(e for e in corpus.SMOKE if e["name"] == name)
+    pristine, dirty, truth = corpus.build(entry)
+
+    result = score_end_to_end(
+        pristine, dirty, _half_repaired(pristine, dirty, truth), truth
+    )
+
+    assert result == expected
