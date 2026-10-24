@@ -83,6 +83,8 @@ def load(path, **kwargs) -> pd.DataFrame:
     The non-csv formats in `readers.files.SUPPORTED` (json, jsonl, xlsx and
     the rest) and parquet directories go through `crivo.read`'s file reader.
     A directory with no parquet parts is refused, not read as an empty table.
+    A file with a SQLite extension (.db, .sqlite, .sqlite3; the final suffix
+    only) is refused unread, with a pointer to `crivo.read(path, query=...)`.
     """
     # this is a door, not a detail: `crivo diagnose` (keyless, aimed at a
     # stranger's file) reaches pandas through here with nothing else standing
@@ -94,6 +96,15 @@ def load(path, **kwargs) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix in {".gz", ".zip", ".bz2", ".xz"} and len(path.suffixes) >= 2:
         suffix = path.suffixes[-2].lower()
+    if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"} and path.is_file():
+        # a database has no one table to read: sniffed as csv its pages come
+        # back as garbage rows that can pass every check. Only the final
+        # suffix decides (export.db.csv is a csv), and the file is not opened,
+        # so a .db that is not SQLite (Thumbs.db) is refused the same way
+        raise ValueError(
+            f"{path.name} has a SQLite file extension, so it is not read as a "
+            f'table: read it with crivo.read(path, query="select ...")'
+        )
     if path.is_dir() or suffix in {
         ".json",
         ".jsonl",

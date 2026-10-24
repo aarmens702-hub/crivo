@@ -365,6 +365,204 @@ def test_cli_diagnose_exits_2_on_a_directory_with_no_table(
     assert "clean" not in out
 
 
+def _short_schema_spend(conn):
+    # 40 rows under a CREATE TABLE short enough that its bytes decode as
+    # cp1252: zero-padded ids, money as strings, the last 8 amounts "N/A"
+    conn.execute("create table spend (id text, amount text)")
+    amounts = ["1300.50", "85.00", "12004.10", "7.25"] * 8 + ["N/A"] * 8
+    conn.executemany(
+        "insert into spend values (?, ?)",
+        [(f"{i:05d}", amount) for i, amount in enumerate(amounts)],
+    )
+
+
+# what a SQLite file holds; each one is a database, never a csv
+SQLITE_TABLES = {
+    "spend-frame": lambda conn: spend_frame().to_sql("spend", conn, index=False),
+    "short-schema-40-rows": _short_schema_spend,
+    "empty-table": lambda conn: conn.execute(
+        "create table spend (vendor_id text, amount text)"
+    ),
+}
+
+
+def write_sqlite(path, table="spend-frame"):
+    """A real SQLite file holding one of SQLITE_TABLES, closed after."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    try:
+        SQLITE_TABLES[table](conn)
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+SQLITE_NAMES = ["spend.db", "spend.sqlite", "spend.sqlite3", "SPEND.DB"]
+
+
+@pytest.mark.parametrize("flags", [[], ["--json"]], ids=["text", "json"])
+@pytest.mark.parametrize("table", ["short-schema-40-rows", "empty-table"])
+def test_cli_diagnose_never_calls_a_sqlite_file_clean(
+    tmp_path, monkeypatch, capsys, table, flags
+) -> None:
+    """Regression for #45. Sniffed as CSV, a SQLite file whose header bytes
+    happen to decode reads as garbage: 40 rows under a short schema come back
+    as 20 rows of one column with a duplicate-rows finding, and an empty
+    table as 2 rows and "nothing found — the file is clean". Both exit 0, a
+    false clean the GitHub Action would pass. A database is a could-not-run
+    for `crivo diagnose`: exit 2, never clean."""
+    path = write_sqlite(tmp_path / "spend.db", table)
+    monkeypatch.setattr("sys.argv", ["crivo", "diagnose", str(path), *flags])
+
+    from crivo.__main__ import main
+
+    try:
+        code = main()
+    except SystemExit as exc:
+        code = exc.code
+    # the path is echoed back; drop it so a tmp dir name cannot match "clean"
+    out = capsys.readouterr().out.replace(str(path), "<file>")
+    assert code == 2
+    assert "clean" not in out
+
+
+@pytest.mark.parametrize("flags", [[], ["--json"]], ids=["text", "json"])
+@pytest.mark.parametrize("name", SQLITE_NAMES)
+def test_cli_diagnose_exits_2_on_a_sqlite_file_and_points_to_crivo_read(
+    tmp_path, monkeypatch, capsys, name, flags
+) -> None:
+    """Regression for #45. `checkup.load` sniffs an unknown suffix as CSV, so
+    a SQLite database came back as garbage rows and could exit 0, "clean". A
+    database file has no one table to check: it is a could-not-run, exit 2,
+    and the message names the file and the way to read it (`crivo.read(path,
+    query="select ...")`). The message is asserted as well as the code,
+    because the bytes may already exit 2 by luck through a parse error that
+    says nothing useful."""
+    path = write_sqlite(tmp_path / name)
+    monkeypatch.setattr("sys.argv", ["crivo", "diagnose", str(path), *flags])
+
+    from crivo.__main__ import main
+
+    try:
+        code = main()
+    except SystemExit as exc:
+        code = exc.code
+    # the path is echoed back; drop it so the message itself must name the
+    # file, and a tmp dir name cannot match "clean"
+    out = capsys.readouterr().out.replace(str(path), "<file>")
+    assert code == 2
+    assert name in out, "the refusal must name the file"
+    assert "crivo.read" in out and "query=" in out
+    assert "clean" not in out
+
+
+@pytest.mark.parametrize("name", SQLITE_NAMES)
+def test_checkup_load_refuses_a_sqlite_file_like_the_library(tmp_path, name) -> None:
+    """Regression for #45. The library refuses a SQLite file without a query;
+    `checkup.load`, the door `crivo diagnose` and the analyst's /load share,
+    must refuse it too, by name and with the `crivo.read(path, query=...)`
+    pointer, and in words that fit either surface."""
+    path = write_sqlite(tmp_path / name)
+
+    with pytest.raises(ValueError):
+        crivo.diagnose(path)
+    with pytest.raises(ValueError, match=r"crivo\.read\(.*query=") as excinfo:
+        checkup.load(path)
+    assert name in str(excinfo.value)
+    assert "crivo diagnose" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("flags", [[], ["--json"]], ids=["text", "json"])
+def test_a_db_file_is_refused_by_its_suffix_not_its_bytes(
+    tmp_path, monkeypatch, capsys, flags
+) -> None:
+    """Regression for #45. The refusal goes by the suffix alone and never
+    opens the file, so a notes.db that holds csv text, not SQLite pages, is
+    refused the same way. The message must not then claim the file is a
+    SQLite database: crivo never looked."""
+    path = tmp_path / "notes.db"
+    spend_frame().to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match=r"crivo\.read\(.*query=") as excinfo:
+        checkup.load(path)
+    assert "is a SQLite database" not in str(excinfo.value)
+
+    monkeypatch.setattr("sys.argv", ["crivo", "diagnose", str(path), *flags])
+
+    from crivo.__main__ import main
+
+    try:
+        code = main()
+    except SystemExit as exc:
+        code = exc.code
+    # the path is echoed back; drop it so a tmp dir name cannot match "clean"
+    out = capsys.readouterr().out.replace(str(path), "<file>")
+    assert code == 2
+    assert "notes.db" in out and "crivo.read" in out and "query=" in out
+    assert "is a SQLite database" not in out
+    assert "clean" not in out
+
+
+def _write_sqlite_header_csv(df, path):
+    # a text first line that opens with the SQLite magic words, but no NUL:
+    # a csv by its suffix, whatever its first bytes say
+    df.rename(columns={"vendor_id": "SQLite format 3"}).to_csv(path, index=False)
+
+
+# files that sit next to the refusal and must still be read: the suffix
+# decides, and only the final one
+STILL_READ = {
+    "spend.csv": lambda df, p: df.to_csv(p, index=False),
+    "sqlite-header.csv": _write_sqlite_header_csv,
+    "export.db.csv": lambda df, p: df.to_csv(p, index=False),
+    "spend.parquet": lambda df, p: df.to_parquet(p, index=False),
+    "spend.feather": lambda df, p: df.to_feather(p),
+}
+
+
+@pytest.mark.parametrize("name", list(STILL_READ))
+def test_cli_diagnose_still_reads_the_files_beside_the_sqlite_refusal(
+    tmp_path, monkeypatch, capsys, name
+) -> None:
+    """Regression for #45. The legitimate twins of the SQLite refusal: a
+    plain csv, a csv whose first line starts "SQLite format 3,", a csv whose
+    name carries ".db" before its real suffix, and a single parquet or
+    feather file. Each is read whole (spend_frame's 40 rows), never refused."""
+    path = tmp_path / name
+    STILL_READ[name](spend_frame(), path)
+    monkeypatch.setattr("sys.argv", ["crivo", "diagnose", str(path), "--json"])
+
+    from crivo.__main__ import main
+
+    code = main()
+    out = capsys.readouterr().out
+    assert code != 2, "a readable file must not be a could-not-run"
+    assert json.loads(out)["rows"] == 40  # spend_frame's rows, counted by hand
+
+
+@pytest.mark.parametrize("flags", [[], ["--json"]], ids=["text", "json"])
+def test_cli_diagnose_a_missing_db_file_is_still_no_such_file(
+    tmp_path, monkeypatch, capsys, flags
+) -> None:
+    """Regression for #45. The SQLite refusal is for a file that exists; a
+    missing nope.db keeps the plain could-not-read of QA CLI-03 (exit 2, "No
+    such file"), not a pointer to a query it has nothing to run on."""
+    path = tmp_path / "nope.db"
+    monkeypatch.setattr("sys.argv", ["crivo", "diagnose", str(path), *flags])
+
+    from crivo.__main__ import main
+
+    try:
+        code = main()
+    except SystemExit as exc:
+        code = exc.code
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "No such file" in out
+
+
 def write_customers_csv(tmp_path):
     """40 rows of a CRM customer export: zero-padded ids, money as strings,
     and two padded text columns. 16 emails carry stray spaces (every row with
