@@ -10,7 +10,9 @@ by mode (set in the agent's .claude/agents/*.md frontmatter):
         degenerate generators and their tests; Bash runs only a few whole
         commands, with no shell operators: uv run pytest on bench tests inside
         a .worktrees/<n> of this checkout, and git status and git diff -- PATH,
-        bare or with -C on a .worktrees/<n>, each PATH one it may read
+        bare or with -C on a .worktrees/<n>, each PATH one it may read;
+        SubagentHandback, which only carries its report back, goes through;
+        any other tool is refused
     python3 guard_reads.py builder -> nothing names bench/traps/heldout or
         bench/traps/sealed (nor searches from above one, once it is on disk),
         the shell never writes bench/ledger.jsonl, and a paid command runs
@@ -22,10 +24,10 @@ new entry, not new code. Paths are followed through links (os.path.realpath),
 case-folded (APFS ignores case, and reads the long s as s) and matched on their
 tail, relative to the checkout, so a file in another worktree, the main
 checkout, __pycache__ or site-packages meets the same rule. The hook fails
-closed: input it can't read, an unknown or missing mode, an eval-author call
-with no path, and a crash all exit 2. Exit 2 blocks the call with one line
-saying what was blocked and what is allowed. Standard library only and Python
-3.9-safe, so it runs on the system python3.
+closed: input it can't read, an unknown or missing mode, an eval-author read
+or write with no path, and a crash all exit 2. Exit 2 blocks the call with one
+line saying what was blocked and what is allowed. Standard library only and
+Python 3.9-safe, so it runs on the system python3.
 
 The honest limits. The hook makes a read deliberate, not impossible:
 - Code the agent writes and runs (python -c, a script, a test that opens
@@ -50,6 +52,8 @@ The honest limits. The hook makes a read deliberate, not impossible:
   inside the work tree git runs in (the -C folder, or else the cwd's worktree
   or checkout) once links are followed, since git tests a path's text and a
   path outside makes git diff compare files as diff --no-index.
+- An eval-author SubagentHandback goes through unchecked: it reads, writes and
+  runs nothing, and its message goes only to the orchestrator.
 - The hook sees only the tools its matcher sends: wire it with matcher "*" and
   limit the agent's tools: frontmatter. A builder can edit .claude/, this hook
   included.
@@ -348,6 +352,12 @@ def check_command(name, mode, tool, args, cwd):
     return None
 
 
+def check_handback(name, mode, tool, args, cwd):
+    """SubagentHandback carries the agent's report back to the orchestrator; it
+    reads, writes and runs nothing, so there is nothing to check (None lets
+    the call through)."""
+
+
 def refuse(name, mode, tool, args, cwd):
     tools = ", ".join(t for t in mode["tools"] if t != "*")
     return f"{name} mode allows only {tools}; {tool} is not one of them"
@@ -634,6 +644,7 @@ MODES = {
             "MultiEdit": check_write,
             "NotebookEdit": check_write,
             "Bash": check_command,
+            "SubagentHandback": check_handback,
             "*": refuse,
         },
     },

@@ -1060,6 +1060,45 @@ def test_eval_author_hook_command_blocks_what_eval_author_mode_forbids(
         assert_exit(blocking[0], 2)
 
 
+# The report a subagent hands back to its orchestrator: text only, with no
+# path, command or pattern field.
+REPORT = {
+    "message": (
+        "EVAL: issue #256\n"
+        "bench/corrupt.py: added one injector and its oracle\n"
+        "Command: uv run pytest tests/test_bench_corrupt.py -q"
+    )
+}
+HANDBACK = {**call("Read"), "tool_name": "SubagentHandback", "tool_input": REPORT}
+NOT_A_TOOL = {**call("Read"), "tool_name": "NotATool", "tool_input": REPORT}
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        pytest.param(HANDBACK, 0, id="handback"),
+        # the fail-closed refuse row still meets a tool with the same input
+        pytest.param(NOT_A_TOOL, 2, id="unknown-tool"),
+        pytest.param(call("Read", "src/crivo/detect.py"), 2, id="read-src"),
+    ],
+)
+def test_eval_author_hook_lets_its_report_back_and_still_refuses_the_rest(
+    checkout, payload, expected
+):
+    """Regression for #258. The eval-author's SubagentHandback reaches the
+    orchestrator through the frontmatter hook, while a tool the hook has no
+    row for, and a read of src/, are still blocked."""
+    front, _ = agent_file(EVAL_AUTHOR)
+    runs = run_frontmatter_hooks(front, payload, checkout)
+    assert runs, f"no PreToolUse hook in eval-author.md sees {payload['tool_name']}"
+    if expected == 0:
+        for proc in runs:
+            assert_exit(proc, 0)
+    else:
+        blocking = [proc for proc in runs if proc.returncode != 0] or runs
+        assert_exit(blocking[0], 2)
+
+
 # The agent files (#70).
 AGENTS = HOOKS.parent / "agents"
 
