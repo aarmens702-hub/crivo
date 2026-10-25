@@ -12,12 +12,15 @@ from bench import consistency, corpus
 from bench.score import score_end_to_end
 
 
-def _run(status="ok", f1=1.0, rows=None):
+def _run(status="ok", f1=1.0, rows=None, columns=None):
     """One run's result row. `rows` is the row score's F1 on a dataset that
-    plants rows; None leaves the block out, as on a cell-only dataset."""
+    plants rows, and `columns` the column score's recall on one that plants
+    an extra column; None leaves the block out, as on a cell-only dataset."""
     scores = {"repair": {"f1": f1}}
     if rows is not None:
         scores["rows"] = {"f1": rows}
+    if columns is not None:
+        scores["columns"] = {"recall": columns}
     return {"status": status, "scores": scores}
 
 
@@ -238,3 +241,91 @@ def test_a_count_credit_cheat_scores_full_rows_but_is_not_solved(name, cheat):
     assert scores["repair"]["f1"] is not None
     assert scores["repair"]["f1"] < 1.0
     assert consistency.solved({"status": "ok", "scores": scores}) is False
+
+
+# (status, repair F1, row F1, column recall, solved). On d25 the planted
+# column sits outside the cell grid, so repair F1 is None there and only the
+# column score can say the run left the column in.
+_COLUMN_RUNS = [
+    pytest.param("ok", None, None, 0.0, False, id="cells-unmeasurable-column-left"),
+    pytest.param("ok_unchanged", None, None, 0.0, False, id="held-run-left-the-column"),
+    pytest.param("ok", 1.0, None, 0.0, False, id="cells-repaired-column-left"),
+    pytest.param("ok", 1.0, 1.0, 0.0, False, id="cells-and-rows-repaired-column-left"),
+    # one of two planted columns under one label removed
+    pytest.param("ok", None, None, 0.5, False, id="half-the-columns-removed"),
+    # the pins beside: a column score that meets the threshold leaves the
+    # run to the rules it had, status, cells and rows alike
+    pytest.param("ok", None, None, 1.0, True, id="cells-unmeasurable-column-removed"),
+    pytest.param("ok", 1.0, 1.0, 1.0, True, id="cells-rows-and-column-repaired"),
+    pytest.param("ok", 0.6, None, 1.0, False, id="column-removed-cells-short"),
+    pytest.param("ok", 1.0, 0.0, 1.0, False, id="column-removed-rows-left"),
+    pytest.param(
+        "no_cleaned_output", None, None, 1.0, False, id="no-output-still-fails"
+    ),
+]
+
+
+@pytest.mark.parametrize("status, repair_f1, rows_f1, columns, want", _COLUMN_RUNS)
+def test_a_column_dataset_is_solved_only_when_its_column_is_removed(
+    status, repair_f1, rows_f1, columns, want
+):
+    """Regression for #263. `solved` read the cell repair F1 and the row
+    score, so a run that left a planted extra column in place counted as
+    solved whenever the cells were unmeasurable or repaired, a held
+    ok_unchanged run included. Column recall below the threshold now fails
+    the run, whatever the cells and rows say."""
+    run = _run(status, repair_f1, rows=rows_f1, columns=columns)
+
+    assert consistency.solved(run) is want
+
+
+def test_the_threshold_applies_to_the_column_score():
+    """Regression for #263. The caller's threshold is the bar for column
+    recall as well as for cells and rows."""
+    runs = [_run("ok", 1.0, columns=0.5), _run("ok", 1.0, columns=1.0)]
+
+    assert consistency.score_pass_k(runs, threshold=0.5)["pass_k"] == 1.0
+    assert consistency.score_pass_k(runs, threshold=0.75)["pass_k"] == 0.0
+    assert consistency.solved(runs[0], threshold=0.5)
+    assert not consistency.solved(runs[0], threshold=0.75)
+
+
+def _dup_column_cleaned(cleaner: str):
+    """The real end_to_end scores of the d25 SMOKE dataset as `cleaner` left
+    it. The planted copy, txn_id_x, is appended after pristine's columns, so
+    the cell grid sees nothing a column-only cleaner does."""
+    entry = next(e for e in corpus.SMOKE if e["name"] == "tx-dup-column")
+    pristine, dirty, truth = corpus.build(entry)
+    cleaned = {
+        "oracle": lambda: pristine,
+        "no-op": lambda: dirty.copy(),
+        "drops-the-copy": lambda: dirty.drop(columns="txn_id_x"),
+        "renames-the-copy": lambda: dirty.rename(columns={"txn_id_x": "txn_id_copy"}),
+        "keeps-the-copy-drops-txn_id": lambda: dirty.drop(columns="txn_id"),
+    }[cleaner]()
+    return score_end_to_end(pristine, dirty, cleaned, truth)
+
+
+@pytest.mark.parametrize(
+    "status, cleaner, want",
+    [
+        # column recall 0/1 = 0.0 on each, with every repair number None
+        pytest.param("ok", "no-op", False, id="no-op"),
+        pytest.param("ok_unchanged", "no-op", False, id="held-no-op"),
+        pytest.param("ok", "renames-the-copy", False, id="renames-the-copy"),
+        # the cells already fail this one: |D| = 0 and the 250 txn_id cells
+        # changed, repair P = 0/250, F1 = 0.0; column recall 0.0 as well
+        pytest.param("ok", "keeps-the-copy-drops-txn_id", False, id="keeps-the-copy"),
+        # the pins beside: removing the planted copy is solved
+        pytest.param("ok", "oracle", True, id="oracle"),
+        pytest.param("ok", "drops-the-copy", True, id="drops-the-copy"),
+    ],
+)
+def test_solved_on_real_scores_of_the_duplicate_column_dataset(status, cleaner, want):
+    """Regression for #263. With the real scorer on the d25 SMOKE dataset,
+    the oracle and the no-op both scored every repair number None, and both
+    counted as solved. Now only the cleaners that remove the planted column
+    are; renaming it is not removing it."""
+    run = {"status": status, "scores": _dup_column_cleaned(cleaner)}
+
+    assert consistency.solved(run) is want

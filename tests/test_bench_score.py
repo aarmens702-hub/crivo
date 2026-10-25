@@ -1,11 +1,15 @@
 """Scorer tests (bench/score.py, spec R3/R7) — dense TDD: one test function
 per RED step, each table-driven so the whole scorer needs few of them."""
 
+import io
+from collections import Counter
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from bench import corpus
+from bench import consistency, corpus
+from bench import score as bench_score
 from bench.score import equivalent, score_detection, score_end_to_end, score_pair
 from bench.truth import Cell, Corruption, GroundTruth, frame_sha256
 
@@ -1057,17 +1061,36 @@ def test_a_dataset_with_no_planted_rows_gets_no_row_score():
     no row corruption keeps exactly today's keys, for the oracle, the no-op
     and a cleaner that drops every row, so cell-only results, the committed
     replay cassette and every reader that never heard of rows stay as they
-    are."""
+    are. The datasets that plant an extra column gain a column block (#263)
+    and are pinned with the column score below."""
     checked = 0
     for entry in corpus.SMOKE:
         pristine, dirty, truth = corpus.build(entry)
         if any(c.granularity == "row" for c in truth.corruptions):
+            continue
+        if entry["name"] in _COLUMN_NAMES:
             continue
         for cleaned in (pristine, dirty.copy(), dirty.iloc[:0]):
             result = score_end_to_end(pristine, dirty, cleaned, truth)
             assert set(result) == _CELL_ONLY_KEYS, entry["name"]
         checked += 1
     assert checked, "the smoke corpus has no cell-only dataset to check"
+
+
+def test_a_dataset_that_plants_a_column_gets_exactly_the_column_block():
+    """Regression for #263, the key-set strength #256 gives the cell-only
+    datasets, held on the ones that plant an extra column: exactly the cell
+    keys plus "columns", and "rows" too on compound-hard, which also plants
+    rows, for the oracle, the no-op and a cleaner that drops every row."""
+    for param in _COLUMN_ENTRIES:
+        name, extra = param.values
+        pristine, dirty, truth = _column_case(name, extra)
+        want = _CELL_ONLY_KEYS | {"columns"}
+        if name == "tx-compound-hard":
+            want |= {"rows"}
+        for cleaned in (pristine, dirty.copy(), dirty.iloc[:0]):
+            result = score_end_to_end(pristine, dirty, cleaned, truth)
+            assert set(result) == want, name
 
 
 def _half_repaired(pristine, dirty, truth) -> pd.DataFrame:
@@ -1163,6 +1186,648 @@ def test_cell_only_datasets_score_exactly_as_before(name, expected):
 
     result = score_end_to_end(
         pristine, dirty, _half_repaired(pristine, dirty, truth), truth
+    )
+
+    assert result == expected
+
+
+# Column-level scoring (#263). The cell grid scores pristine's columns only,
+# so a column in the dirty frame that pristine lacks (a planted extra column)
+# sits outside it. The column score counts the planted extras gone from
+# `cleaned`, by label, compared exactly (no str(), strip or case-fold):
+#   E = Counter(dirty.columns) - Counter(pristine.columns), planted = sum(E)
+#   left = Counter(cleaned.columns) - Counter(pristine.columns)
+#   still_there = min(planted, sum(left)), removed = planted - still_there
+#   recall = removed / planted
+# A label in `cleaned` that pristine lacks reads as a planted column still
+# there, whatever it is called now. A pristine column the cleaner loses is the
+# cell grid's to charge, so the column score has no precision.
+
+# (SMOKE entry, the planted extra column's label) for every SMOKE entry whose
+# dirty frame carries a column pristine lacks
+_COLUMN_ENTRIES = [
+    # d18: the txn_id header damaged to "Unnamed: 3", its values intact
+    pytest.param("tx-header-damage", "Unnamed: 3", id="d18-header-damage"),
+    # d25: txn_id copied whole into an appended txn_id_x
+    pytest.param("tx-dup-column", "txn_id_x", id="d25-duplicate-column"),
+    # d18 padding the txn_id header to " txn_id ", behind cell damage (d07,
+    # d15) and planted rows (d09, d21)
+    pytest.param("tx-compound-hard", " txn_id ", id="compound-hard"),
+]
+_COLUMN_NAMES = {p.values[0] for p in _COLUMN_ENTRIES}
+
+
+def _column_case(name: str, extra: str):
+    """(pristine, dirty, truth) for one SMOKE column entry, checked against
+    the shape the expected values were worked out on: one extra label."""
+    entry = next(e for e in corpus.SMOKE if e["name"] == name)
+    pristine, dirty, truth = corpus.build(entry)
+    planted = Counter(dirty.columns) - Counter(pristine.columns)
+    assert planted == Counter({extra: 1}), f"{name}: the corpus moved"
+    return pristine, dirty, truth
+
+
+def _columns_of(pristine, dirty, cleaned, truth) -> dict:
+    result = score_end_to_end(pristine, dirty, cleaned, truth)
+    assert "columns" in result, "no column score on a dataset that plants a column"
+    return result["columns"]
+
+
+@pytest.mark.parametrize("name, extra", _COLUMN_ENTRIES)
+def test_the_oracle_removes_the_planted_column_and_the_no_op_does_not(name, extra):
+    """Regression for #263. The cell grid scores pristine's columns only, so
+    on d25 the oracle and the no-op scored the same: every repair number
+    None, and both counted as solved. The column score tells them apart on
+    every SMOKE dataset that plants an extra column."""
+    pristine, dirty, truth = _column_case(name, extra)
+
+    # oracle: cleaned = pristine, so left = {}, still_there = min(1, 0) = 0
+    #   removed = 1 - 0 = 1, recall = 1/1 = 1.0
+    assert _columns_of(pristine, dirty, pristine, truth) == {
+        "planted": 1,
+        "removed": 1,
+        "recall": 1.0,
+    }
+    # no-op: left = {extra: 1}, still_there = min(1, 1) = 1
+    #   removed = 1 - 1 = 0, recall = 0/1 = 0.0
+    assert _columns_of(pristine, dirty, dirty.copy(), truth) == {
+        "planted": 1,
+        "removed": 0,
+        "recall": 0.0,
+    }
+
+
+# (SMOKE entry, extra label, the label the cleaner renames it to, removed)
+_RENAMES = [
+    # a new name is still a label pristine lacks: left = {renamed: 1},
+    # still_there = min(1, 1) = 1, removed = 0, recall = 0.0. "column_0" is
+    # how a cleaner names a column it can't read the header of
+    pytest.param(
+        "tx-header-damage", "Unnamed: 3", "column_0", 0, id="d18-to-a-new-name"
+    ),
+    pytest.param("tx-dup-column", "txn_id_x", "txn_id_copy", 0, id="d25-to-a-new-name"),
+    # half the pad stripped, and the right name in the wrong case: compared
+    # exactly, neither is txn_id
+    pytest.param(
+        "tx-compound-hard", " txn_id ", "txn_id ", 0, id="compound-left-pad-only"
+    ),
+    pytest.param("tx-compound-hard", " txn_id ", "TXN_ID", 0, id="compound-wrong-case"),
+    # the pins beside: the d18 repair renames the damaged header back. txn_id
+    # is then in cleaned once and in pristine once: left = {},
+    # still_there = 0, removed = 1, recall = 1.0
+    pytest.param("tx-header-damage", "Unnamed: 3", "txn_id", 1, id="d18-renamed-back"),
+    pytest.param(
+        "tx-compound-hard", " txn_id ", "txn_id", 1, id="compound-pad-stripped"
+    ),
+]
+
+
+@pytest.mark.parametrize("name, extra, renamed, removed", _RENAMES)
+def test_renaming_the_planted_column_removes_it_only_under_its_pristine_name(
+    name, extra, renamed, removed
+):
+    """Regression for #263. Renaming the planted column is not removing it:
+    under a new name it is still a column pristine lacks, so it scores
+    column recall 0. Renaming a damaged header back to its pristine name is
+    the d18 repair, and scores 1.0."""
+    pristine, dirty, truth = _column_case(name, extra)
+
+    columns = _columns_of(
+        pristine, dirty, dirty.rename(columns={extra: renamed}), truth
+    )
+
+    assert columns == {"planted": 1, "removed": removed, "recall": float(removed)}
+
+
+# (SMOKE entry, extra label, cleaner, column block, repair F1). Each cleaner
+# loses a pristine column: it drops one, or never restores the one the
+# header damage took. The cell grid counts a column missing from `cleaned`
+# as changed in every cell and correct in none.
+_LOSES_A_PRISTINE_COLUMN = [
+    # left = {}: removed = 1, recall = 1.0. |D| = 250 txn_id cells (the
+    # header is damaged, so txn_id is missing from dirty); notes missing
+    # from cleaned adds 250 to C: |C| = 500, repaired = 250
+    #   P = 250/500, R = 250/250, F1 = 2*250/(500 + 250) = 2/3
+    pytest.param(
+        "tx-header-damage",
+        "Unnamed: 3",
+        lambda p, d: p.drop(columns="notes"),
+        {"planted": 1, "removed": 1, "recall": 1.0},
+        2 / 3,
+        id="d18-oracle-minus-notes",
+    ),
+    # left = {}: recall = 1.0. |D| = 0 (d25 only appends a column), and
+    # |C| = 250 notes cells: P = 0/250 = 0.0, R = 0/0 None, F1 = 0.0
+    pytest.param(
+        "tx-dup-column",
+        "txn_id_x",
+        lambda p, d: p.drop(columns="notes"),
+        {"planted": 1, "removed": 1, "recall": 1.0},
+        0.0,
+        id="d25-oracle-minus-notes",
+    ),
+    # left = {}: recall = 1.0. |D| = 350 txn_id + 35 merchant + 35 amount
+    # = 420; |C| = 420 + 350 notes = 770, repaired = 420
+    #   P = 420/770 = 6/11, R = 1.0, F1 = 840/1190 = 12/17
+    pytest.param(
+        "tx-compound-hard",
+        " txn_id ",
+        lambda p, d: p.drop(columns="notes"),
+        {"planted": 1, "removed": 1, "recall": 1.0},
+        12 / 17,
+        id="compound-oracle-minus-notes",
+    ),
+    # the damaged column dropped instead of renamed back: left = {},
+    # recall = 1.0, but txn_id is missing from cleaned as from dirty, so its
+    # 250 cells are changed and none correct: P = 0/250, R = 0/250, F1 = 0.0
+    pytest.param(
+        "tx-header-damage",
+        "Unnamed: 3",
+        lambda p, d: d.drop(columns="Unnamed: 3"),
+        {"planted": 1, "removed": 1, "recall": 1.0},
+        0.0,
+        id="d18-drops-the-damaged-column",
+    ),
+    # as for d18, and the cell damage is left too: |C| = 350, repaired = 0
+    #   P = 0/350, R = 0/420, F1 = 0.0
+    pytest.param(
+        "tx-compound-hard",
+        " txn_id ",
+        lambda p, d: d.drop(columns=" txn_id "),
+        {"planted": 1, "removed": 1, "recall": 1.0},
+        0.0,
+        id="compound-drops-the-padded-column",
+    ),
+    # d25's copy kept and its original dropped: left = {txn_id_x: 1},
+    # still_there = 1, recall = 0.0; |D| = 0, |C| = 250 txn_id cells
+    #   P = 0/250 = 0.0, R = 0/0 None, F1 = 0.0
+    pytest.param(
+        "tx-dup-column",
+        "txn_id_x",
+        lambda p, d: d.drop(columns="txn_id"),
+        {"planted": 1, "removed": 0, "recall": 0.0},
+        0.0,
+        id="d25-keeps-the-copy-drops-txn_id",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name, extra, cleaner, columns, repair_f1", _LOSES_A_PRISTINE_COLUMN
+)
+def test_losing_a_pristine_column_costs_cells_not_column_recall(
+    name, extra, cleaner, columns, repair_f1
+):
+    """Regression for #263. The column score has no precision on purpose: a
+    pristine column the cleaner drops, or never restores, is charged in the
+    cell grid already, every cell of it changed and none correct, and
+    charging it again would count it twice. So losing one costs repair F1
+    and leaves column recall alone. Keeping d25's copy and dropping its
+    original loses both."""
+    pristine, dirty, truth = _column_case(name, extra)
+    cleaned = cleaner(pristine, dirty)
+
+    assert _columns_of(pristine, dirty, cleaned, truth) == columns
+    result = score_end_to_end(pristine, dirty, cleaned, truth)
+    assert result["repair"]["f1"] == pytest.approx(repair_f1)
+
+
+def _export_read_without_a_header() -> tuple:
+    """A small export read with header=None, so its labels are the ints
+    0..2, and the id column copied into an appended column 3 (d25). Every
+    value is invented."""
+    pristine = pd.DataFrame(
+        [
+            ["00412", "2024-01-05", 1200.0],
+            ["00977", "2024-02-11", 85.5],
+            ["01530", "2024-03-02", 40.0],
+            ["03218", "2024-03-30", 310.25],
+        ]
+    )
+    dirty = pristine.copy()
+    dirty[3] = dirty[0]
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=4,
+        n_cols=3,
+        frame_sha256="x",
+        corruptions=[Corruption(disease=25, columns=("0",), granularity="column")],
+    )
+    return pristine, dirty, truth
+
+
+def _export_with_a_blank_header() -> tuple:
+    """A small export whose header was promoted from its first row, where a
+    trailing blank cell became a NaN label over an empty column. Every value
+    is invented."""
+    pristine = pd.DataFrame(
+        {
+            "cust_id": ["00412", "00977", "01530", "03218"],
+            "amount": [1200.0, 85.5, 40.0, 310.25],
+            "town": ["Quarnby", "Velloch", "Tarrisford", "Quarnby"],
+        }
+    )
+    dirty = pd.concat([pristine, pd.Series([None] * 4)], axis=1).set_axis(
+        [*pristine.columns, np.nan], axis=1
+    )
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=4,
+        n_cols=3,
+        frame_sha256="x",
+        corruptions=[Corruption(disease=18, columns=(), granularity="column")],
+    )
+    return pristine, dirty, truth
+
+
+_ODD_LABELS = {
+    "int-labels": _export_read_without_a_header,
+    "nan-label": _export_with_a_blank_header,
+}
+
+
+@pytest.mark.parametrize(
+    "export, cleaner, removed",
+    [
+        # E = {3: 1}; oracle: left = {}, removed = 1, recall = 1.0
+        pytest.param("int-labels", lambda p, d: p, 1, id="int-labels-oracle"),
+        # left = {3: 1}, still_there = 1, removed = 0, recall = 0.0
+        pytest.param("int-labels", lambda p, d: d.copy(), 0, id="int-labels-no-op"),
+        pytest.param(
+            "int-labels", lambda p, d: d.drop(columns=3), 1, id="int-labels-dropped"
+        ),
+        # renamed to another int label pristine lacks: still there
+        pytest.param(
+            "int-labels",
+            lambda p, d: d.rename(columns={3: 4}),
+            0,
+            id="int-labels-renamed",
+        ),
+        # E = {nan: 1}; a NaN label is counted, never compared by value
+        pytest.param("nan-label", lambda p, d: d.copy(), 0, id="nan-label-no-op"),
+        pytest.param(
+            "nan-label",
+            lambda p, d: d.loc[:, d.columns.notna()],
+            1,
+            id="nan-label-dropped",
+        ),
+    ],
+)
+def test_odd_column_labels_are_counted_as_they_are(export, cleaner, removed):
+    """Regression for #263. Labels are counted exactly as pandas holds them,
+    so an int label stays an int and a NaN label from a blank header cell is
+    one more label: neither raises, and both score like any other."""
+    pristine, dirty, truth = _ODD_LABELS[export]()
+
+    columns = _columns_of(pristine, dirty, cleaner(pristine, dirty), truth)
+
+    assert columns == {"planted": 1, "removed": removed, "recall": float(removed)}
+
+
+def _export_with_a_lookup_joined_twice() -> tuple:
+    """A small export with a region lookup joined on twice, so "region" is
+    appended twice: two planted columns under one label pristine lacks.
+    Every value is invented."""
+    pristine = pd.DataFrame(
+        {
+            "cust_id": ["00412", "00977", "01530", "03218"],
+            "amount": [1200.0, 85.5, 40.0, 310.25],
+            "town": ["Quarnby", "Velloch", "Tarrisford", "Quarnby"],
+        }
+    )
+    region = pd.Series(["North", "South", "North", "East"], name="region")
+    dirty = pd.concat([pristine, region, region], axis=1)
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=4,
+        n_cols=3,
+        frame_sha256="x",
+        corruptions=[Corruption(disease=25, columns=("region",), granularity="column")],
+    )
+    return pristine, dirty, truth
+
+
+@pytest.mark.parametrize(
+    "keep, removed, recall",
+    [
+        # E = {region: 2}, planted = 2
+        # both kept: left = {region: 2}, still_there = min(2, 2) = 2
+        #   removed = 0, recall = 0/2 = 0.0
+        pytest.param([0, 1, 2, 3, 4], 0, 0.0, id="both-kept"),
+        # one kept: left = {region: 1}, still_there = min(2, 1) = 1
+        #   removed = 1, recall = 1/2 = 0.5
+        pytest.param([0, 1, 2, 3], 1, 0.5, id="one-kept"),
+        # none kept: left = {}, removed = 2, recall = 2/2 = 1.0
+        pytest.param([0, 1, 2], 2, 1.0, id="both-dropped"),
+    ],
+)
+def test_a_label_planted_twice_counts_each_copy(keep, removed, recall):
+    """Regression for #263. Two planted columns under one label are two
+    planted columns: dropping one of them is half the repair, not all of it
+    and not none of it."""
+    pristine, dirty, truth = _export_with_a_lookup_joined_twice()
+
+    columns = _columns_of(pristine, dirty, dirty.iloc[:, keep], truth)
+
+    assert columns == {"planted": 2, "removed": removed, "recall": recall}
+
+
+def test_a_copy_under_its_sources_label_is_counted_by_the_helper():
+    """Regression for #263. A planted copy that keeps its source's label
+    ("amount" twice) is one extra column, counted copy by copy, so dropping
+    either copy is the repair. `score_end_to_end` can't take this frame (the
+    cell grid reads dirty["amount"], which is a frame here), so the count is
+    checked on its helper."""
+    column_removal = getattr(bench_score, "_column_removal", None)
+    assert column_removal is not None, "bench.score has no _column_removal helper"
+    pristine, _, _ = _export_with_a_lookup_joined_twice()
+    dirty = pd.concat([pristine, pristine[["amount"]]], axis=1)
+
+    # E = {amount: 2} - {amount: 1} = {amount: 1}, planted = 1
+    # oracle: left = {}, removed = 1, recall = 1.0
+    assert column_removal(pristine, dirty, pristine) == {
+        "planted": 1,
+        "removed": 1,
+        "recall": 1.0,
+    }
+    # no-op: left = {amount: 1}, still_there = 1, removed = 0, recall = 0.0
+    assert column_removal(pristine, dirty, dirty.copy()) == {
+        "planted": 1,
+        "removed": 0,
+        "recall": 0.0,
+    }
+    # the source dropped and the copy kept: amount once, as in pristine,
+    # so left = {}, removed = 1, recall = 1.0
+    assert column_removal(pristine, dirty, dirty.iloc[:, [0, 2, 3]]) == {
+        "planted": 1,
+        "removed": 1,
+        "recall": 1.0,
+    }
+
+
+def _d25_with_a_review_flag(tmp_path):
+    pristine, dirty, truth = _column_case("tx-dup-column", "txn_id_x")
+    cleaned = dirty.drop(columns="txn_id_x").assign(needs_review=False)
+    return pristine, dirty, cleaned, truth
+
+
+def _int_labels_read_back_as_text(tmp_path):
+    pristine, dirty, truth = _export_read_without_a_header()
+    # the copy dropped, then written out and read back: a CSV header holds
+    # text, so the labels 0..2 come back as "0".."2"
+    path = tmp_path / "cleaned.csv"
+    dirty.drop(columns=3).to_csv(path, index=False)
+    cleaned = pd.read_csv(path, dtype=str)
+    return pristine, dirty, cleaned, truth
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        # left = {needs_review: 1}, still_there = min(1, 1) = 1
+        pytest.param(_d25_with_a_review_flag, id="d25-copy-dropped-flag-added"),
+        # left = {"0": 1, "1": 1, "2": 1}, still_there = min(1, 3) = 1
+        pytest.param(_int_labels_read_back_as_text, id="int-labels-read-back"),
+    ],
+)
+def test_a_column_the_cleaner_adds_reads_as_the_planted_one_left(case, tmp_path):
+    """Regression for #263. KNOWN GAP, pinned so a fix shows up here: the
+    score counts labels pristine lacks, and can't tell the planted column
+    left in place from a column the cleaner added (a review flag) or
+    relabelled (int labels read back as text). Each cleaner here dropped the
+    planted column, and scores as if it hadn't. The gap only under-credits:
+    a cleaner can't earn column recall by adding a column."""
+    pristine, dirty, cleaned, truth = case(tmp_path)
+
+    columns = _columns_of(pristine, dirty, cleaned, truth)
+
+    # KNOWN GAP. removed = 1 - 1 = 0, recall = 0.0, where what happened is
+    # removed = 1, recall = 1.0
+    assert columns == {"planted": 1, "removed": 0, "recall": 0.0}
+
+
+def _through_parquet(frame: pd.DataFrame) -> pd.DataFrame:
+    """Written to parquet and read back, in memory, with pandas' default
+    index handling: a named index comes back named, any other index that
+    is not a plain range comes back unnamed."""
+    buffer = io.BytesIO()
+    frame.to_parquet(buffer)
+    buffer.seek(0)
+    return pd.read_parquet(buffer)
+
+
+def _pop_into_the_index(frame: pd.DataFrame, label) -> pd.DataFrame:
+    out = frame.copy()
+    out.index = out.pop(label)  # the popped Series names the index
+    return out
+
+
+_INTO_A_NAMED_INDEX = {
+    "set-index": lambda frame: frame.set_index("txn_id_x"),
+    "popped-into-the-index": lambda frame: _pop_into_the_index(frame, "txn_id_x"),
+}
+
+
+@pytest.mark.parametrize("how", ["in-memory", "parquet"])
+@pytest.mark.parametrize("route", list(_INTO_A_NAMED_INDEX))
+def test_moving_the_planted_column_into_a_named_index_is_not_removing_it(route, how):
+    """Regression for #263. d25's copy moved out of the columns and into the
+    index under its own name is still in the frame, and a parquet round trip
+    brings it back the same way. Read off `cleaned.columns` alone, it scored
+    column recall 1.0 and, with every cell number None, counted as solved. A
+    named index level is a label like a column's."""
+    pristine, dirty, truth = _column_case("tx-dup-column", "txn_id_x")
+    cleaned = _INTO_A_NAMED_INDEX[route](dirty)
+    if how == "parquet":
+        cleaned = _through_parquet(cleaned)
+    assert list(cleaned.index.names) == ["txn_id_x"], "the setup moved"
+
+    scores = score_end_to_end(pristine, dirty, cleaned, truth)
+
+    # labels = the 9 pristine columns + the named level txn_id_x:
+    # left = {txn_id_x: 1}, still_there = min(1, 1) = 1
+    #   removed = 1 - 1 = 0, recall = 0/1 = 0.0
+    assert scores.get("columns") == {"planted": 1, "removed": 0, "recall": 0.0}
+    # the grid is read by position and its 9 columns are untouched, so
+    # every repair number is 0/0 None and only the column rule fails the run
+    assert scores["repair"]["f1"] is None
+    assert consistency.solved({"status": "ok", "scores": scores}) is False
+
+
+@pytest.mark.parametrize("how", ["in-memory", "parquet"])
+def test_the_planted_column_moved_into_an_unnamed_index_reads_as_removed(how):
+    """Regression for #263. KNOWN GAP, pinned so a fix shows up here, and
+    the one that OVER-credits: an unnamed index carries no label, so d25's
+    copy moved into one (`cleaned.index = values`) leaves no label behind
+    and scores as removed, and the run counts as solved, with the copy's
+    values still in the frame. By label it is the same as the index a row
+    drop leaves, which must keep scoring 1.0 (pinned below)."""
+    pristine, dirty, truth = _column_case("tx-dup-column", "txn_id_x")
+    cleaned = dirty.drop(columns="txn_id_x")
+    cleaned.index = pd.Index(dirty["txn_id_x"].to_numpy())
+    if how == "parquet":
+        cleaned = _through_parquet(cleaned)
+    assert list(cleaned.index.names) == [None], "the setup moved"
+
+    scores = score_end_to_end(pristine, dirty, cleaned, truth)
+
+    # KNOWN GAP. labels = the 9 pristine columns and an unnamed level:
+    # left = {}, still_there = 0, removed = 1, recall = 1.0, where what
+    # happened is the copy kept: removed = 0, recall = 0.0
+    assert scores.get("columns") == {"planted": 1, "removed": 1, "recall": 1.0}
+    assert consistency.solved({"status": "ok", "scores": scores}) is True
+
+
+@pytest.mark.parametrize("keep", ["first", "last"])
+def test_the_index_a_row_drop_leaves_carries_no_label(keep):
+    """Regression for #263, the pin beside the index cases above: a cleaner
+    that removes rows leaves an unnamed index that is not a range, and a
+    parquet round trip keeps it as an unnamed index. It names no column, so
+    a full repair of compound-hard's rows and header still scores column
+    recall 1.0. Keeping the later copy of each duplicate (as #256 scores it,
+    the same repair by value) leaves gaps in that index as well."""
+    pristine, dirty, truth = _column_case("tx-compound-hard", " txn_id ")
+    total_row = [r for c in truth.corruptions if c.disease == 21 for r in c.rows]
+    repaired = (
+        dirty.rename(columns={" txn_id ": "txn_id"})
+        .drop_duplicates(keep=keep)
+        .drop(index=total_row)
+    )
+    cleaned = _through_parquet(repaired)
+    assert list(cleaned.index.names) == [None], "the setup moved"
+    assert not isinstance(cleaned.index, pd.RangeIndex), "the setup moved"
+
+    scores = score_end_to_end(pristine, dirty, cleaned, truth)
+
+    # the header renamed back and an unnamed level: left = {}, still_there
+    # = 0, removed = 1, recall = 1.0
+    assert scores["columns"] == {"planted": 1, "removed": 1, "recall": 1.0}
+    # 35 exact duplicates and the total row removed, 386 - 350 = 36, every
+    # one planted: P = 36/36, R = 36/36, F1 = 1.0
+    assert scores["rows"]["f1"] == 1.0
+
+
+def test_exactly_the_datasets_that_plant_a_column_get_a_column_score():
+    """Regression for #263. The column block is on the SMOKE datasets whose
+    dirty frame carries a column pristine lacks, for the oracle and the
+    no-op alike, and on none other: d19 makes a column constant and plants
+    no extra one, so it gets no block."""
+    with_block = {"oracle": set(), "no-op": set()}
+    for entry in corpus.SMOKE:
+        pristine, dirty, truth = corpus.build(entry)
+        for cleaner, cleaned in (("oracle", pristine), ("no-op", dirty.copy())):
+            if "columns" in score_end_to_end(pristine, dirty, cleaned, truth):
+                with_block[cleaner].add(entry["name"])
+
+    assert with_block == {"oracle": _COLUMN_NAMES, "no-op": _COLUMN_NAMES}
+
+
+def test_a_row_dataset_with_no_planted_column_keeps_its_keys():
+    """Regression for #263, the other side of the column score for rows: a
+    dataset that plants rows and no column keeps the cell keys plus "rows",
+    for the oracle, the no-op and a cleaner that drops every row."""
+    checked = 0
+    for entry in corpus.SMOKE:
+        pristine, dirty, truth = corpus.build(entry)
+        if entry["name"] in _COLUMN_NAMES:
+            continue
+        if not any(c.granularity == "row" for c in truth.corruptions):
+            continue
+        for cleaned in (pristine, dirty.copy(), dirty.iloc[:0]):
+            result = score_end_to_end(pristine, dirty, cleaned, truth)
+            assert set(result) == _CELL_ONLY_KEYS | {"rows"}, entry["name"]
+        checked += 1
+    assert checked, "the smoke corpus has no row-only dataset to check"
+
+
+_UNCHANGED_CLEANERS = {
+    "oracle": lambda p, d: p,
+    "no-op": lambda p, d: d.copy(),
+    "drops-the-constant-column": lambda p, d: d.drop(columns="txn_id"),
+    "drop-duplicates": lambda p, d: d.drop_duplicates(),
+}
+
+# Full end_to_end dicts pinned from fe60edf, before column scoring existed.
+_NO_COLUMN_PINS = [
+    # d19 makes txn_id constant: 249 of its 250 cells differ from pristine
+    # (one row's id is the constant), |D| = 249. Oracle: C = D, all correct
+    #   P = R = F1 = 1.0, dirt and repair alike
+    pytest.param(
+        "tx-constant-col",
+        "oracle",
+        {
+            "dirt_targeting": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+            "repair": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+            "counts": {"dirty": 249, "changed": 249, "repaired": 249},
+        },
+        id="d19-oracle",
+    ),
+    # |C| = 0: P = 0/0 None, R = 0/249 = 0.0, F1 = 0.0
+    pytest.param(
+        "tx-constant-col",
+        "no-op",
+        {
+            "dirt_targeting": {"precision": None, "recall": 0.0, "f1": 0.0},
+            "repair": {"precision": None, "recall": 0.0, "f1": 0.0},
+            "counts": {"dirty": 249, "changed": 0, "repaired": 0},
+        },
+        id="d19-no-op",
+    ),
+    # the constant column dropped: all 250 txn_id cells changed, |C| = 250,
+    # C∩D = 249, none correct
+    #   dirt:   P = 249/250, R = 249/249, F1 = 498/499
+    #   repair: P = 0/250, R = 0/249, F1 = 0.0
+    pytest.param(
+        "tx-constant-col",
+        "drops-the-constant-column",
+        {
+            "dirt_targeting": {
+                "precision": 0.996,
+                "recall": 1.0,
+                "f1": 0.9979959919839679,
+            },
+            "repair": {"precision": 0.0, "recall": 0.0, "f1": 0.0},
+            "counts": {"dirty": 249, "changed": 250, "repaired": 0},
+        },
+        id="d19-drops-the-constant-column",
+    ),
+    # d09 only appends 25 copies, so the grid is clean and untouched: every
+    # cell number 0/0 None; the rows block as #256 scores it
+    pytest.param(
+        "tx-dup-rows",
+        "drop-duplicates",
+        {
+            "dirt_targeting": {"precision": None, "recall": None, "f1": None},
+            "repair": {"precision": None, "recall": None, "f1": None},
+            "counts": {"dirty": 0, "changed": 0, "repaired": 0},
+            "rows": {
+                "precision": 1.0,
+                "recall": 1.0,
+                "f1": 1.0,
+                "planted": 25,
+                "removed": 25,
+                "planted_removed": 25,
+            },
+        },
+        id="d09-drop-duplicates",
+    ),
+]
+
+
+@pytest.mark.parametrize("name, cleaner, expected", _NO_COLUMN_PINS)
+def test_datasets_that_plant_no_column_score_exactly_as_before(name, cleaner, expected):
+    """Regression for #263, the pin that column scoring leaves the rest
+    alone: on d19 (whose repair is undefined by design, and which plants no
+    extra column) and on a row-only dataset the whole end_to_end dict, to the
+    last digit, is what the scorer published before columns were scored."""
+    entry = next(e for e in corpus.SMOKE if e["name"] == name)
+    pristine, dirty, truth = corpus.build(entry)
+
+    result = score_end_to_end(
+        pristine, dirty, _UNCHANGED_CLEANERS[cleaner](pristine, dirty), truth
     )
 
     assert result == expected

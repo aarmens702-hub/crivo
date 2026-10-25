@@ -245,6 +245,52 @@ def _row_removal(
     }
 
 
+def _column_removal(
+    pristine: pd.DataFrame, dirty: pd.DataFrame, cleaned: pd.DataFrame
+) -> dict:
+    """Column-removal recall for the extra columns planted in `dirty`.
+
+    The planted columns are the labels `dirty` holds that pristine lacks,
+    counted copy by copy: E = Counter(dirty.columns) - Counter(pristine
+    .columns), planted = ΣE. Labels compare exactly as pandas holds them (no
+    str(), strip or case-fold), so an int label stays an int and a NaN label
+    is one more label, and nothing here raises on either. `cleaned`'s labels
+    are its columns plus its named index levels, so a planted column moved
+    into the index under its own name (set_index, a parquet round trip of
+    it) is still there. The labels left over are left = Counter(those) -
+    Counter(pristine.columns); still_there = min(planted, Σleft), removed =
+    planted - still_there, recall = removed / planted (None when nothing is
+    planted).
+
+    A left-over label counts whatever it is called now, so renaming the
+    planted column is not removing it, while renaming a damaged header back
+    to its pristine name is. There is no precision: a pristine column the
+    cleaner drops, or never restores, is charged in the cell grid already
+    (every cell of it changed, none correct), and charging it here would
+    count it twice. On d18 one miss is counted in both, by design: a
+    damaged header never renamed back is a pristine column missing from the
+    grid and a planted label left here.
+
+    Known gaps. Two under-credit: a column the cleaner adds (a review flag)
+    reads as the planted column left in place, and so do int labels the
+    cleaner turned into text (a CSV round trip reads 0..2 back as "0".."2").
+    One over-credits: an unnamed index level carries no label, so a planted
+    column moved into one (`cleaned.index = values`) reads as removed while
+    its values stay in the frame. Unnamed levels stay uncounted: every
+    frame has an index, and an unnamed one (a plain range, or the gapped
+    one a row drop leaves) can't be told from one that holds a column."""
+    pristine_labels = Counter(pristine.columns)
+    planted = sum((Counter(dirty.columns) - pristine_labels).values())
+    named_levels = [n for n in cleaned.index.names if n is not None]
+    left = sum((Counter([*cleaned.columns, *named_levels]) - pristine_labels).values())
+    removed = planted - min(planted, left)
+    return {
+        "planted": planted,
+        "removed": removed,
+        "recall": removed / planted if planted else None,
+    }
+
+
 def _f1(precision: float | None, recall: float | None) -> float | None:
     """Harmonic mean of precision and recall. In `score_end_to_end` (dirt
     targeting, repair) that is 2·TP / (|C| + |D|), since a dirty cell that
@@ -279,7 +325,15 @@ def score_end_to_end(
     rows are gone from `cleaned` (recall) and how many removed rows were
     planted (precision), matched by value (`_row_removal`). Without one, the
     key is absent and the result is the cell score alone. Only removal is
-    scored: a d10 merge that combines values across rows is not."""
+    scored: a d10 merge that combines values across rows is not.
+
+    The grid never sees a column pristine lacks either, so when `dirty`
+    carries one (a planted extra column, whatever the truth's granularity
+    says) the result also carries "columns": how many planted columns are
+    gone from `cleaned`'s columns and named index levels (`_column_removal`).
+    It has no precision, since a
+    pristine column the cleaner drops is charged in the grid already.
+    Without a planted column the key is absent."""
     n = truth.n_rows
     columns = pristine.columns
     D = _positions(columns, n, pristine, dirty, False, values_equal)
@@ -312,6 +366,9 @@ def score_end_to_end(
     # raises on one first, so no caller reaches that case through here yet
     if any(c.granularity == "row" for c in truth.corruptions):
         result["rows"] = _row_removal(pristine, dirty, cleaned, truth)
+    column_removal = _column_removal(pristine, dirty, cleaned)
+    if column_removal["planted"]:
+        result["columns"] = column_removal
     return result
 
 

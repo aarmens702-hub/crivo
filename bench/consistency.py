@@ -31,12 +31,25 @@ def solved(run: dict, threshold: float = 1.0) -> bool:
     rules together: rows match by value, so a run that rewrites a planted
     row and removes a good one passes the row rule at F1 1.0, and the cell
     rule is what fails it, since the good rows are the grid's rows and
-    removing one shifts every row after it."""
+    removing one shifts every row after it.
+
+    On a dataset that plants an extra column, the scores carry a column
+    score (#263), since the planted column sits outside the cell grid too.
+    A defined column recall below the threshold fails the run, so a run
+    that leaves the planted column in place, or only renames it, is not
+    solved, a held ok_unchanged run included."""
     if run.get("status") not in _OK:
         return False
     scores = run.get("scores") or {}
     rows = scores.get("rows")
     if isinstance(rows, dict) and rows.get("f1") is not None and rows["f1"] < threshold:
+        return False
+    columns = scores.get("columns")
+    if (
+        isinstance(columns, dict)
+        and columns.get("recall") is not None
+        and columns["recall"] < threshold
+    ):
         return False
     f1 = scores.get("repair", {}).get("f1")
     if f1 is None:

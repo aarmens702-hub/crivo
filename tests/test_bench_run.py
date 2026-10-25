@@ -725,9 +725,10 @@ def test_the_smoke_summary_grows_a_row_line_and_keeps_its_line(
     lines = capsys.readouterr().out.splitlines()
 
     assert _SUMMARY_LINE in lines
-    others = [line for line in lines if line != _SUMMARY_LINE]
-    assert len(others) == 1, f"want one row line beside the summary, got {others}"
-    row_line = others[0]
+    # picked by its prefix: the column line (#263) prints after it
+    row_lines = [line for line in lines if line.startswith("rows removed:")]
+    assert len(row_lines) == 1, f"want one row line beside the summary, got {lines}"
+    row_line = row_lines[0]
     assert "row" in row_line.lower(), row_line
     assert re.search(rf"recall\D*{re.escape(recall)}", row_line), row_line
     assert re.search(rf"precision\D*{re.escape(precision)}", row_line), row_line
@@ -783,3 +784,235 @@ def test_the_keyless_cleaner_scores_row_recall_zero_on_the_row_datasets(
     assert re.search(r"recall\D*0\.000", row_line), row_line
     assert re.search(r"precision\D*—", row_line), row_line
     assert re.search(r"F1\D*0\.000", row_line, re.IGNORECASE), row_line
+
+
+# Every SMOKE dataset whose dirty frame carries a column pristine lacks (#263)
+_COLUMN_DATASETS = ["tx-header-damage", "tx-dup-column", "tx-compound-hard"]
+
+
+def test_the_column_invariant_holds_on_every_smoke_dataset_that_plants_a_column():
+    """Regression for #263, the pin beside the violations below. The real
+    oracle and no-op pass the invariants on every SMOKE dataset whose dirty
+    frame carries a column pristine lacks."""
+    from collections import Counter
+
+    from bench.corpus import SMOKE, build
+    from bench.run import _check_invariants
+
+    planted = []
+    for entry in SMOKE:
+        pristine, dirty, truth = build(entry)
+        if Counter(dirty.columns) - Counter(pristine.columns):
+            _check_invariants(pristine, dirty, truth)
+            planted.append(entry["name"])
+    assert planted, "the smoke corpus plants no column, so this proves nothing"
+
+
+def _set_columns(**fields):
+    """Overwrite fields of a result's column block, making one if it has none."""
+    return lambda result: result.update(columns={**result.get("columns", {}), **fields})
+
+
+# (whose result is broken, how). Each is a scorer that can no longer tell the
+# oracle from the no-op on a planted column, which the cell and row
+# invariants let through.
+_BROKEN_COLUMN_SCORES = [
+    pytest.param(
+        "no-op", _set_columns(recall=None), id="no-op-column-recall-undefined"
+    ),
+    pytest.param(
+        "no-op",
+        lambda result: result.pop("columns", None),
+        id="no-op-column-score-missing",
+    ),
+    pytest.param(
+        "no-op", _set_columns(recall=1.0, removed=1), id="no-op-removed-the-column"
+    ),
+    pytest.param(
+        "oracle",
+        lambda result: result.pop("columns", None),
+        id="oracle-column-score-missing",
+    ),
+    pytest.param(
+        "oracle", _set_columns(recall=None), id="oracle-column-recall-undefined"
+    ),
+    pytest.param(
+        "oracle", _set_columns(recall=0.0, removed=0), id="oracle-left-the-column"
+    ),
+]
+
+
+@pytest.mark.parametrize("entry_name", _COLUMN_DATASETS)
+@pytest.mark.parametrize("side, breaks", _BROKEN_COLUMN_SCORES)
+def test_a_broken_column_score_stops_the_run_and_names_the_dataset(
+    monkeypatch, entry_name, side, breaks
+):
+    """Regression for #263. The cell invariants pass vacuously on d25 (no
+    scored cell is dirty) and see no extra column anywhere, and nothing held
+    the column score. On a dataset that plants an extra column the oracle's
+    column recall must be 1.0 and the no-op's 0.0, and a missing column
+    block is a violation itself."""
+    import re
+
+    from bench import run as bench_run
+    from bench.corpus import SMOKE, build
+
+    entry = next(e for e in SMOKE if e["name"] == entry_name)
+    pristine, dirty, truth = build(entry)
+    real = bench_run.score_end_to_end
+
+    def scored(p, d, cleaned, t, *args, **kwargs):
+        result = real(p, d, cleaned, t, *args, **kwargs)
+        # told apart by identity: on d18 and d25 the oracle and the no-op
+        # hand back the same number of rows, so a length can't
+        if cleaned is (p if side == "oracle" else d):
+            breaks(result)
+        return result
+
+    monkeypatch.setattr(bench_run, "score_end_to_end", scored)
+
+    with pytest.raises(bench_run.InvariantViolation, match=re.escape(entry_name)):
+        bench_run._check_invariants(pristine, dirty, truth)
+
+
+def _column_dataset(name: str, diseases: list, columns: dict, rows=None) -> dict:
+    """A column dataset's `score_pair` row, with a disease crivo has no fixer
+    for, so it is not fully fixable and leaves the repair mean; plus its
+    column block, and its row block if it plants rows too."""
+    row = _synthetic_row(name, None, None, attempted=(), not_attempted=diseases)
+    row["scores"]["end_to_end"]["columns"] = columns
+    if rows is not None:
+        row["scores"]["end_to_end"]["rows"] = rows
+    return row
+
+
+def _no_row_removed(k: int) -> dict:
+    """The keyless cleaner's row block on a dataset that plants k rows."""
+    return {
+        "precision": None,
+        "recall": 0.0,
+        "f1": 0.0,
+        "planted": k,
+        "removed": 0,
+        "planted_removed": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "synthetic, row_line, column_line, scored, recall_mean",
+    [
+        # d25 left its copy: 0/1 = 0.0; compound-hard stripped the pad:
+        # 1/1 = 1.0. Mean over the 2 that plant columns = 0.500
+        pytest.param(
+            lambda: [
+                _synthetic_row("tx-whitespace", 1.0, 1.0, attempted=[6]),
+                _synthetic_row("tx-case-variants", 0.5, 0.5, attempted=[7]),
+                _column_dataset(
+                    "tx-dup-column",
+                    [25],
+                    {"planted": 1, "removed": 0, "recall": 0.0},
+                ),
+                _column_dataset(
+                    "tx-compound-hard",
+                    [9, 21],
+                    {"planted": 1, "removed": 1, "recall": 1.0},
+                    rows=_no_row_removed(36),
+                ),
+            ],
+            # as fe60edf prints it for these four rows
+            "rows removed: recall mean 0.000 | F1 mean 0.000 over 1 of 4 that"
+            " plant rows | precision mean — over 0 of 1 that removed a row",
+            "columns removed: recall mean 0.500 over 2 of 4 that plant columns",
+            2,
+            0.5,
+            id="two-plant-columns",
+        ),
+        # no dataset plants a column: the line still prints, with the mean
+        # undefined over 0
+        pytest.param(
+            lambda: [
+                _synthetic_row("tx-whitespace", 1.0, 1.0, attempted=[6]),
+                _synthetic_row("tx-case-variants", 0.5, 0.5, attempted=[7]),
+                _row_dataset("tx-dup-rows", 9, _no_row_removed(25)),
+                _row_dataset("tx-aggregate-row", 21, _no_row_removed(1)),
+            ],
+            # as fe60edf prints it for these four rows
+            "rows removed: recall mean 0.000 | F1 mean 0.000 over 2 of 4 that"
+            " plant rows | precision mean — over 0 of 2 that removed a row",
+            "columns removed: recall mean — over 0 of 4 that plant columns",
+            0,
+            None,
+            id="none-plant-columns",
+        ),
+    ],
+)
+def test_the_smoke_summary_grows_a_column_line_and_keeps_its_lines(
+    monkeypatch, capsys, synthetic, row_line, column_line, scored, recall_mean
+):
+    """Regression for #263. The smoke summary prints one new line, always,
+    after the row line: column recall, a mean over the datasets that plant
+    an extra column, with that count against the corpus. The summary line
+    and the row line stay byte for byte what they were."""
+    from bench import run as bench_run
+
+    rows = synthetic()
+    report = {
+        "mode": "smoke",
+        "date": "2026-10-24",
+        "synthetic": rows,
+        "external": [],
+        "aggregates": bench_run._aggregate(rows),
+    }
+    monkeypatch.setattr(bench_run, "run", lambda **kwargs: report)
+
+    assert bench_run.main(["--smoke"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+
+    assert lines == [_SUMMARY_LINE, row_line, column_line]
+    agg = report["aggregates"]
+    assert agg.get("column_scored_datasets") == scored, agg
+    assert agg.get("column_recall_mean") == recall_mean, agg
+
+
+def test_the_keyless_cleaner_scores_column_recall_on_the_column_datasets(
+    tmp_path, monkeypatch, capsys
+):
+    """Regression for #263. What the new line reads for the keyless cleaner,
+    a measurement, not a regression: it has no fixer for d25, so the copy
+    stays; it renames d18's "Unnamed: 3" to a new name, which leaves a label
+    pristine lacks; and it strips compound-hard's padded header back to
+    txn_id. Real `score_pair` rows, on those datasets plus a cell-only one
+    and d19, neither of which gets a column block."""
+    from bench import corpus
+    from bench import run as bench_run
+
+    names = {"tx-whitespace", "tx-constant-col", *_COLUMN_DATASETS}
+    monkeypatch.setattr(
+        corpus, "SMOKE", [e for e in corpus.SMOKE if e["name"] in names]
+    )
+    report = bench_run.run(
+        mode="smoke",
+        results_dir=tmp_path / "results",
+        results_md=tmp_path / "smoke.md",
+        external_root=tmp_path / "no-such-data",
+    )
+    scored = {r["name"]: r["scores"]["end_to_end"] for r in report["synthetic"]}
+
+    assert "columns" not in scored["tx-whitespace"]
+    assert "columns" not in scored["tx-constant-col"]
+    # d18, d25: the extra label left, still_there = 1, recall 0/1 = 0.0
+    # compound-hard: left = {}, recall 1/1 = 1.0
+    assert {name: scored[name].get("columns") for name in _COLUMN_DATASETS} == {
+        "tx-header-damage": {"planted": 1, "removed": 0, "recall": 0.0},
+        "tx-dup-column": {"planted": 1, "removed": 0, "recall": 0.0},
+        "tx-compound-hard": {"planted": 1, "removed": 1, "recall": 1.0},
+    }
+
+    monkeypatch.setattr(bench_run, "run", lambda **kwargs: report)
+    assert bench_run.main(["--smoke"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    column_lines = [line for line in lines if line.startswith("columns removed:")]
+    # mean over the 3 that plant columns = (0 + 0 + 1)/3 = 0.333, of 5
+    assert column_lines == [
+        "columns removed: recall mean 0.333 over 3 of 5 that plant columns"
+    ], lines

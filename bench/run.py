@@ -14,6 +14,7 @@ import argparse
 import json
 import sys
 import warnings
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -56,6 +57,13 @@ def _check_invariants(pristine, dirty, truth) -> None:
             raise InvariantViolation(f"{truth.base}: oracle row recall != 1.0")
         if (noop.get("rows") or {}).get("recall") != 0.0:
             raise InvariantViolation(f"{truth.base}: no-op row recall != 0.0")
+    # so does a planted extra column (a label dirty holds that pristine
+    # lacks): counted here on its own, so a scorer that drops the block fails
+    if Counter(dirty.columns) - Counter(pristine.columns):
+        if (oracle.get("columns") or {}).get("recall") != 1.0:
+            raise InvariantViolation(f"{truth.base}: oracle column recall != 1.0")
+        if (noop.get("columns") or {}).get("recall") != 0.0:
+            raise InvariantViolation(f"{truth.base}: no-op column recall != 0.0")
 
 
 def _mean(values: list) -> float | None:
@@ -102,6 +110,12 @@ def _aggregate(synthetic: list[dict]) -> dict:
         if r["scores"]["end_to_end"].get("rows") is not None
     ]
     row_precisions = [s["precision"] for s in row_scores if s["precision"] is not None]
+    # the column score exists only on datasets that plant an extra column
+    column_scores = [
+        r["scores"]["end_to_end"]["columns"]
+        for r in synthetic
+        if r["scores"]["end_to_end"].get("columns") is not None
+    ]
     return {
         "datasets": len(synthetic),
         "fully_fixable_datasets": len(fixable),
@@ -129,6 +143,8 @@ def _aggregate(synthetic: list[dict]) -> dict:
         "row_recall_mean": _mean([s["recall"] for s in row_scores]),
         "row_precision_mean": _mean(row_precisions),
         "row_f1_mean": _mean([s["f1"] for s in row_scores]),
+        "column_scored_datasets": len(column_scores),
+        "column_recall_mean": _mean([s["recall"] for s in column_scores]),
     }
 
 
@@ -384,6 +400,11 @@ def main(argv: list[str] | None = None) -> int:
         f" | precision mean {_fmt(agg['row_precision_mean'])}"
         f" over {agg['row_precision_defined_datasets']}"
         f" of {agg['row_scored_datasets']} that removed a row"
+    )
+    print(
+        f"columns removed: recall mean {_fmt(agg['column_recall_mean'])}"
+        f" over {agg['column_scored_datasets']} of {agg['datasets']}"
+        " that plant columns"
     )
     return 0
 
