@@ -230,10 +230,27 @@ def test_handoff_prefers_parquet_and_records_csv_fallback(tmp_path):
     assert (tmp_path / "messy.csv").exists()
 
 
+def _nothing_planted(df):
+    """The ground truth of a frame with no corruption planted. A fake case
+    that ends with no fix landed is still scored, on the frame it leaves
+    (#257), so its truth has to be a real one."""
+    from bench.truth import GroundTruth, frame_sha256
+
+    return GroundTruth(
+        seed=0,
+        base="fake",
+        n_rows=len(df),
+        n_cols=len(df.columns),
+        frame_sha256=frame_sha256(df),
+        corruptions=[],
+    )
+
+
 def test_run_case_gives_each_case_an_isolated_skills_dir(tmp_path, monkeypatch):
     """The bench must never touch the repo's live skills/ — a retirement
     during a bench run deleted a real skill (2026-09-03). Sessions get a
-    per-case skills dir under the work folder."""
+    per-case skills dir under the work folder. The fake session lands no
+    fix, so the run ends ok_unchanged (#257)."""
     import argparse
 
     import pandas as pd
@@ -256,14 +273,15 @@ def test_run_case_gives_each_case_an_isolated_skills_dir(tmp_path, monkeypatch):
 
     monkeypatch.setattr("crivo.loop.Session", FakeSession)
     df = pd.DataFrame({"a": [1, 2]})
-    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
+    truth = _nothing_planted(df)
+    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, truth))
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
     args = argparse.Namespace(
         docker=False, max_events=10, wall_cap=5.0, human_gates="skip"
     )
 
     row = agent_run._run_case({"name": "iso_case", "diseases": [1]}, args)
-    assert row["status"] == "no_cleaned_output"
+    assert row["status"] == "ok_unchanged"
     assert row["model"]["provider"]  # provenance: every row names its model
     assert "skills_dir" in captured, "Session must get an explicit skills_dir"
     assert captured["skills_dir"].startswith(str(tmp_path / "res"))
@@ -348,7 +366,8 @@ def _fake_session(tmp_path, monkeypatch, on_init=None):
 
     monkeypatch.setattr("crivo.loop.Session", FakeSession)
     df = pd.DataFrame({"a": [1, 2]})
-    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
+    truth = _nothing_planted(df)
+    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, truth))
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
 
 
@@ -946,7 +965,8 @@ def test_run_case_passes_the_autonomy_arm_into_the_session(tmp_path, monkeypatch
 
     monkeypatch.setattr("crivo.loop.Session", FakeSession)
     df = pd.DataFrame({"a": [1, 2]})
-    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
+    truth = _nothing_planted(df)
+    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, truth))
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
     args = argparse.Namespace(
         docker=False,
@@ -992,7 +1012,8 @@ def test_run_case_without_an_autonomy_arm_pins_careful(tmp_path, monkeypatch):
 
     monkeypatch.setattr("crivo.loop.Session", FakeSession)
     df = pd.DataFrame({"a": [1, 2]})
-    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
+    truth = _nothing_planted(df)
+    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, truth))
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
     args = argparse.Namespace(
         docker=False, max_events=10, wall_cap=5.0, human_gates="skip"
@@ -1207,7 +1228,8 @@ def _recorded_fake_session(tmp_path, monkeypatch, clean, kernel=None):
     df = pd.DataFrame(
         {"acct": ["00417", " 00982", "N/A"], "amount": ["1,204.50", "-999", "88.10"]}
     )
-    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
+    truth = _nothing_planted(df)
+    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, truth))
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
     return made, FakeClient
 
@@ -2206,7 +2228,8 @@ def test_a_case_over_its_cap_aborts_and_no_later_call_reaches_the_provider(
         assert "00417" not in str(refusals[0])
         assert row.get("cost_usd") == pytest.approx(reached * PER_CALL_USD)
     else:
-        assert not row["status"].startswith("aborted"), "a case under its cap aborted"
+        # the fake flow lands no fix: a finished run, not an abort or an error
+        assert row["status"] == "ok_unchanged", "a case under its cap did not finish"
         assert refusals == []
         if cap is not None:
             assert row.get("cost_usd") == pytest.approx(ATTEMPTS * PER_CALL_USD)
@@ -2251,7 +2274,7 @@ def test_a_priced_case_whose_spend_cant_be_read_fails_closed(
         assert len(refusals) == ATTEMPTS - reached, "a later call was not refused"
         assert row.get("cost_usd", "absent") is None, "an unread spend is not 0"
     else:
-        assert not row["status"].startswith("aborted"), "a faux case at $0 aborted"
+        assert row["status"] == "ok_unchanged", "a faux case at $0 did not finish"
         assert refusals == []
         assert row.get("cost_usd") == 0.0
 
@@ -2369,7 +2392,7 @@ def test_an_unread_call_on_a_limited_price_is_charged_its_bound_and_the_case_goe
 
     assert len(calls) == ATTEMPTS, "a bounded call stopped the case's later calls"
     assert refusals == []
-    assert not row["status"].startswith("aborted"), "a case under its cap aborted"
+    assert row["status"] == "ok_unchanged", "a case under its cap did not finish"
     got = _bounded_row(row)
     assert got["cost_usd"] is None, "a bounded spend was reported as measured"
     assert got["cost_bounded_calls"] == bounded
@@ -2538,7 +2561,7 @@ def test_unread_calls_are_bounded_by_the_largest_messages_sent(
     row = agent_run._run_case({"name": "acct_case", "diseases": [6]}, args)
 
     assert len(calls) == 3
-    assert not row["status"].startswith("aborted"), row["status"]
+    assert row["status"] == "ok_unchanged", "a case under its cap did not finish"
     got = _bounded_row(row)
     assert got["cost_usd"] is None
     assert got["cost_bounded_calls"] == 2
@@ -2593,3 +2616,252 @@ def test_more_unread_spans_than_calls_sent_fails_closed_even_with_a_limit(
     got = _bounded_row(row)
     assert got["cost_usd"] is None
     assert got["cost_bound_usd"] is None, "spend no bound covers was given a number"
+
+
+def _corpus_case(tmp_path, monkeypatch, name, clean=lambda session: iter(())):
+    """The SMOKE entry `name`, built by the real corpus.build, run through the
+    recorded FakeSession: `clean(session)` is the whole CLEAN flow and lands
+    no fix, so the session writes no cleaned file. Under the faux provider."""
+    from bench import corpus
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    build = corpus.build
+    _recorded_fake_session(tmp_path, monkeypatch, clean)
+    monkeypatch.setattr(agent_run.corpus, "build", build)  # the real case's truth
+    return next(e for e in corpus.SMOKE if e["name"] == name)
+
+
+@pytest.mark.parametrize(
+    "name, part",
+    [
+        # the amount column stringified, no cell of it repaired
+        pytest.param("tx-money-strings", "repair", id="d01 cells"),
+        # 25 padded txn_id cells, none repaired
+        pytest.param("tx-whitespace", "repair", id="d06 cells"),
+        # 25 exact duplicates appended past the cell grid, none removed
+        pytest.param("tx-dup-rows", "rows", id="d09 rows"),
+    ],
+)
+def test_a_run_that_fixes_nothing_is_scored_on_the_frame_it_leaves(
+    tmp_path, monkeypatch, name, part
+):
+    """Regression for #257. A session that ends normally with no fix landed
+    writes no cleaned file, and the bench wrote the run down as
+    no_cleaned_output with no scores, so a finding left for a person, one
+    only flagged and a fix the referee rejected all read the same. The user
+    is left with the dirty frame, so the run is ok_unchanged and scored on
+    that frame. It still missed what was planted (no cell repaired, no
+    planted row removed), so it is not solved."""
+    from bench import consistency, corpus
+    from bench.score import score_end_to_end
+
+    entry = _corpus_case(tmp_path, monkeypatch, name)
+
+    row = agent_run._run_case(entry, _record_args(tmp_path, record=None))
+
+    assert row["status"] == "ok_unchanged"
+    pristine, dirty, truth = corpus.build(entry)
+    assert row["scores"] == score_end_to_end(pristine, dirty, dirty, truth)
+    assert row["scores"][part]["recall"] == 0.0
+    assert row["scores"][part]["f1"] == 0.0
+    assert not consistency.solved(row), "a run that fixed nothing was solved"
+
+
+def _over_budget_on_its_last_call(session):
+    """A CLEAN flow whose one model call crosses a $0.01 cap ($0.0346 under
+    _billed_faux) and which then ends with no event, so `_drive` returns and
+    the abort comes from the check after it."""
+    from crivo import llm
+
+    "".join(llm.generate([{"role": "user", "content": "fix d06 on txn_id"}]))
+    yield from ()
+
+
+def _endless(session):
+    from crivo.events import StreamText
+
+    while True:
+        yield StreamText("stdout", ".")
+
+
+def _raises(session):
+    raise KeyError("txn_id")
+    yield  # a generator, as the CLEAN flow is
+
+
+def _then_returns(*events):
+    """A CLEAN flow that yields `events` and returns normally, as
+    Session.clean does on its own failures: a Notice, then a plain return."""
+
+    def clean(session):
+        # not `yield from`: _drive sends a gate its answer, and a tuple's
+        # iterator has no send()
+        for event in events:  # noqa: UP028
+            yield event
+
+    return clean
+
+
+def _save_failed(session):
+    """A fix landed, then the cell that saves the cleaned frame failed:
+    `_write_cleaned` still writes the lineage (stats.saved false), and no
+    parquet is there. The flow then ends normally."""
+    import json
+    from pathlib import Path
+
+    from crivo.detect import SLUGS
+
+    yield _fix_notice("fixed", 1)
+    cleaned = Path(session.session_dir) / "cleaned"
+    cleaned.mkdir(parents=True, exist_ok=True)
+    record = {
+        "finding": {"disease": 6, "slug": SLUGS[6], "columns": ["txn_id"]},
+        "status": "fixed",
+        "attempts": 1,
+    }
+    lineage = {
+        "source": {"variable": "df"},
+        "session": "fake",
+        "fixes": [record],
+        "stats": {"shape": [250, 9], "saved": False},
+    }
+    (cleaned / "df.lineage.json").write_text(json.dumps(lineage))
+
+
+def _notice(kind, text):
+    from crivo.events import Notice
+
+    return Notice(kind, text)
+
+
+def _fix_notice(status, attempts):
+    """The Notice the loop yields once a d06 fix is settled (Session._fix)."""
+    from crivo.detect import SLUGS
+
+    return _notice("fix", f"{SLUGS[6]}: {status} ({attempts} attempts)")
+
+
+@pytest.mark.parametrize(
+    "clean, knobs, status",
+    [
+        pytest.param(
+            _endless, {"max_events": 3}, "aborted: event cap 3 hit", id="event cap"
+        ),
+        pytest.param(
+            _over_budget_on_its_last_call,
+            {"per_case_usd": 0.01},
+            "aborted: per-case budget",
+            id="over budget on the last call",
+        ),
+        pytest.param(_raises, {}, "error: KeyError: 'txn_id'", id="error"),
+        # the loop's own failures: a Notice, then a normal return
+        pytest.param(
+            _then_returns(_notice("error", "diagnosis failed: kernel timed out")),
+            {},
+            "no_cleaned_output",
+            id="diagnosis failed",
+        ),
+        pytest.param(
+            _then_returns(_notice("kernel_died", "kernel exited (signal 9)")),
+            {},
+            "no_cleaned_output",
+            id="kernel died",
+        ),
+        pytest.param(
+            _then_returns(_notice("llm_error", "TimeoutError: no bytes in 90s")),
+            {},
+            "no_cleaned_output",
+            id="model error, no cap",
+        ),
+        pytest.param(_save_failed, {}, "no_cleaned_output", id="save failed"),
+    ],
+)
+def test_an_aborted_or_failed_run_keeps_its_status_and_gets_no_scores(
+    tmp_path, monkeypatch, clean, knobs, status
+):
+    """Regression for #257. Only a session that really completed is scored
+    on the frame it leaves. A run cut by a cap (the dollar cap crossed on the
+    last call included: its flow ends normally, and the abort comes after)
+    or one that raised keeps its status. A flow that failed and still
+    returned normally (a failed diagnosis, a dead kernel, a model error, a
+    fix whose save failed, leaving lineage but no parquet) did not leave the
+    user the dirty frame by choice, so it stays no_cleaned_output. None of
+    them has scores. On a real case with a real truth."""
+    if "per_case_usd" in knobs:
+        _billed_faux(monkeypatch)
+    entry = _corpus_case(tmp_path, monkeypatch, "tx-whitespace", clean)
+
+    row = agent_run._run_case(entry, _record_args(tmp_path, record=None, **knobs))
+
+    assert row["status"] == status
+    assert "scores" not in row, "a run that did not complete was scored"
+
+
+def _human_gate_left_for_a_person():
+    from crivo.detect import SLUGS
+    from crivo.events import GateRequest
+
+    code = "def fix_whitespace(df):\n    df['txn_id'] = df['txn_id'].str.strip()\n"
+    return GateRequest(code, 1, title=f"fix {SLUGS[6]} on txn_id", grade="HUMAN")
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        pytest.param(
+            [_notice("skip", "cell skipped — the turn ends with no answer")],
+            id="a skipped cell",
+        ),
+        pytest.param(
+            [
+                _human_gate_left_for_a_person(),
+                _fix_notice("skipped", 1),
+            ],
+            id="a HUMAN gate left for a person",
+        ),
+        pytest.param(
+            [_fix_notice("failed", 3)],
+            id="a fix the referee rejected",
+        ),
+        pytest.param(
+            [_notice("nudge", "malformed response — free retry")], id="a nudge"
+        ),
+    ],
+)
+def test_a_run_that_lands_no_fix_past_a_harmless_notice_is_still_scored(
+    tmp_path, monkeypatch, events
+):
+    """#257, the pin beside the failed flows: a Notice that is part of a run
+    completing (a skipped cell, a judgement call left for a person, a fix the
+    referee rejected, a nudge) is not a failure. Such a run lands no fix and
+    still ends ok_unchanged, scored on the dirty frame."""
+    from bench import corpus
+    from bench.score import score_end_to_end
+
+    entry = _corpus_case(tmp_path, monkeypatch, "tx-whitespace", _then_returns(*events))
+
+    row = agent_run._run_case(entry, _record_args(tmp_path, record=None))
+
+    assert row["status"] == "ok_unchanged"
+    pristine, dirty, truth = corpus.build(entry)
+    assert row["scores"] == score_end_to_end(pristine, dirty, dirty, truth)
+
+
+def test_a_recorded_run_that_fixes_nothing_puts_its_scores_in_the_cassette(
+    tmp_path, monkeypatch
+):
+    """Regression for #257. The cassette's outcome is the row's: a run that
+    fixes nothing is recorded as ok_unchanged with the scores the row has,
+    and with no cleaned frame to fingerprint, since none was written."""
+    import json
+
+    entry = _corpus_case(tmp_path, monkeypatch, "tx-whitespace")
+    rec_dir = tmp_path / "cassettes"
+    rec_dir.mkdir()
+
+    row = agent_run._run_case(entry, _record_args(rec_dir))
+
+    outcome = json.loads((rec_dir / "tx-whitespace.json").read_text())["outcome"]
+    assert outcome["status"] == "ok_unchanged"
+    assert outcome["scores"] == json.loads(json.dumps(row["scores"]))
+    assert outcome["cleaned_sha256"] is None

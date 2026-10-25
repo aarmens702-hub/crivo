@@ -42,6 +42,11 @@ RESULTS_DIR = Path("bench/results/agent")
 DEFAULT_MAX_EVENTS = 8000
 DEFAULT_WALL_CAP = 300.0
 
+# Notice kinds that mean the CLEAN flow failed and still returned normally
+# (docs/API-CONTRACT.md, "Session events"). A model error counts: the run did
+# not complete as meant, so the frame it leaves is not one it chose (#257).
+FAILED_NOTICES = ("error", "kernel_died", "llm_error")
+
 # The env flags that change the clean flow (crivo/loop.py). A cassette's arm
 # keeps each as set when the case started (None when unset), so a replay can
 # set them back.
@@ -88,6 +93,7 @@ def _drive(
     gates: list | None = None,
     human_gates: str = "skip",
     over_cap=None,
+    failures: list | None = None,
 ) -> int:
     """repl._drive, headless: run plain gates, swallow the rendering.
 
@@ -99,8 +105,12 @@ def _drive(
     admission (title "admit skill …").
 
     `over_cap()`, when given, is asked on each event after the event and wall
-    caps: a reason (the per-case dollar cap's, EV9) aborts the case with it."""
-    from crivo.events import GateDecision, GateRequest
+    caps: a reason (the per-case dollar cap's, EV9) aborts the case with it.
+
+    `failures`, when given, gets the kind of each Notice that says the flow
+    failed and still returned normally (#257: a failed load or diagnosis, a
+    dead kernel, a model error)."""
+    from crivo.events import GateDecision, GateRequest, Notice
 
     events = 0
     try:
@@ -118,6 +128,12 @@ def _drive(
                 gen.close()
                 raise CaseAborted(over, events)
             answer = None
+            if (
+                failures is not None
+                and isinstance(event, Notice)
+                and event.kind in FAILED_NOTICES
+            ):
+                failures.append(event.kind)
             if isinstance(event, GateRequest):
                 approved = human_gates == "approve" and not event.title.startswith(
                     ("test skill ", "admit skill ")
@@ -632,6 +648,7 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     }
     t0 = time.monotonic()
     gates: list = []
+    failures: list = []  # FAILED_NOTICES kinds the flow yielded (#257)
     # T1.5: per-case telemetry file, per arm; the generate() calls run in
     # this host process and read CRIVO_TELEMETRY per call (crivo/telemetry.py)
     suffix = _arm_suffix(args)
@@ -695,15 +712,25 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
                 gates=gates,
                 human_gates=human_gates,
                 over_cap=over_cap,
+                failures=failures,
             )
             if over_cap is not None and over_cap():  # crossed on the last call
                 raise CaseAborted(over_cap(), row["events"])
-            cleaned_path = Path(session.session_dir) / "cleaned" / "df.parquet"
+            cleaned_dir = Path(session.session_dir) / "cleaned"
+            cleaned_path = cleaned_dir / "df.parquet"
             if cleaned_path.exists():
                 cleaned = pd.read_parquet(cleaned_path)
                 row["scores"] = score_end_to_end(pristine, dirty, cleaned, truth)
-            else:
+            elif failures or (cleaned_dir / "df.lineage.json").exists():
+                # #257: the flow failed and still returned (a failed
+                # diagnosis, a dead kernel, a model error, or lineage with no
+                # parquet: a save that failed), so it is not scored
                 row["status"] = "no_cleaned_output"
+            else:
+                # #257: no fix landed, so the user is left with the dirty
+                # frame; score that, so a held case reads apart from a miss
+                row["scores"] = score_end_to_end(pristine, dirty, dirty, truth)
+                row["status"] = "ok_unchanged"
         except CaseAborted as exc:
             row["status"] = f"aborted: {exc}"
             abort_events = exc.events
