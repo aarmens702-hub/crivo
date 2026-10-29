@@ -2,60 +2,71 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Claude Code's own memory lives on one laptop only, so anything worth keeping goes here. Update it at the end of each session (Claude: do it as part of wrapping up).
 
-*Last updated: 2026-10-18 (night), Mac session.*
+*Last updated: 2026-10-29, Mac session. crivo is paused at Aarmen's request: no agents or paid runs are going.*
 
 ## Where things are
 - **The repo is `github.com/aarmens702-hub/crivo`** (renamed from `analyst-agent` on 2026-10-14; the old URLs redirect). MIT. Not on PyPI yet.
-- **Branches:** `dev` is the workspace and `main` is what the public sees, as of 2026-10-14 (the EDISON workflow: `/start-task`, `/ship`, `/promote`). Before that everything went straight to `main`.
-- **The last code work was 2026-09-07** (wave 1.5, commit `5adec38`). 2026-10-14 was docs and process only: the README rebuild, the repo rename, the GitHub Action fixed to install from its own checkout, and this workflow.
-- **2026-10-17:** a five-reviewer code review of `dev` found Stage A larger than planned (a fresh install cannot start the analyst; the MCP server cannot start on mcp 1.x; every Claude call fails on current models; `crivo diagnose` calls a JSON file clean; PII leaks through four shareable outputs). Stage A is filed as issues #6 to #43 plus #3 (`specs/2026-10-17-stage-a-stabilize.md`). Work types for agentic work landed (AGENTS.md, "Work types").
-- **Tests:** about 1,283 passing on `dev`, keyless and offline, about 78 s. CI runs ruff, pytest and the bench smoke on Linux and macOS for `dev`, `main` and PRs.
-- **Bench, deterministic mode** (2026-09-07, 1,450 synthetic + 4 external datasets): detection micro-F1 0.731, repair F1 0.923 (where defined), survived verification 0.673. Full tables in `bench/RESULTS.md`. The smoke corpus is now 31 cases (`tx-case-spelling` added by #25); on `dev` it reads detect micro-F1 0.769, repair F1 0.899 over 5 of 31, survived 0.717 over 15 of 31.
+- **Branches:** `dev` is the workspace and `main` is what the public sees (`/start-task`, `/ship`, `/promote`).
+- **`main` is v0.2.0** (Stage A, promoted 2026-10-17). `dev` is 52 commits ahead of it: the eval tooling, the first Stage 0 rows and the fixes listed below. There has been no promotion since.
+- **Tests:** 2,665 on `dev`, keyless and offline. CI is green on `dev` at `d90949e`.
+- **Bench smoke on `dev`** (measured 2026-10-29 at `d90949e`, 31 cases): detect micro-F1 0.769; repair F1 0.562 over 8 of 31 (3 more are undefined by design); survived 0.717 over 15 of 31. Repair F1 reads lower than the 0.899 of 2026-10-17 because #86 scores a measured zero as 0 instead of leaving the case out. Since #256 and #263 the smoke also scores removals: rows removed recall 0.000 over the 5 cases that plant rows, columns removed recall 0.333 over the 3 that plant columns.
+- **The published numbers** (README, `bench/RESULTS.md`) are still the 2026-09-07 full run: detection micro-F1 0.731, repair F1 0.923, survived 0.673. They predate the honest scorer.
 
 ## To do, in order
-**The plan is `specs/2026-10-14-the-plan.md`**. Aarmen started Stage A on 2026-10-17 and accepted every Stage A decision (D2: `notices` always present; D3: remove the governance file). It supersedes every earlier roadmap and maps every old item, every open defect (54 defects, 7 hardening items, defined in `specs/2026-10-14-plan-inventory.md`) and every finding of four completeness audits to a stage. The design of record for what gets built is `specs/2026-10-14-crivo-v2-design.md`.
+**The plan is `specs/2026-10-14-the-plan.md`**, the only sequencing authority. `specs/2026-10-14-plan-inventory.md` defines its ids, and each stage has a WRAP spec. The design of record for what gets built is `specs/2026-10-14-crivo-v2-design.md`.
 
 | Stage | What | State |
 |---|---|---|
-| A | Stabilize what ships: broken paths (httpx, key gating, the Claude API), PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases. 38 issues, #6 to #43 plus #3, in three waves | **Done:** 39 of 39, on `main` as v0.2.0 (2026-10-17) |
-| Eval tooling | Record and replay, the eval ledger, `/eval`, the eval-author and `guard_reads`, `check_locks` and `leak_scan` in CI, gates by work type. 20 issues, #64 to #83 (`specs/2026-10-17-eval-tooling.md`) | **In progress: 13 of 20 shipped** (#64-#72, #74, #75, #81); ED5, ED7, ED8 decided 2026-10-18 |
-| 0 | The foundation: 0a honest scorer (repair F1 is really 0.596), loop 1 (autoresearch red-teams the scorer), 0b the referee (closes the reproduced bypass), 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps | **Filed 2026-10-17:** `specs/2026-10-17-stage-0-foundation.md`, 162 rows: #86 to #232 plus 15 open issues folded in. all 38 owner decisions taken as recommended (2026-10-18), so no row waits on a decision. Starts after the eval tooling |
+| A | Stabilize what ships: broken paths, PII leaks, false receipts, false docs claims, SECURITY.md, tagged Action releases (#3, #6 to #43) | **Done:** on `main` as v0.2.0 (2026-10-17) |
+| Eval tooling | Record and replay, the eval ledger, `/eval`, the eval-author and `guard_reads`, `check_locks` and `leak_scan` in CI, gates by work type (#64 to #83, `specs/2026-10-17-eval-tooling.md`) | **18 of 20 shipped.** Open: #78 (the A/A run ran but measured no floor; waits for Aarmen) and #79 (the first real-model cassettes) |
+| 0 | The foundation: 0a honest scorer, loop 1 (autoresearch red-teams the scorer), 0b the referee, 0c detector honesty, 0d containment without Docker, versioned formats, config, cost caps (`specs/2026-10-17-stage-0-foundation.md`, #86 to #232) | **Started 2026-10-23.** Shipped: #86 and #96 from the stage list, plus fixes found on the way (#44 to #46, #56, #242 part 1, #253, #255 to #258, #263). 141 of #86 to #232 still open |
 | 1 | A backed answer over a file, for people and agents: toolbox, DuckDB and text-to-SQL over files, charts and descriptive analysis, contracts, clarify, abstain, MCP on the new spec, design partners, model bake-off | |
 | 2 | Two tracks in parallel. 2a the analyst toolkit: statistics, drivers, segments and cohorts, forecasting, anomalies, dashboards. 2b learning: System 1 as the loop's first filter, skills, the glossary, saved answers, `crivo verify`, the nightly skill loop | |
 | 3 | Backed SQL and scale: databases, pushdown, SQL checks, relational and temporal checks | |
 | 4 | Labelling at scale, only if stage 1 shows the gap | |
 | 5 | The release: plugin, PyPI with trusted publishing, docs site, platform matrix | |
 
-25 owner decisions are listed in the plan with the stage each is needed by.
+### Paused 2026-10-29: pick up here
+**1. Finish what's built.** These live in local worktrees on the Mac only, so finish them or push the branches before switching machines.
+- **#254**, the git-verb hook: `.worktrees/254`, branch `aarmen/254-git-verb-hook`, 2 commits. Built, its 515 hook tests pass, not reviewed. Next: the reviewer, then `/ship`.
+- **#260**, emoji column names: `.worktrees/260`, branch `aarmen/260-astral-column-names`, 1 commit. Built, its 80 verify tests pass, not reviewed. Next: the reviewer, then `/ship`.
+- **#78**, the A/A noise floor: `.worktrees/78`, branch `aarmen/78-ev15-aa-floor`, the register and result ledger commits (`check_locks` clean). The run stopped on its budget guard. Arm A ran 89 of 93 runs and arm B ran none, so there is no floor. Two causes: 15 cut-off calls were each charged a bound of about $1.5 to $1.7, because crivo sets no max_tokens and the bound falls back to the provider's 384k output limit; and the arms run one after the other, so a stop leaves the pair unequal. Measured spend was $6.64 at peak rates. Next: Aarmen drops it (recommended) or adopts it, then `bench.eval decide`, then `/ship`'s experiment step ships the ledger rows only.
 
-### Next, 2026-10-19: pick up here
-- **Eval tooling, 13 of 20 shipped** to `dev`: #64 served model, #65 `--record`, #66 replay and the cassette scan, #67 the ledger, #68 `guard_reads`, #69 the eval-author agent, #70 agent wiring, #71 the eval runner (`bench.eval`), #72 dollar caps (only the faux price ships; a real price needs its pricing-page URL and date), #74 `check_locks` in CI, #75 `leak_scan` in CI, #81 architecture docs. Next, in order: #73 (`/eval` skill; first route the runner's per-case Session output to a log, see the issue), #76, #77 (run `check_locks` after the rebase, before the push), #80, #82, then #78 (the paid A/A run: real prices first, then `register --dry`, then Aarmen names the cap) and #79; #83 (plan rule 10, ED8 decided).
-- **Two worktrees are open locally (push or finish before switching machines):**
-  - `.worktrees/235` (branch `aarmen/235-eval-author-git`, a WIP commit): the eval-author's `git -C <worktree>` access, worktree-only pytest paths, the inventory and stage specs off its reads, and git's implicit `--no-index` closed (round 2). Next step: the reviewer's final pass, then /ship.
-  - `.worktrees/237` (branch `aarmen/237-skill-pin`, committed, reviewed SHIP IT): admitted skills pinned by sha256 and refused at load if edited. Core (`library.py` +41, `loop.py` +10): **waits for Aarmen's yes**, then rebase and /ship.
-- **Shipped 2026-10-18 besides the eval tooling:** #84 and #85 (security, core, Aarmen's yes: model-written code never runs before approval, in a preview or a proposed skill's checks), #63 (README tail), #236 (the Stop hook allows 280 s).
-- **Decisions, 2026-10-18:** Aarmen took every Stage 0 recommendation (38) plus ED5, ED7, ED8 and #237's pin. Every Stage 0 row is unblocked.
-- **Follow-ups open:** #233 (recorder gaps), #238 (export skips the pin check). #234 came from an outside account and overlaps #117 (PF9).
-- **Process notes:** the suite is about 1,970 tests, about 2.5 minutes; the Stop hook allows 280 s. Agent definitions load at session start, so the eval-author agent type exists in sessions started after #69. guard_reads now runs on builders and test-writers (#70): a paid command needs `CRIVO_PROVIDER=faux` on it.
-- **Stage 0 is filed** (`specs/2026-10-17-stage-0-foundation.md`): 162 rows, #86 to #232 plus 15 folded issues, all unblocked; it starts when the eval tooling is done.
+**2. Aarmen's calls.**
+- **#51** conflicts with S0-D11 (no model-written fix cell runs headless before 0d). Recommended: keep S0-D11 and add a deterministic exact-dedup fixer. Since #255, `dev` lets a headless clean apply a model-written dedup that verifies; `main` is unaffected. `.worktrees/51` exists but holds no work.
+- **#268:** does an answer holding a number no cell printed read partly backed or not backed? The issue builds to partly backed. Confirm before it ships.
+- **#78:** drop or adopt (above).
 
-### Stage A, done 2026-10-17
-- **All 39 shipped to `dev` and closed:** #3, #6 to #43. The last six (#13, #19, #21, #25, #26, #33) landed in the late session once a restart cleared tdd-guard. Aarmen gave the core yes for #13, #25 and #26 in session. CI green on every push.
-- **Next:** `/promote` to move Stage A to `main` (the demo story now reads `2 left for review` on the example: d09, and d15 outliers once revenue is numeric), then Stage 0.
-- **Bench moves this session:** #26 raised smoke detect micro-F1 0.728 to 0.761 and survived 0.673 to 0.696 (`units-numeric-sentinels`). #25 added `tx-case-spelling` (written by an author who did not read detect.py or autoclean.py) and raised repair F1 0.854 to 0.899 and survived 0.683 to 0.717 on the same 31 cases.
-- **Decided 2026-10-17 (recorded on the issues):** #25 clean lists every finding left after its fixes, matched by identity (disease, grade, leading column), with "found once the fixes ran" for one the fixes uncovered and "still present after the fixes ran" for a pre-fix one; #19 CleanSummary.__repr__ masks a deferred reason; #20 True vs 1 is not a change; #37, #39, #30 MCP description changes ship unmeasured (behaviour type, no eval tooling yet). Aarmen asked to work autonomously: take the recommended option, record it, hold only core diffs.
-- **Follow-ups filed (not Stage A):** #44 to #54 (earlier); #55 a value fix on a d18-renamed column reads as removed; #56 the URL lineage stamp keeps credentials; #57 reader edge cases (`C://`, `file://` with a query, chunked URL reads); #58 Claude path: cut-off, all-thinking or too-old-model replies (core); #59 the stale `load_url` comment in loop.py and the same-shape stamp gap (core); #60 the clean card hides a masked row's change, repr rescans the frame.
-- **Changelog fragments:** `/ship` writes `changes/<n>.<kind>.md`. #3 is maintainer-facing and has none.
+**3. Proposed, not filed.**
+- Interleave the arms run by run in `bench/eval.py`, so a stop leaves the pair equal.
+- Set max_tokens on crivo's model calls (`llm.py`, core), so an unread call's bound is small.
+- Three cases in #78 end straight after the load, with no model call on any run. Find out why.
+- An experiment on DeepSeek's thinking effort (see "What we've learned"). Changing it is a behaviour change in core `llm.py`.
+- The PROV-O row that lands before #158.
+
+**4. Filed, not started:** #259, #261, #262 (core), #264, #265 (core), #266, #267, #268 (core). Older and still open: #241, #251 (first find why #242's Linux `/proc` test skips on Ubuntu CI), #252.
+
+**5. Then:** Stage 0 in the wave order of its spec. `dev` is 52 commits past `main`, so a `/qa-pass` and a `/promote` are due once #254 and #260 land.
+
+**Decided 2026-10-24 and 2026-10-25:**
+- **A verified fix runs without asking** (Aarmen, for #51's dedup). Prefer the more autonomous grade when the referee can verify the fix and the original file stays untouched.
+- **Number grounding moves into Stage 0, 0b wave 4:** #267 (a keyless matcher for numbers in an answer that no recorded output holds) and #268 (the card verdict says so). The Stage 0 spec still lists answer grounding under Stage 1; update it when #267 starts.
+- **PROV-O lineage names now**, before #158's version 1 has readers (comment on #158).
+- **The 2026-10-23 research** is in `docs/research/2026-10-23-*`. Its open calls are in `docs/research/2026-10-23-four-deep-dives-summary.md`, whether the Error Drop Rate (#244) is published among them.
 
 ## What we've learned
 - **The bench measures variance, not coverage.** Wave 1.5's regressions scored perfectly clean because the smoke corpus contains none of the shapes involved. A change that handles a new shape needs a corpus case, or the bench can't see it.
 - **Refusing looks like rigour.** Teaching fixers to refuse rather than mangle was right, then the risk inverted: crivo began declining input it should repair, and the lower survival number read as caution. Pin the legitimate repair beside every refusal.
+- **A held run isn't caution when the truth expects a repair.** Of #78's 18 runs that wrote no output, 9 were crivo rightly leaving a call to a person, which the bench scored as a fail (fixed by #257); 6 were detection gaps, so the model was never asked; 3 were an AUTO fix that failed its re-check every time.
 - **A docstring is not a fix.** Several packets described a hole as closed while closing part of it. Only a test that proves the whole claim counts.
+- **DeepSeek V4 thinks by default, at high effort.** In #78, calls averaged 8.7k output tokens, nearly all hidden thinking, and took 1 to 5 minutes each, so a case of 6 to 10 turns can't finish inside a 600 s cap. Thinking mode ignores temperature, so crivo's temperature 0 does nothing there and runs aren't deterministic. crivo sends neither an effort setting nor max_tokens. DeepSeek's peak hours are 01:00 to 04:00 and 06:00 to 10:00 UTC on weekdays.
+- **Running agents in parallel:** keep about 6 to 8 going; with 8, a full suite takes about 8 minutes. Scouts have no shell, so paste the issue text into their prompt. A test-writer once put real values from an external dataset in a fixture, so reviewers check fixtures against `data/external`.
 - **The verify-or-revert loop has no direct competitor.** Other "verified answer" schemes check inputs before generation, never outputs (landscape research, 2026-08-31).
 - **Autonomy pays on the verifiable grades and harms on judgement calls.** The ceiling arm repaired fewer cells (250 vs 500) when allowed to decide person-grade findings (`specs/2026-09-05-autonomy-default-design.md`).
 
 ## How Aarmen likes to work
 - **Aarmen decides** the plan, the architecture, the contract and the taxonomy. Core files are drafted as small reviewed diffs, never landed unattended.
+- **Ask him less.** Make the small calls, record them on the issue, and tell him after. Bring the calls that are his as one short numbered list, each with a recommendation. Core diffs and paid spend still need his explicit yes, with a cap he names.
 - **Lean process.** Brainstorm for design approval on architectural work, then build. No separate plan documents unless he asks; the issue or WRAP spec is the design.
 - **Strong models for subagents.** Never downgrade an agent's model to save tokens.
 - **Honest status.** Say what ran, what passed and what was skipped. Never claim a fix verified without running it.
