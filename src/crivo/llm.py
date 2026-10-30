@@ -6,13 +6,18 @@ read, so a model that streams reasoning in `reasoning_content` never leaks
 thinking into the tag parser.
 """
 
+import math
 import os
 import queue
 import re
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
+from datetime import UTC
+from email.utils import parsedate_to_datetime
+from typing import TypedDict
 
+from openai import APIConnectionError as _OpenAIAPIConnectionError
 from openai import OpenAI, Timeout
 
 # Overflow shapes for the providers generate() actually speaks to, each with
@@ -90,6 +95,15 @@ TEMPERATURE = 0.0  # the OpenAI-compatible providers only
 # can think without bound. This is the ceiling on one call, start to finish.
 MAX_CALL_S = 420
 STALL_S = 90  # no bytes at all for this long means the stream is dead
+MAX_PROVIDER_ATTEMPTS = 3
+RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504, 529})
+
+
+class _StreamState(TypedDict):
+    yielded: bool
+    watchdog_error: bool
+    usages: list[object]
+    models: list[str]
 
 
 def stall_budget_s() -> float:
@@ -144,6 +158,7 @@ def _get_client() -> OpenAI:
         _client = OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=BASE_URL,
+            max_retries=0,
         )
     return _client
 
@@ -155,7 +170,10 @@ def _get_claude_client():
         # needs) the anthropic package at import time
         import anthropic
 
-        _claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        _claude_client = anthropic.Anthropic(
+            api_key=os.environ["ANTHROPIC_API_KEY"],
+            max_retries=0,
+        )
     return _claude_client
 
 
@@ -179,6 +197,7 @@ def _get_openai_client() -> OpenAI:
         _openai_client = OpenAI(
             api_key=os.environ.get("CRIVO_API_KEY", "local-no-key"),
             base_url=base_url,
+            max_retries=0,
         )
     return _openai_client
 
@@ -254,6 +273,183 @@ def _claude_usage(usages: list) -> dict:
     }
 
 
+def _retry_after_seconds(error: Exception) -> float | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    try:
+        normalized = {key.lower(): value for key, value in headers.items()}
+    except (AttributeError, TypeError):
+        return None
+
+    retry_after_ms = normalized.get("retry-after-ms")
+    if retry_after_ms is not None:
+        try:
+            delay = float(retry_after_ms) / 1000
+        except (TypeError, ValueError):
+            pass
+        else:
+            if math.isfinite(delay) and delay >= 0:
+                return delay
+
+    retry_after = normalized.get("retry-after")
+    if retry_after is None:
+        return None
+    try:
+        delay = float(retry_after)
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(retry_after)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=UTC)
+            delay = retry_at.timestamp() - time.time()
+        except (OverflowError, OSError, TypeError, ValueError):
+            return None
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return delay
+
+
+def _is_retryable_provider_error(error: Exception) -> bool:
+    if is_context_overflow(str(error)):
+        return False
+    if getattr(error, "status_code", None) in RETRYABLE_HTTP_STATUS_CODES:
+        return True
+    if isinstance(error, (_OpenAIAPIConnectionError, ConnectionError, TimeoutError)):
+        return True
+    if _provider() == "claude":
+        import anthropic
+
+        return isinstance(error, anthropic.APIConnectionError)
+    return False
+
+
+def _wait_before_retry(
+    delay_s: float,
+    started_at: float,
+    call_budget: float,
+    retry_stats: dict[str, int | float] | None = None,
+) -> Iterator[str]:
+    remaining = call_budget - (time.monotonic() - started_at)
+    if delay_s >= remaining:
+        raise TimeoutError(
+            f"retry wait of {delay_s:g}s exceeds remaining call budget ({max(remaining, 0):g}s)"
+        )
+
+    deadline = time.monotonic() + delay_s
+    waited_s = 0.0
+    try:
+        while True:
+            if _cancel.is_set():
+                _cancel.clear()
+                raise CallCancelled("model call canceled by user")
+            now = time.monotonic()
+            wait_left = deadline - now
+            if wait_left <= 0:
+                return
+            call_left = call_budget - (now - started_at)
+            if call_left <= wait_left:
+                raise TimeoutError(
+                    f"retry wait of {delay_s:g}s exceeds remaining call budget ({max(call_left, 0):g}s)"
+                )
+            wait_started = time.monotonic()
+            _cancel.wait(min(0.25, wait_left))
+            waited_s += max(0.0, time.monotonic() - wait_started)
+            if _cancel.is_set():
+                _cancel.clear()
+                raise CallCancelled("model call canceled by user")
+            yield ""
+    finally:
+        if retry_stats is not None:
+            retry_stats["crivo.retry.wait_s"] = (
+                float(retry_stats.get("crivo.retry.wait_s", 0.0)) + waited_s
+            )
+
+
+def _create_with_retries[T](
+    create: Callable[[], T],
+    started_at: float,
+    call_budget: float,
+    retry_stats: dict[str, int | float] | None = None,
+    consume: Callable[[T, _StreamState], Iterator[str]] | None = None,
+    usage_sink: Callable[[object], None] | None = None,
+    model_sink: Callable[[str], None] | None = None,
+) -> Generator[str, None, T | None]:
+    """Run a provider request, retrying failures before its first chunk.
+
+    ``consume`` lets the stream watchdog report an error from the provider's
+    iterator through the same retry budget as ``create()``. Metadata remains
+    local to an attempt until it succeeds or can no longer be retried. Once a
+    chunk reaches the caller, the attempt is committed and never replayed.
+    """
+    attempts = 0
+    while True:
+        if _cancel.is_set():
+            _cancel.clear()
+            raise CallCancelled("model call canceled by user")
+        if call_budget - (time.monotonic() - started_at) <= 0:
+            raise TimeoutError(
+                f"call budget of {call_budget:g}s expired before provider request"
+            )
+        if attempts and retry_stats is not None:
+            retry_stats["crivo.retry.attempts"] = (
+                int(retry_stats.get("crivo.retry.attempts", 0)) + 1
+            )
+        attempts += 1
+        stream_state: _StreamState = {
+            "yielded": False,
+            "watchdog_error": False,
+            "usages": [],
+            "models": [],
+        }
+        metadata_committed = False
+
+        def commit_metadata(state: _StreamState) -> None:
+            nonlocal metadata_committed
+            if metadata_committed:
+                return
+            if usage_sink is not None:
+                for usage in state["usages"]:
+                    usage_sink(usage)
+            if model_sink is not None:
+                for served_model in state["models"]:
+                    model_sink(served_model)
+            metadata_committed = True
+
+        try:
+            result = create()
+            if consume is None:
+                return result
+            yield from consume(result, stream_state)
+        except Exception as error:
+            retry = (
+                not stream_state["yielded"]
+                and not stream_state["watchdog_error"]
+                and attempts < MAX_PROVIDER_ATTEMPTS
+                and _is_retryable_provider_error(error)
+            )
+            if not retry:
+                commit_metadata(stream_state)
+                raise
+            delay = _retry_after_seconds(error)
+            if delay is None:
+                delay = 2 ** (attempts - 1)
+            try:
+                yield from _wait_before_retry(
+                    delay, started_at, call_budget, retry_stats
+                )
+            except BaseException:
+                commit_metadata(stream_state)
+                raise
+        else:
+            commit_metadata(stream_state)
+            return None
+        finally:
+            if stream_state["yielded"]:
+                commit_metadata(stream_state)
+
+
 def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str]:
     """Yield response text chunks for a chat completion.
 
@@ -261,9 +457,9 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
     The provider switch changes which client produces the stream and how one
     stream item becomes text; the watchdog around them is shared, because a
     hung stream hangs identically whoever serves it. Every call emits one
-    telemetry span (A0 R4) carrying the model asked for, duration, and, when
-    reported, the model served and usage, cache hit/miss tokens included,
-    in DeepSeek's meaning on every provider (input counts the cache hits).
+    telemetry span (A0 R4) carrying the requested and served model, duration,
+    usage when the provider reports it, and provider retry attempts and wait
+    time. Cache hit/miss tokens use DeepSeek's meaning on every provider.
     """
     from crivo import telemetry
 
@@ -278,10 +474,13 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
         "gen_ai.client.call",
         **{"gen_ai.system": _provider(), "gen_ai.request.model": requested},
     ) as extra:
+        extra["crivo.retry.attempts"] = 0
+        extra["crivo.retry.wait_s"] = 0.0
         yield from _generate(  # served id kept on arrival, so a dead call names it
             messages,
             model,
             usage_box.append,
+            extra,
             lambda m: extra.setdefault("gen_ai.response.model", m),
         )
         if _provider() == "claude":
@@ -300,9 +499,14 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
 
 
 def _generate(
-    messages: Iterable[dict], model: str | None, usage_sink, model_sink
+    messages: Iterable[dict],
+    model: str | None,
+    usage_sink: Callable[[object], None],
+    retry_stats: dict[str, int | float],
+    model_sink: Callable[[str], None] | None = None,
 ) -> Iterator[str]:
     _cancel.clear()  # before create(), so a cancel while it opens still lands
+    started_at, call_budget = time.monotonic(), call_budget_s()
     if _provider() == "faux":
         if not _faux_responses:
             raise RuntimeError(
@@ -312,7 +516,12 @@ def _generate(
         # one queued reply per call, through the same watchdog as the real
         # providers so a faux run exercises the code path callers get
         yield from _watched(
-            iter([_faux_responses.pop(0)]), lambda item: item, usage_sink, model_sink
+            iter([_faux_responses.pop(0)]),
+            lambda item: item,
+            usage_sink,
+            model_sink,
+            started_at=started_at,
+            call_budget=call_budget,
         )
         return
 
@@ -320,44 +529,84 @@ def _generate(
         msgs = list(messages)
         # anthropic takes system as a top-level param, not a message role
         system = "\n\n".join(m["content"] for m in msgs if m["role"] == "system")
-        stream = _get_claude_client().messages.create(
-            model=model or model_name(),
-            max_tokens=CLAUDE_MAX_TOKENS,
-            system=system,
-            messages=[m for m in msgs if m["role"] != "system"],
-            output_config={"effort": CLAUDE_EFFORT},
+        request = {
+            "model": model or model_name(),
+            "max_tokens": CLAUDE_MAX_TOKENS,
+            "system": system,
+            "messages": [m for m in msgs if m["role"] != "system"],
+            "output_config": {"effort": CLAUDE_EFFORT},
             # summarized, not the default omitted: its deltas are heartbeats
             # (_claude_text), so a long think sends events the stall timer
             # can see (omitted sends none)
-            thinking={"type": "adaptive", "display": "summarized"},
-            stream=True,
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "stream": True,
+        }
+        yield from _create_with_retries(
+            lambda: _get_claude_client().messages.create(**request),
+            started_at,
+            call_budget,
+            retry_stats,
+            lambda stream, state: _watched(
+                stream,
+                _claude_text,
+                usage_sink,
+                model_sink,
+                started_at=started_at,
+                call_budget=call_budget,
+                stream_state=state,
+            ),
+            usage_sink=usage_sink,
+            model_sink=model_sink,
         )
-        yield from _watched(stream, _claude_text, usage_sink, model_sink)
         return
 
     # deepseek and the generic openai provider share the wire format; only
     # which client (fixed DeepSeek endpoint vs env-configured) differs
     client = _get_openai_client() if _provider() == "openai" else _get_client()
-    stream = client.chat.completions.create(
-        model=model or model_name(),
-        messages=list(messages),
-        temperature=TEMPERATURE,
-        stream=True,
+    request = {
+        "model": model or model_name(),
+        "messages": list(messages),
+        "temperature": TEMPERATURE,
+        "stream": True,
         # the final stream chunk then carries usage, including DeepSeek's
         # prompt_cache_hit_tokens / prompt_cache_miss_tokens (A0 R4/R5)
-        stream_options={"include_usage": True},
+        "stream_options": {"include_usage": True},
         # First line of defense, not the only one: the SDK's HTTP client re-applies
         # this read timeout to every socket read for the life of the stream, so it
         # independently catches true wire silence for the real client. Confirmed
         # against a real local socket on httpx (it is not just a connect timeout);
         # httpx2, which newer SDKs use, is its successor and was not re-tested.
         # The wall-clock checks below no longer assume that is enough on its own.
-        timeout=Timeout(connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0),
+        "timeout": Timeout(connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0),
+    }
+    yield from _create_with_retries(
+        lambda: client.chat.completions.create(**request),
+        started_at,
+        call_budget,
+        retry_stats,
+        lambda stream, state: _watched(
+            stream,
+            _deepseek_text,
+            usage_sink,
+            model_sink,
+            started_at=started_at,
+            call_budget=call_budget,
+            stream_state=state,
+        ),
+        usage_sink=usage_sink,
+        model_sink=model_sink,
     )
-    yield from _watched(stream, _deepseek_text, usage_sink, model_sink)
 
 
-def _watched(stream, extract, usage_sink=None, model_sink=None) -> Iterator[str]:
+def _watched[T](
+    stream: Iterable[T],
+    extract: Callable[[T], str | None],
+    usage_sink: Callable[[object], None] | None = None,
+    model_sink: Callable[[str], None] | None = None,
+    started_at: float | None = None,
+    call_budget: float | None = None,
+    stream_state: _StreamState | None = None,
+) -> Iterator[str]:
     """Enforce the call and stall budgets around any provider's stream.
 
     Consuming the stream happens on a background thread so both budgets below
@@ -383,8 +632,10 @@ def _watched(stream, extract, usage_sink=None, model_sink=None) -> Iterator[str]
 
     threading.Thread(target=pump, daemon=True).start()
 
-    call_budget, stall_budget = call_budget_s(), stall_budget_s()
-    started = last_progress = time.monotonic()
+    call_budget = call_budget_s() if call_budget is None else call_budget
+    stall_budget = stall_budget_s()
+    started = time.monotonic() if started_at is None else started_at
+    last_progress = time.monotonic()
     try:
         while True:
             if _cancel.is_set():
@@ -394,10 +645,14 @@ def _watched(stream, extract, usage_sink=None, model_sink=None) -> Iterator[str]
             call_left = call_budget - (now - started)
             stall_left = stall_budget - (now - last_progress)
             if call_left <= 0:
+                if stream_state is not None:
+                    stream_state["watchdog_error"] = True
                 raise TimeoutError(
                     f"gave up after {call_budget:g}s of thinking with no complete reply"
                 )
             if stall_left <= 0:
+                if stream_state is not None:
+                    stream_state["watchdog_error"] = True
                 raise TimeoutError(f"gave up after {stall_budget:g}s of silence")
 
             try:
@@ -417,15 +672,23 @@ def _watched(stream, extract, usage_sink=None, model_sink=None) -> Iterator[str]
                 if usage is None:  # Claude's message_start nests it
                     usage = getattr(getattr(item, "message", None), "usage", None)
                 if usage is not None:
-                    usage_sink(usage)
+                    if stream_state is None:
+                        usage_sink(usage)
+                    else:
+                        stream_state["usages"].append(usage)
             if model_sink is not None:
                 served = getattr(item, "model", None)
                 if served is None:  # Claude's message_start nests it
                     served = getattr(getattr(item, "message", None), "model", None)
                 if isinstance(served, str) and served:
-                    model_sink(served)
+                    if stream_state is None:
+                        model_sink(served)
+                    else:
+                        stream_state["models"].append(served)
             text = extract(item)
             if text is not None:
+                if stream_state is not None:
+                    stream_state["yielded"] = True
                 yield text
     finally:
         # Tells the pump thread to stop queueing once its current `next()`
